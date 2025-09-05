@@ -1,0 +1,47 @@
+[package]
+name = "eezo-ledger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+rayon = ["dep:rayon"]
+pq44-runtime = ["dep:pqcrypto-mldsa", "dep:pqcrypto-traits"]
+metrics = ["dep:prometheus", "dep:once_cell"]
+mempool-batch-verify = []
+consensus-tests = []
+
+[dependencies]
+eezo-crypto = { path = "../crypto", version = "0.1.0" }
+eezo-serde  = { path = "../serde",  version = "0.1.0" }
+
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+bitvec = "1"
+sha3 = "0.10"
+zstd = "0.13"
+thiserror = "1"
+lru = "0.12"
+parking_lot = "0.12"
+
+# feature-gated deps
+rayon        = { version = "1.11", optional = true }
+once_cell    = { version = "1",    optional = true }
+prometheus   = { version = "0.13", optional = true }
+
+
+# PQ stack (pin to the versions we actually use)
+pqcrypto-mldsa  = { version = "0.1.2", optional = true, package = "pqcrypto-mldsa" }
+pqcrypto-traits = { version = "0.3.5", optional = true, package = "pqcrypto-traits" }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest  = "1"
+rand      = { version = "0.8", features = ["std", "std_rng"] }
+zeroize   = { version = "1", features = ["derive"] }
+
+[[bench]]
+name = "consensus_verify"
+harness = false
