@@ -1,0 +1,3 @@
+[submodule "eezo-contracts/lib/forge-std"]
+	path = eezo-contracts/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
