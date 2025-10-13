@@ -1,0 +1,17 @@
+[profile.default]
+src = "src"
+test = "test"
+libs = ["lib"]
+optimizer = true
+optimizer_runs = 200
+threads = 1
+broadcast = "broadcast"
+eth_send_raw_tx = true
+script_execution_protection = false
+fs_permissions = [
+  { access = "read", path = "./proof" },
+  { access = "read", path = "." }      # optional
+]
+
+[rpc_endpoints]
+local = "http://127.0.0.1:8545"
