@@ -1824,6 +1824,7 @@ async fn main() -> anyhow::Result<()> {
     register_t36_bridge_metrics();
     // T40.1: ensure shadow-signature counters appear on /metrics at boot
     register_t40_shadow_sig_metrics();
+	register_t40_cutover_metrics();
     // (optional) your friend says these aren’t currently called at startup:
     // safe to add here; all are idempotent
     register_t33_bridge_metrics();

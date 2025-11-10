@@ -9,6 +9,9 @@ use crate::metrics::{
     sig_shadow_success_inc,
     sig_shadow_failure_inc,
     sig_shadow_attempts_inc,
+    // T40.2 cutover metrics
+    sig_cutover_reject_old_inc,
+    sig_cutover_reject_new_inc,	
 };
 
 // Concrete schemes behind the features (match the crypto crate features).
@@ -169,7 +172,31 @@ pub struct ShadowResult {
     pub next_ok: bool,
     pub shadow_attempted: bool,
 }
+/// T40.2 helper: free-function twin of the shadow wrapper so the
+/// free `verify_rotating` can use it without a `&self`.
+pub fn verify_dual_accept_shadow(
+    state: &RotationState,
+    height: u64,
+    pubkey: &[u8],
+    msg: &[u8],
+    sig: &[u8],
+) -> ShadowResult {
+    // strict check on active
+    let active_ok = verify_with_algo(state.active_suite, pubkey, msg, sig);
 
+    // shadow on next (only if window allows and next exists)
+    let mut next_ok = false;
+    let mut shadow_attempted = false;
+    if let Some(next_suite) = state.next_suite {
+        if state.accepts(height, next_suite) {
+            shadow_attempted = true;
+            sig_shadow_attempts_inc();
+            next_ok = verify_with_algo(next_suite, pubkey, msg, sig);
+            if next_ok { sig_shadow_success_inc(); } else { sig_shadow_failure_inc(); }
+        }
+    }
+    ShadowResult { active_ok, next_ok, shadow_attempted }
+}
 /// Map an AlgoId to our public suite id (u8) for UI/telemetry/governance.
 pub fn algo_to_suite_id(id: AlgoId) -> Option<u8> {
     match id {
@@ -211,10 +238,51 @@ pub fn verify_rotating(
     sig: &[u8],
     ) -> bool
 {
-    if !state.accepts(height, algo) {
-        return false;
+    // Always compute shadow results for observability (does NOT change behavior)
+    let shadow = verify_dual_accept_shadow(state, height, pubkey, msg, sig);
+
+    let active = state.active_suite;
+    let in_window = state.dual_accept_until.map(|u| height <= u).unwrap_or(false);
+
+    match state.next_suite {
+        // rotation configured
+        Some(next) => {
+            if in_window {
+                // during window: accept active or next — but only if the requested `algo` matches
+                return match algo {
+                    a if a == active => shadow.active_ok,
+                    a if a == next   => shadow.next_ok,
+                    _ => false,
+                };
+            }
+
+            // outside window: either pre-window (new not yet valid) or post-cutoff (old no longer valid)
+            let post_cutoff = state.dual_accept_until.map(|u| height > u).unwrap_or(false);
+            if post_cutoff {
+                // after cutoff: ONLY next is valid
+                if algo == next {
+                    return shadow.next_ok;
+                }
+                // count old-suite attempts that would otherwise validate
+                if algo == active && shadow.active_ok {
+                    sig_cutover_reject_old_inc();
+                }
+                return false;
+            } else {
+                // pre-window: ONLY active is valid
+                if algo == active {
+                    return shadow.active_ok;
+                }
+                // count next-suite attempts that would otherwise validate before window opens
+                if algo == next && shadow.next_ok {
+                    sig_cutover_reject_new_inc();
+                }
+                return false;
+            }
+        }
+        // no rotation scheduled → only active allowed anywhere
+        None => (algo == active) && shadow.active_ok,
     }
-    verify_with_algo(algo, pubkey, msg, sig)
 }
 
 // -------------------- existing APIs --------------------

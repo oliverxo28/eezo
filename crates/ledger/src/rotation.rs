@@ -16,17 +16,31 @@ pub struct RotationPolicy {
 }
 
 impl RotationPolicy {
-    /// True if `suite` is acceptable at `height`.
-    /// - inside the dual-accept window: `active` or `next` are allowed
-    /// - after the window: only `active`
+    /// T40.2: returns true iff `suite` is acceptable at `height`
+    ///  - height < window_start: ONLY active
+    ///  - window_start..=dual_accept_until: active OR next
+    ///  - height > dual_accept_until: ONLY next
     pub fn accept(&self, height: u64, suite: CryptoSuite) -> bool {
-        if suite == self.active { return true; }
-        if self.is_window_open(height) {
-            if let Some(next) = self.next {
+        let active = self.active;
+        let next   = self.next;
+
+        // no rotation scheduled → only active is valid
+        let Some(next) = next else { return suite == active; };
+
+        // if we have a cutoff height, enforce it strictly (post-cutoff: new only)
+        if let Some(cut) = self.dual_accept_until {
+            if height > cut {
                 return suite == next;
             }
         }
-        false
+
+        // window not yet open → active only
+        if !self.is_window_open(height) {
+            return suite == active;
+        }
+
+        // within window → either is acceptable
+        suite == active || suite == next
     }
 
     /// Alias with more explicit name for call sites.
@@ -112,9 +126,9 @@ mod tests {
         // inside window
         assert!(p.accept(120, CryptoSuite::MlDsa44));
         assert!(p.accept(120, CryptoSuite::SphincsPq));
-        // after window
-        assert!(p.accept(200, CryptoSuite::MlDsa44));
-        assert!(!p.accept(200, CryptoSuite::SphincsPq));
+        // after window (T40.2): ONLY next is valid
+        assert!(!p.accept(200, CryptoSuite::MlDsa44));
+        assert!(p.accept(200, CryptoSuite::SphincsPq));
         // validate sane
         assert!(p.validate().is_ok());
     }
@@ -153,7 +167,8 @@ mod tests {
         assert_eq!(b2, None);
         assert!(!p.should_emit_dual(200));
         assert_eq!(p.next_if_allowed(200), None);
-        assert!(p.enforce_suite(200, CryptoSuite::MlDsa44).is_ok());
-        assert!(p.enforce_suite(200, CryptoSuite::SphincsPq).is_err());
+        // T40.2: after cutoff, old invalid / new valid
+        assert!(p.enforce_suite(200, CryptoSuite::MlDsa44).is_err());
+        assert!(p.enforce_suite(200, CryptoSuite::SphincsPq).is_ok());
     }
 }

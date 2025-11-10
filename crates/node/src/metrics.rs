@@ -465,6 +465,15 @@ pub fn register_t40_shadow_sig_metrics() {
     eezo_crypto::metrics::register_t40_shadow_metrics();
 }
 
+// ─────────────────────────── T40.2: Cutover metrics registrar ───────────
+/// Eagerly register the cutover-enforcement counters so they appear on
+/// `/metrics` at boot. Delegates to the same crypto helper, which also
+/// materializes the T40.2 counters.
+#[cfg(feature = "metrics")]
+pub fn register_t40_cutover_metrics() {
+    eezo_crypto::metrics::register_t40_shadow_metrics();
+}
+
 /// Helper: increment emitted counter when a checkpoint is written.
 #[inline]
 pub fn bridge_emitted_inc() {
