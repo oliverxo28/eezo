@@ -1,11 +1,12 @@
+#![cfg(feature = "pq44-runtime")]
 //! T4: Validator Cert lookup with epoch-based cache facade.
 
-#[cfg(feature = "pq44-runtime")]
 use pqcrypto_mldsa::mldsa44::PublicKey;
-#[cfg(feature = "pq44-runtime")]
-use pqcrypto_traits::sign::PublicKey as PkTrait;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+
+// New: used only by the trait signature (ties to T27's ValidatorId = [u8;20])
+use crate::consensus_msg::ValidatorId;
 
 /// The validated public key plus policy flags at a given height.
 #[derive(Clone, Debug)]
@@ -15,49 +16,93 @@ pub struct ValidatedPk {
     pub revoked: bool,
 }
 
-#[cfg(feature = "pq44-runtime")]
 impl ValidatedPk {
     pub fn from_pq(pk: &PublicKey) -> Self {
-        let bs = pk.as_bytes(); // Works directly with PkTrait in scope
-        let mut a = [0u8; 1312]; // Matches PK_LEN from consensus.rs
-        a.copy_from_slice(bs);
+        // PublicKey is cheap to clone; keep the canonical type
         ValidatedPk {
-            pk: <PublicKey as PkTrait>::from_bytes(&a).expect("valid public key bytes"), // UFCS
-            valid_until: u64::MAX, // Default, assuming policy set elsewhere
-            revoked: false,        // Default, assuming policy set elsewhere
+            pk: pk.clone(),
+            valid_until: u64::MAX,
+            revoked: false,
         }
     }
 }
 
-pub trait CertLookup {
-    /// Returns the validator pk if valid at `at_height`, else None.
-    /// Implementations must enforce not-yet-valid, expired, and revoked.
+// T4 trait for height-aware lookup, now address-based
+pub trait CertLookupT4 {
+    /// address-based lookup (legacy/compat path)
     fn get_pk(&self, signer: &[u8; 20], at_height: u64) -> Option<ValidatedPk>;
 }
 
 #[derive(Clone)]
 pub struct CertStore {
-    inner: Arc<RwLock<HashMap<[u8; 20], ValidatedPk>>>,
+    inner: std::collections::HashMap<[u8; 20], ValidatedPk>,
 }
 
 impl CertStore {
     pub fn new(map: HashMap<[u8; 20], ValidatedPk>) -> Self {
-        Self { inner: Arc::new(RwLock::new(map)) }
+        Self { inner: map }
     }
 }
 
-impl CertLookup for CertStore {
-    fn get_pk(&self, signer: &[u8; 20], at_height: u64) -> Option<ValidatedPk> {
-        let map = self.inner.read().ok()?;
-        map.get(signer).and_then(|pk| {
-            if pk.revoked || pk.valid_until < at_height {
-                None
-            } else {
-                Some(pk.clone())
-            }
-        })
+// Remove or disable the CertLookup impl for CertStore
+// impl CertLookup for CertStore {
+//     fn public_key(&self, signer: ValidatorId) -> Option<PublicKey> {
+//         self.inner.get(&signer.0).map(|v| v.pk.clone())
+//     }
+// }
+
+impl CertLookupT4 for CertStore {
+    fn get_pk(&self, signer: &[u8; 20], _at_height: u64) -> Option<ValidatedPk> {
+        self.inner.get(signer).cloned()
     }
 }
 
-// Optional guidance (not doc-comments to avoid EOF issues):
-// epoch cache key: (validator_id, epoch) where epoch = height / EPOCH_LEN.
+// --- T27: Consensus cert lookup trait and adapters ---
+
+/// Minimal interface the consensus pipeline needs to verify signatures.
+///
+/// Note: We keep this focused on *key fetch* so that consensus can choose
+/// batch- or single-verify as needed.
+pub trait CertLookup: Send + Sync {
+    /// Return the current (non-revoked, height-valid) ML-DSA public key for `signer`,
+    /// or None if unavailable.
+    fn public_key(&self, signer: ValidatorId) -> Option<PublicKey>;
+}
+
+/// Simple in-memory map { ValidatorId ([u8;20]) -> PublicKey }.
+/// Useful for tests or single-node dev.
+#[derive(Default, Clone)]
+pub struct StaticCertStore {
+    inner: Arc<RwLock<HashMap<ValidatorId, PublicKey>>>,
+}
+
+impl StaticCertStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_map(m: HashMap<ValidatorId, PublicKey>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(m)),
+        }
+    }
+
+    pub fn insert(&self, who: ValidatorId, pk: PublicKey) {
+        if let Ok(mut g) = self.inner.write() {
+            g.insert(who, pk);
+        }
+    }
+}
+
+impl CertLookup for StaticCertStore {
+    fn public_key(&self, signer: ValidatorId) -> Option<PublicKey> {
+        self.inner.read().ok()?.get(&signer).cloned()
+    }
+}
+
+// Default/noop impl for StaticCertStore for the address-based T4 trait
+impl CertLookupT4 for StaticCertStore {
+    fn get_pk(&self, _signer: &[u8; 20], _at_height: u64) -> Option<ValidatedPk> {
+        None
+    }
+}

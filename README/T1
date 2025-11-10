@@ -1,0 +1,38 @@
+# Task 1 — Post-Quantum Integration & Hygiene
+
+This task introduces NIST-selected PQ primitives and supply-chain hygiene across the workspace.
+
+## Final Design (confirmed with guide)
+
+- **KEM:** ML-KEM-768 (`pqcrypto_mlkem::mlkem768`)
+  - Shared secret → **HKDF** → 32-byte transport key
+  - Sizes: ~1184-byte public key, ~1088-byte ciphertext
+- **Signature:** ML-DSA-44 (`pqcrypto_mldsa::mldsa44`)
+  - ~2.4 KB signatures, fast verification
+- **Optional:** **SPHINCS+** (feature-gated; excluded by default)
+- **Transport AEAD:** **ChaCha20-Poly1305** (`chacha20poly1305`) with 96-bit nonces
+- **Hygiene:** `cargo-deny` allowlist includes `Unicode-3.0`; `cargo-audit` ignores `RUSTSEC-2024-0436` (transitive via `pqcrypto-mldsa`)
+
+### Why these choices (guide’s rationale)
+
+- **ML-KEM-768**: NIST Cat-3 (≈ AES-192), widely converging standard, good perf/size balance for P2P.
+- **ML-DSA-44**: ~0.08 ms verify, ~2.4 KB sigs → scalable for block validation and IoT-class validators.
+- **ChaCha20-Poly1305**: Better software-only perf and timing resistance vs AES-GCM; ARM/mobile friendly.
+- **SPHINCS+ optional**: Available for conservatism without burdening default builds.
+
+---
+
+## Implementation Map
+
+- `crates/crypto/src/kem/ml_kem.rs`  
+  ML-KEM encaps/decaps; derives 32-byte key via HKDF.
+- `crates/crypto/src/sig/mod.rs`  
+  Module wiring + **feature-gate** for SPHINCS+:
+  ```rust
+  pub mod ml_dsa;
+
+  #[cfg(feature = "slh-dsa")]
+  pub mod slh_dsa;
+
+  #[cfg(feature = "slh-dsa")]
+  pub use slh_dsa::SlhDsa128f;

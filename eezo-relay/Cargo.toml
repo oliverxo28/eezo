@@ -1,0 +1,44 @@
+[package]
+name = "eezo-relay"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs", "net", "io-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+ethers = { version = "2", default-features = false, features = ["abigen", "rustls"] }
+dotenvy = "0.15"
+anyhow = "1"
+hex = "0.4"
+once_cell = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+eezo-ssz-bridge = { path = "../crates/eezo-ssz-bridge" }
+
+
+# ✅ critical fix ─ compile eezo-net with BOTH features
+eezo-net = { path = "../crates/net", default-features = false, features = ["mlkem", "kemtls-resume"]}
+
+# your PQC crates (unchanged)
+pqcrypto-mlkem   = { version = "0.1", optional = true }
+pqcrypto-traits  = { version = "0.3", optional = true }
+
+[features]
+default = []
+
+# ✅ relay-side kemtls-resume feature forwards to eezo-net + pqcrypto crates
+kemtls-resume = [
+    "eezo-net/kemtls-resume",
+    "eezo-net/mlkem",
+    "dep:pqcrypto-mlkem",
+    "dep:pqcrypto-traits"
+]
+
+# optional (unchanged)
+mlkem = [
+    "eezo-net/mlkem",
+    "dep:pqcrypto-mlkem",
+    "dep:pqcrypto-traits"
+]

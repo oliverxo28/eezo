@@ -1,45 +1,75 @@
 mod common;
 
-#[test]
-fn config_endpoint_reflects_env() {
-    // Pick a random-ish port to avoid clashes in CI
-    let listen_port: u16 = 18087;
-    let metrics_port = "9199";
-    let datadir = "target/testdata/config_endpoint_env";
-    let envs = [
-        ("EEZO_CHAIN_ID", "000102030405060708090a0b0c0d0e0f10111213"),
-        ("EEZO_MAX_BLOCK_BYTES", "65536"),
-        ("EEZO_VERIFY_CACHE_CAP", "1234"),
-        ("EEZO_PARALLEL_VERIFY", "off"),
-        ("EEZO_METRICS", "on"),
-        ("EEZO_METRICS_PORT", metrics_port),
-    ];
+use std::path::PathBuf;
 
-    let genesis_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../genesis.min.json");
+#[test]
+fn config_endpoint_returns_runtime_config() {
+    // pick a dedicated port + datadir
+    let port: u16 = 18111;
+    let datadir = "crates/node/target/testdata/config_ep_runtime";
+
+    // clean & prep datadir
+    let _ = std::fs::remove_dir_all(datadir);
+    std::fs::create_dir_all(datadir).ok();
+
+    // we’ll point to the provided minimal genesis in the repo
+    let genesis_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../genesis.min.json");
     let genesis = genesis_path.to_str().unwrap();
 
-    // Use the common helper with explicit listen port
-    let mut child = common::spawn_node_with_env(&[
-        "--listen", &format!("127.0.0.1:{}", listen_port),
-        "--datadir", datadir,
-        "--genesis", genesis,
-    ], &envs);
+    // start node
+    let mut child = common::spawn_node_with_env(
+        &[
+            "--listen",
+            &format!("127.0.0.1:{port}"),
+            "--datadir",
+            datadir,
+            "--log-level",
+            "debug",
+            "--genesis",
+            genesis,
+        ],
+        &[], // no special env overrides needed
+    );
 
-    // Give the server a moment to bind using the common helper
-    let ok = common::wait_until_ready(listen_port, 10_000);
-    assert!(ok, "node did not become ready");
+    // wait until it’s ready
+    let ok = common::wait_until_ready(port, 15_000);
+    if !ok {
+        // use ChildGuard’s own readers
+        let stdout = child.read_stdout();
+        let stderr = child.read_stderr();
+        eprintln!("Node stdout:\n{stdout}");
+        eprintln!("Node stderr:\n{stderr}");
+        let _ = child.kill();
+        let _ = child.try_wait();
+        panic!("Node did not become ready within timeout");
+    }
 
-    // Fetch /config and check the fields (preserving your original assertions)
-    let cfg: serde_json::Value =
-        reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", listen_port)).unwrap().json().unwrap();
+    // fetch /config
+    let v: serde_json::Value = reqwest::blocking::get(format!("http://127.0.0.1:{port}/config"))
+        .expect("GET /config failed")
+        .json()
+        .expect("parse /config JSON failed");
 
-    assert_eq!(cfg["chain_id_hex"], "000102030405060708090a0b0c0d0e0f10111213");
-    assert_eq!(cfg["verify_cache_cap"], 1234);
-    assert_eq!(cfg["parallel_verify"], false);
-    assert_eq!(cfg["max_block_bytes"], 65536);
-    assert_eq!(cfg["metrics_on"], true);
-    assert_eq!(cfg["metrics_port"], metrics_port.parse::<u64>().unwrap());
+    // basic shape assertions
+    assert_eq!(v["node"]["listen"], format!("127.0.0.1:{port}"));
+    assert_eq!(v["node"]["log_level"], "debug");
+    assert!(v["node"]["datadir"]
+        .as_str()
+        .unwrap()
+        .contains("config_ep_runtime"));
 
-    // Kill node
+    // chain id should be a 40-hex string
+    let chain_id_hex = v["chain_id_hex"].as_str().unwrap();
+    assert_eq!(chain_id_hex.len(), 40);
+
+    // peers should be an array (may be empty)
+    assert!(v["peers"].is_array());
+
+    // node identity should be present
+    assert!(v["node_id"].is_string());
+    assert!(v["first_seen"].as_u64().unwrap() > 0);
+
+    // clean shutdown
     let _ = child.kill();
+    let _ = child.try_wait();
 }

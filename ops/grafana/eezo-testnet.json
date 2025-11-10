@@ -1,0 +1,13 @@
+{
+  "title": "EEZO – TestNet SLOs",
+  "panels": [
+    { "type": "stat", "title": "Peers", "targets": [{"expr":"eezo_node_peers_ready"}] },
+    { "type": "timeseries", "title": "Block E2E P95", "targets": [{"expr":"histogram_quantile(0.95, sum(rate(eezo_block_e2e_latency_seconds_bucket[5m])) by (le))"}]},
+    { "type": "timeseries", "title": "Tx Verify P95", "targets": [{"expr":"histogram_quantile(0.95, sum(rate(eezo_tx_verify_seconds_bucket[5m])) by (phase,le))"}]},
+    { "type": "timeseries", "title": "State bootstrap P99", "targets": [{"expr":"histogram_quantile(0.99, sum(rate(eezo_state_bootstrap_seconds_bucket[15m])) by (le))"}]},
+    { "type": "timeseries", "title": "Mempool (tx/bytes)", "targets": [{"expr":"eezo_mempool_len"},{"expr":"eezo_mempool_bytes_gauge"}]},
+    { "type": "timeseries", "title": "KEMTLS handshake P95", "targets": [{"expr":"histogram_quantile(0.95, sum(rate(eezo_kemtls_handshake_seconds_bucket[5m])) by (le))"}]}
+  ],
+  "schemaVersion": 38,
+  "version": 1
+}

@@ -1,0 +1,81 @@
+{
+  "title": "EEZO — BridgeOps (Testnet)",
+  "uid": "eezo-bridgeops",
+  "tags": ["eezo", "bridge", "relay", "testnet"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Node: Latest Emitted Height",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 4 },
+      "targets": [
+        { "expr": "eezo_bridge_latest_height", "legendFormat": "latest" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Node: Last Served Height",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 4 },
+      "targets": [
+        { "expr": "eezo_bridge_last_served_height", "legendFormat": "served" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Node Lag (latest - served)",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 4 },
+      "targets": [
+        { "expr": "eezo_bridge_node_lag", "legendFormat": "lag" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Relay: On-chain Height",
+      "gridPos": { "x": 0, "y": 4, "w": 8, "h": 4 },
+      "targets": [
+        { "expr": "eezo_relay_onchain_height", "legendFormat": "onchain" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Relay: Node Latest Height (seen by relay)",
+      "gridPos": { "x": 8, "y": 4, "w": 8, "h": 4 },
+      "targets": [
+        { "expr": "eezo_relay_node_latest_height", "legendFormat": "node_latest" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Relay Backoff Seconds",
+      "gridPos": { "x": 16, "y": 4, "w": 8, "h": 4 },
+      "targets": [
+        { "expr": "eezo_relay_backoff_seconds", "legendFormat": "backoff" }
+      ]
+    },
+    {
+      "type": "timeSeries",
+      "title": "Relay Store Attempts / Successes (rate)",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 7 },
+      "targets": [
+        { "expr": "rate(eezo_relay_store_attempts_total[5m])", "legendFormat": "attempts/s" },
+        { "expr": "rate(eezo_relay_store_success_total[5m])", "legendFormat": "successes/s" }
+      ]
+    },
+    {
+      "type": "timeSeries",
+      "title": "Node Bridge Queries (rate)",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 7 },
+      "targets": [
+        { "expr": "rate(eezo_bridge_index_queries_total[5m])", "legendFormat": "index" },
+        { "expr": "rate(eezo_bridge_summary_queries_total[5m])", "legendFormat": "summary" },
+        { "expr": "rate(eezo_bridge_branch_queries_total[5m])", "legendFormat": "branch" },
+        { "expr": "rate(eezo_bridge_prove_queries_total[5m])", "legendFormat": "prove" }
+      ]
+    }
+  ],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" }
+}

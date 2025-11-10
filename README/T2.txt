@@ -1,0 +1,43 @@
+# EEZO — Proof of Task T2 Completion
+
+This folder contains the verification artifacts for **Task T2: 1-RTT PQ Handshake & Secure Transport Layer**.
+
+---
+
+## 🔐 Task T2 Summary
+
+- Implemented **HKDF-SHA3-256** (`hkdf_sha3.rs`)  
+- Designed **key schedule** (`keyschedule.rs`) deriving:
+  - `k_c2s`, `k_s2c` (traffic keys)  
+  - `session_id[3]`  
+- Built **Session layer** (`session.rs`) with ChaCha20-Poly1305 AEAD  
+  - Nonce format: `flag(1) | session_id(3) | counter(8, LE)`  
+  - Overflow checks included  
+  - Zeroizes all sensitive material  
+- Implemented **Handshake** (`handshake.rs`)  
+  - `ClientHello{ ct, salt_c, session_id_hint }`  
+  - `ServerHello{ salt_s, confirm=AEAD("ack") }`  
+- Added **KEM adapter** (`kem_adapter.rs`) bridging to real **ML-KEM-768 (Kyber)**  
+- Added **Transport Layer** (`secure.rs`)  
+  - Framed I/O (sync + async/Tokio) using Session  
+- **Comprehensive tests**:  
+  - Mock handshake round-trip  
+  - Real ML-KEM handshake round-trip  
+  - Async duplex framed I/O round-trip  
+
+---
+
+## 📂 Proof Artifacts
+
+- **`t2_run.log`**  
+  Captured results of running `cargo test -p eezo-net -q`.  
+  ➝ Demonstrates that all T2 tests (mock, real ML-KEM, async transport) pass.  
+
+- **`workspace_test.log`**  
+  Captured results of running `cargo test --workspace -q`.  
+  ➝ Demonstrates that the entire EEZO workspace compiles and all existing tests pass.  
+
+---
+
+## 📁 Relevant Source Layout
+

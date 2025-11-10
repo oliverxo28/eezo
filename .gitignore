@@ -1,0 +1,33 @@
+# rust / cargo
+target/
+.cargo/
+**/*.rs.bk
+
+# foundry / solidity
+cache/
+out/
+broadcast/
+
+# runtime & local data
+data/
+data2/
+data-sync/
+proof/
+proof.prev.*/
+*.log
+
+# snapshots / large blobs
+*.ssz
+
+# keys, certs, wallets (NEVER commit)
+*.key
+*.csr
+*.crt
+keystore.json
+
+# misc
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

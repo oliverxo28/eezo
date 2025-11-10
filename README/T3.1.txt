@@ -1,0 +1,29 @@
+# EEZO — Proof of Task T3.1 Completion (Perf + Trust Hardening)
+
+## ✅ Scope
+Implements the four items from T3.1:
+1) **Signature verification cache** (LRU) keyed by `(pk, msg_hash)`
+2) **Rate limiting** (token bucket) on verifications
+3) **Validator certificate** verification against **genesis trust root**, with validity windows & revocation check
+4) **Mutual authentication** (client sends signed identity in `ClientHello`, server verifies)
+
+## 🔐 Security & Performance Properties
+
+- **LRU verify cache (4096 entries)**  
+  - Key: `(PublicKeyBytes, Sha3-256(bound_message)) → bool`
+  - Avoids repeated ML-DSA verify work under normal operation and during mild storms.
+
+- **Token-bucket rate limiter**  
+  - Defaults: capacity = 200 tokens; refill = 200/sec; cost = 1 per verify  
+  - Behavior: under flood, verifications are throttled and fail closed.
+
+- **Genesis-rooted validator certificates**
+  - `ValidatorCertificate { validator_id, ml_dsa_pubkey, valid_from, valid_until, revoked, genesis_signature }`
+  - Verification: detached signature by **genesis root**, time/height validity window, revocation flag.
+
+- **Mutual auth (client → server)**
+  - Client signs **client-id binding hash** over canonical `ClientHello` core with domain separation.
+  - Server verifies before returning the session. (Optional in v1, enforced when present.)
+
+## 📦 Code Changed
+

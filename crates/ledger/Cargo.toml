@@ -6,33 +6,80 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+# Keep minimal defaults; opt-in per build/test.
 default = []
+skip-sig-verify = []
+serde = []
+
+# ---- Existing feature flags ----
 rayon = ["dep:rayon"]
-pq44-runtime = ["dep:pqcrypto-mldsa", "dep:pqcrypto-traits"]
+
+# Runtime bundle: PQ44 = ML-DSA-44 enabled by default
+pq44-runtime = ["dep:pqcrypto-mldsa", "dep:pqcrypto-traits", "mldsa"]
+
 metrics = ["dep:prometheus", "dep:once_cell"]
 mempool-batch-verify = []
 consensus-tests = []
 
+# Storage/persistence (now gates RocksDB)
+persistence = ["dep:rocksdb"]
+
+# Checkpoint JSON writer needs serde_json
+checkpoints = ["dep:serde_json"]
+# Real QC verification on (else StubQcVerifier)
+checkpoints-verify = ["checkpoints"]
+
+# ---- State sync APIs (anchors + snapshot_iter + SMT verify) ----
+state-sync = ["persistence", "checkpoints", "dep:base64"]
+
+# ---- Public feature names that forward to eezo-crypto ----
+slh-dsa  = ["eezo-crypto/slh-dsa"]
+mldsa    = ["eezo-crypto/mldsa"]
+mlkem    = ["eezo-crypto/mlkem"]
+ml-suite = ["mldsa", "mlkem"]
+# Forward the flag down to eezo-serde. (No code changes in ledger yet.)
+eth-ssz = ["eezo-serde/eth-ssz"]
+
+# (No-op) feature used by code that gates SPHINCS+ paths with `#[cfg(feature = "pq_sphincs")]`
+pq_sphincs = []
+
+# ---- Back-compat aliases ----
+crypto-slh-dsa = ["slh-dsa"]
+crypto-mldsa   = ["mldsa"]
+crypto-mlkem   = ["mlkem"]
+
+# ---- Test-only helpers (never included in prod) ----
+testing = []
+
 [dependencies]
-eezo-crypto = { path = "../crypto", version = "0.1.0" }
+# Do not pull crypto defaults; select schemes via features above.
+eezo-crypto = { path = "../crypto", version = "0.1.0", default-features = false, features = ["mldsa"] }
 eezo-serde  = { path = "../serde",  version = "0.1.0" }
 
 serde = { version = "1", features = ["derive"] }
+# used by checkpoints.rs to write BridgeHeader JSON (enabled via `checkpoints` feature)
+serde_json = { version = "1", optional = true }
+base64 = { version = "0.21", default-features = false, optional = true }
 bincode = "1"
-bitvec = "1"
+bitvec = { version = "1", features = ["serde"] }
 sha3 = "0.10"
 zstd = "0.13"
 thiserror = "1"
 lru = "0.12"
 parking_lot = "0.12"
+primitive-types = "0.12"
+log = "0.4"
+anyhow = "1"
+
+# RocksDB is now optional; pulled in only when `persistence` is enabled
+rocksdb = { version = "0.21", default-features = false, features = ["lz4"], optional = true }
 
 # feature-gated deps
 rayon        = { version = "1.11", optional = true }
 once_cell    = { version = "1",    optional = true }
 prometheus   = { version = "0.13", optional = true }
 
-
-# PQ stack (pin to the versions we actually use)
+# PQ stack (used by pq44-runtime)
 pqcrypto-mldsa  = { version = "0.1.2", optional = true, package = "pqcrypto-mldsa" }
 pqcrypto-traits = { version = "0.3.5", optional = true, package = "pqcrypto-traits" }
 
@@ -41,7 +88,14 @@ criterion = { version = "0.5", features = ["html_reports"] }
 proptest  = "1"
 rand      = { version = "0.8", features = ["std", "std_rng"] }
 zeroize   = { version = "1", features = ["derive"] }
+tempfile  = "3"
+serde_json = "1"
 
 [[bench]]
 name = "consensus_verify"
 harness = false
+
+[[bin]]
+name = "eezo-ledger"
+path = "src/bin/eezo-ledger.rs"
+required-features = ["persistence", "checkpoints", "state-sync"]

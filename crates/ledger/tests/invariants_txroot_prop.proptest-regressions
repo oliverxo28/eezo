@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc df0d0fc12af79ae26ab432ac05a34f39f00a2062694819aabcf9afb20db0f885 # shrinks to s = 1, counts_in = [2], raw_amounts = [[1]], raw_fees = [[1, 2]], seed1 = 0, seed2 = 0
+cc 43fb4b2109234513666d68458cf42df9c6513a77f38826f31383a5231c811ff5 # shrinks to s = 1, counts_in = [2], raw_amounts = [[1, 1]], raw_fees = [[1, 1]], seed1 = 0, seed2 = 0

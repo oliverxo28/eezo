@@ -10,17 +10,17 @@ pub struct Pq44;
 
 impl SignatureScheme for Pq44 {
     // Use the concrete pqcrypto types for PK and Signature to match `verify_core` bounds.
-    type PublicKey  = pq44::PublicKey;
-    type SecretKey  = SkBytes;                    // bytes wrapper from eezo-crypto (Zeroize)
-    type Signature  = pq44::DetachedSignature;
+    type PublicKey = pq44::PublicKey;
+    type SecretKey = SkBytes; // bytes wrapper from eezo-crypto (Zeroize)
+    type Signature = pq44::DetachedSignature;
 
     // Pick the best available AlgoId variant in your crypto crate.
     // If you have `AlgoId::MlDsa44`, prefer that. Otherwise keep MlDsa2 (not used in verification logic).
-    const ALGO_ID: AlgoId = AlgoId::MlDsa2;
+    const ALGO_ID: AlgoId = AlgoId::MlDsa44;
 
     // pqcrypto exposes const fns for sizes.
-    const PK_LEN: usize     = pq44::public_key_bytes();
-    const SK_LEN: usize     = pq44::secret_key_bytes();
+    const PK_LEN: usize = pq44::public_key_bytes();
+    const SK_LEN: usize = pq44::secret_key_bytes();
     const SIG_MAX_LEN: usize = pq44::signature_bytes();
 
     fn keypair() -> (Self::PublicKey, Self::SecretKey) {

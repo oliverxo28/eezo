@@ -1,5 +1,5 @@
-use std::time::Duration;
 use reqwest::blocking::Client;
+use std::time::Duration;
 mod common;
 
 /// Write a node config TOML to `cfg_path`, making sure the parent dir exists.
@@ -58,7 +58,10 @@ fn hot_reload_from_config_file_updates_peers_and_metrics() {
     let _g1 = common::spawn_node_with_env(&a1, &[("EEZO_CONFIG_FILE", &cfg1_path)]);
     let _g2 = common::spawn_node_with_env(
         &a2,
-        &[(&common::peers_env_from_ports(&[p1]).0, &common::peers_env_from_ports(&[p1]).1)],
+        &[(
+            &common::peers_env_from_ports(&[p1]).0,
+            &common::peers_env_from_ports(&[p1]).1,
+        )],
     );
     // node3 stays down for now
 
@@ -85,7 +88,10 @@ fn hot_reload_from_config_file_updates_peers_and_metrics() {
     // now start node3 (it will ping back to node1)
     let _g3 = common::spawn_node_with_env(
         &a3,
-        &[(&common::peers_env_from_ports(&[p1]).0, &common::peers_env_from_ports(&[p1]).1)],
+        &[(
+            &common::peers_env_from_ports(&[p1]).0,
+            &common::peers_env_from_ports(&[p1]).1,
+        )],
     );
 
     // wait for refresh and check peers_total==2

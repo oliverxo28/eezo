@@ -1,0 +1,15 @@
+[package]
+name = "eezo-ssz-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "thin, stable facade over ledger/eth_ssz for prover/relay/tools"
+
+[dependencies]
+eezo-ledger = { path = "../ledger", features = ["eth-ssz","checkpoints"] }
+tracing = "0.1"
+
+[features]
+# use the ledger's `LEDGER_SSZ_VERSION` (now present) by default
+ledger_has_version_const = []
+default = ["ledger_has_version_const"]

@@ -1,0 +1,47 @@
+[workspace]
+members = [
+  "crates/crypto",
+  "crates/wallet",
+  "crates/serde",
+  "crates/net",
+  "crates/ledger",
+  "crates/node",     # node crate
+  "fuzz",            # fuzz targets
+  "crates/eezo-kats",
+  "crates/eezo-prover",
+  "crates/eezo-ssz-bridge",
+  "crates/eezo-snark",
+  "eezo-relay"       # new relay crate
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# shared
+sha3 = "0.10"
+blake3 = "1"
+rand = "0.8"
+thiserror = "1"
+subtle = "2"
+hkdf = "0.12"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+zstd = "0.13"
+
+# PQC – pin to versions that exist on crates.io
+pqcrypto-traits = "0.3.5"
+pqcrypto-mldsa = "0.1.2"   # FIPS 204 (ML-DSA)
+pqcrypto-mlkem = "0.1.1"   # FIPS 203 (ML-KEM)
+# Note: pqcrypto-sphincsplus remains optional (inside eezo-crypto only)
+
+# common deps for other crates
+bech32 = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+argon2 = "0.5"
+bytes = "1"

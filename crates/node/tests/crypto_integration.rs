@@ -1,8 +1,10 @@
 #[cfg(feature = "pq44-runtime")]
 #[test]
 fn node_header_sign_and_verify_roundtrip_mldsa() {
-    use eezo_ledger::block::{BlockHeader, header_domain_bytes};
-    use pqcrypto_mldsa::mldsa44::{keypair, detached_sign, verify_detached_signature, DetachedSignature};
+    use eezo_ledger::block::{header_domain_bytes, BlockHeader};
+    use pqcrypto_mldsa::mldsa44::{
+        detached_sign, keypair, verify_detached_signature, DetachedSignature,
+    };
     use pqcrypto_traits::sign::DetachedSignature as _; // <- trait for as_bytes/from_bytes
 
     let chain_id = [7u8; 20];
@@ -15,8 +17,7 @@ fn node_header_sign_and_verify_roundtrip_mldsa() {
         fee_total: 0,
         tx_count: 0,
         timestamp_ms: 0,
-		#[cfg(feature = "checkpoints")]
-		qc_hash: [0u8; 32],
+        qc_hash: [0u8; 32],
     };
 
     let msg = header_domain_bytes(chain_id, &h);

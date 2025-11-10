@@ -1,0 +1,70 @@
+groups:
+- name: eezo-core
+  rules:
+  - alert: BlockLatencyHigh
+    expr: histogram_quantile(0.95, sum(rate(eezo_block_e2e_latency_seconds_bucket[5m])) by (le)) > 2
+    for: 10m
+    labels: { severity: page }
+    annotations: { summary: "P95 block latency > 2s for 10m" }
+
+  - alert: StateSyncBootstrapSlow
+    expr: histogram_quantile(0.99, rate(eezo_state_bootstrap_seconds_bucket[15m])) > 120
+    for: 15m
+    labels: { severity: warn }
+    annotations: { summary: "P99 bootstrap > 120s" }
+
+  - alert: MempoolBacklog
+    expr: eezo_mempool_len > 50000 or eezo_mempool_bytes_gauge > 67108864
+    for: 10m
+    labels: { severity: warn }
+    annotations: { summary: "Mempool backlog beyond limits" }
+    
+  - name: eezo-bridgeops
+    rules:
+      # Node-side: header emission vs serving
+      - alert: BridgeNodeLagHigh
+        expr: eezo_bridge_node_lag > 4
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "Bridge node lag > 4 checkpoints for 10m"
+          description: "latest_emitted {{ $value }} ahead of last_served"
+
+      - alert: BridgeHeaderServeStalled
+        expr: (increase(eezo_bridge_headers_served_total[10m]) == 0)
+              and (eezo_bridge_latest_height > eezo_bridge_last_served_height)
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "No bridge headers served in 10m while new checkpoints exist"
+
+      - alert: BridgeMonotonicityViolation
+        expr: eezo_bridge_last_served_height > eezo_bridge_latest_height
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "Last-served exceeds latest-emitted (invariant break)"
+
+      # Relay-side: on-chain sync vs node latest
+      - alert: RelayFallingBehind
+        expr: (eezo_relay_node_latest_height - eezo_relay_onchain_height) > 4
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "Relay is >4 checkpoints behind on-chain for 10m"
+
+      - alert: RelayNoProgress
+        expr: (increase(eezo_relay_store_success_total[10m]) == 0)
+              and (eezo_relay_node_latest_height > eezo_relay_onchain_height)
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "Relay made no successful store tx in 10m while behind node"
+
+      - alert: RelayBackoffStuck
+        expr: eezo_relay_backoff_seconds > 60
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "Relay backoff > 60s sustained"
+          description: "Check node availability, proof exporter, or contract failures"

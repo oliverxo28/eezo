@@ -1,7 +1,10 @@
+#![cfg(feature = "pq44-runtime")]
+
 //! T4: Double-sign evidence container with reporter signature (spam resistance).
 
+use crate::consensus::SigBytes;
+use crate::SignedConsensusMsg;
 use serde::{Deserialize, Serialize};
-use crate::consensus::{SignedConsensusMsg, SigBytes};
 
 /// step: 0=Proposal, 1=PreVote, 2=PreCommit
 #[derive(Clone, Debug, Serialize, Deserialize)]

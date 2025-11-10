@@ -1,0 +1,191 @@
+perfect — here are three drop-in README texts you can save as separate files in your `~/Block/eezo/README/` folder:
+
+---
+
+# `T4.md`
+
+## Goal
+
+Lay the groundwork for consensus verification and testing:
+
+* Domain-separated signing for consensus messages.
+* Certificate window + revocation checks.
+* Witness/mempool admission logic (single-item verification path).
+* Test scaffolding and initial benches.
+
+## What changed
+
+* `crates/ledger/src/`
+
+  * `consensus.rs`: envelope checks, domain separation helpers.
+  * `cert_store.rs`: validator PK lookup + window/revocation.
+  * `tx.rs`, `mempool.rs`: witness shape + admission checks.
+  * `metrics_shim.rs`: lightweight metrics guard (no-ops when feature off).
+* `crates/ledger/tests/`
+
+  * `cert_window.rs`, `domain_sep.rs`, `double_sign.rs`, `sign_verify.rs`, `witness.rs` added (initially gated/ignored).
+* `benches/` scaffolded for consensus verify.
+
+## How to run
+
+```bash
+# build (baseline)
+cargo build -p eezo-ledger
+
+# tests (baseline; some tests may be ignored until later milestones)
+cargo test  -p eezo-ledger
+```
+
+## Acceptance (T4)
+
+* Domain separation enforced (height/round bound).
+* Cert window + revocation enforced.
+* Witness basic validation passes tests.
+* Code compiles cleanly without optional features.
+
+---
+
+# `T4.1.md`
+
+## Goal
+
+Prepare the codebase for post-quantum (PQ) signatures and batched verification:
+
+* Introduce feature-gated PQ runtime hooks.
+* Generic signature pipeline in `consensus_sig`.
+* Bench harness with Criterion.
+
+## What changed
+
+* `Cargo.toml` (ledger):
+
+  * Features: `pq44-runtime`, `rayon`, `metrics` (compile-time gates).
+* `crates/ledger/src/`
+
+  * `consensus_sig.rs`: generic `verify_core`/`verify_many` skeleton.
+  * `pq44_runtime.rs`: adapter placeholder introduced (not fully wired yet at T4.1).
+* `benches/consensus_verify.rs`: Criterion bench scaffold.
+
+## How to run
+
+```bash
+# PQ+Rayon build to ensure gates work
+cargo build -p eezo-ledger --features "pq44-runtime,rayon"
+
+# benches (initial)
+cargo bench -p eezo-ledger --bench consensus_verify --features "pq44-runtime,rayon"
+```
+
+## Acceptance (T4.1)
+
+* Non-PQ build still works (feature flags respected).
+* PQ build compiles with adapter placeholder.
+* Bench harness runs.
+
+---
+
+# `T4.2.md`
+
+## Goal
+
+Finish PQ integration and make batch verification production-ready:
+
+* Concrete ML-DSA-44 adapter (`Pq44`) implementing our `SignatureScheme`.
+* Correct generic bounds + type usage in `consensus_sig`.
+* Batch verification path (`verify_many`) with Rayon (optional) and serial fallback.
+* Tests un-ignored behind feature flag and all passing.
+* Proof bundle generation for audit.
+
+## Key fixes & upgrades
+
+1. **Adapter & API correctness**
+
+   * `crates/ledger/src/pq44_runtime.rs` implements:
+
+     * `SignatureScheme for Pq44` with
+       `PublicKey = pqcrypto_mldsa::mldsa44::PublicKey`,
+       `Signature = pqcrypto_mldsa::mldsa44::DetachedSignature`.
+     * Uses `pqcrypto_mldsa::mldsa44::verify_detached_signature(sig, msg, pk).is_ok()`.
+
+2. **Generic constraints & types**
+
+   * `consensus_sig::verify_core::<Pq44>(...)` and `verify_many::<Pq44>(...)` constrained to the concrete ML-DSA types.
+   * `chain_id` passed as slice in `verify_core` (`&[u8]`), kept as `[u8; 20]` in callers; borrow where needed.
+   * `impl CertLookup + Sync + ?Sized` used so `&dyn CertLookup` callers compile.
+
+3. **Batch verification path**
+
+   * `verify_many`:
+
+     * Rayon path under `--features rayon` (`par_iter()`), serial fallback via `iter()`.
+     * Collects `Vec<bool>` then converts to `BitVec` for compatibility.
+
+4. **Tests**
+
+   * Added conditional un-ignore:
+
+     ```rust
+     #[cfg_attr(not(feature = "consensus-tests"), ignore)]
+     ```
+   * All tests green with:
+
+     * `--features "pq44-runtime,rayon,metrics,consensus-tests"`.
+
+5. **Cargo / features hygiene**
+
+   * No duplicate deps (e.g., `zeroize`) and correct versions:
+
+     * `pqcrypto-mldsa = "0.1"`, `pqcrypto-traits = "0.3"`.
+   * `pq44-runtime` gates all imports that mention `mldsa44`.
+
+6. **Benches**
+
+   * Criterion benches stabilized; tip to use `-- --measurement-time 10`.
+   * Performance numbers recorded in proof.
+
+## How to build/test/bench
+
+```bash
+# build
+cargo build -p eezo-ledger --features "pq44-runtime,rayon,metrics"
+
+# tests (consensus tests enabled)
+cargo test  -p eezo-ledger --features "pq44-runtime,rayon,metrics,consensus-tests"
+
+# benches (10s measurement for stability)
+cargo bench -p eezo-ledger --bench consensus_verify --features "pq44-runtime,rayon" -- --measurement-time 10
+```
+
+## Proof bundle (reproducible script)
+
+```bash
+cd ~/Block/eezo && \
+RUN="run_$(date +%Y%m%d_%H%M%S)" && ROOT="proof/T4.2" && \
+mkdir -p "$ROOT/$RUN"/{src_snapshot,tests_snapshot} && \
+cargo build -p eezo-ledger --features "pq44-runtime,rayon,metrics" \
+  |& tee "$ROOT/$RUN/build.txt" && \
+cargo test  -p eezo-ledger --features "pq44-runtime,rayon,metrics,consensus-tests" \
+  |& tee "$ROOT/$RUN/tests_full.txt" && \
+cargo bench -p eezo-ledger --bench consensus_verify --features "pq44-runtime,rayon" -- --measurement-time 10 \
+  |& tee "$ROOT/$RUN/bench.txt" && \
+cp crates/ledger/src/{pq44_runtime.rs,consensus.rs,consensus_sig.rs,mempool.rs,lib.rs} "$ROOT/$RUN/src_snapshot/" 2>/dev/null || true && \
+cp -r crates/ledger/tests "$ROOT/$RUN/tests_snapshot" 2>/dev/null || true && \
+tar -C "$ROOT" -czf "$ROOT/${RUN}.tgz" "$RUN" && \
+echo "Saved: $ROOT/$RUN (archive: $ROOT/${RUN}.tgz)"
+```
+
+## Notes / known items
+
+* One `mldsa44` import may be intentionally kept to support upcoming tasks; harmless warning.
+* Bench “increase target time” notice can be avoided with `-- --measurement-time 10` (already shown).
+* For security hygiene in benches, `PqSkWrap` implements `Zeroize`; if the upstream SK type stays opaque, keep benches non-shipping and document limitations.
+
+## Acceptance (T4.2)
+
+* ✅ All tests pass under `pq44-runtime,rayon,metrics,consensus-tests`.
+* ✅ Benches run and produce stable numbers.
+* ✅ Proof bundle saved under `proof/T4.2/…`.
+
+---
+
+If you want, I can also generate these as files for you next; just say “save them as files” and tell me the exact filenames (e.g., `T4.md`, `T4.1.md`, `T4.2.md`).

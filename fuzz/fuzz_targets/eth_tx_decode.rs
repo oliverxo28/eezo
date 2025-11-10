@@ -1,0 +1,26 @@
+#![no_main]
+use libfuzzer_sys::fuzz_target;
+
+#[cfg(feature = "eth-ssz")]
+use eezo_ledger::{block::BlockHeader, SignedTx};
+#[cfg(feature = "eth-ssz")]
+use eezo_serde::eth::{Decode, Encode, HashTreeRoot};
+
+fuzz_target!(|data: &[u8]| {
+    #[cfg(feature = "eth-ssz")]
+    {
+        if let Ok((tx, _used)) = SignedTx::ssz_read(data) {
+            let enc = tx.ssz_bytes();
+            if let Ok((tx2, _)) = SignedTx::ssz_read(&enc) {
+                assert_eq!(tx.hash_tree_root(), tx2.hash_tree_root(), "SignedTx HTR mismatch");
+            }
+        }
+
+        if let Ok((h, _used)) = BlockHeader::ssz_read(data) {
+            let enc = h.ssz_bytes();
+            if let Ok((h2, _)) = BlockHeader::ssz_read(&enc) {
+                assert_eq!(h.hash_tree_root(), h2.hash_tree_root(), "Header HTR mismatch");
+            }
+        }
+    }
+});

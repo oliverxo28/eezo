@@ -1,0 +1,20 @@
+# deny.toml
+
+[advisories]
+# We ignore the paste advisory since it's transient via pqcrypto-mldsa
+ignore = ["RUSTSEC-2024-0436"]
+
+[licenses]
+# Minimal allowlist that matches your dependency graph
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Unicode-3.0"   # required by unicode-ident (it's "(MIT OR Apache-2.0) AND Unicode-3.0")
+]
+
+[bans]
+# keep your previous intent
+wildcards = "allow"
+multiple-versions = "warn"

@@ -1,0 +1,383 @@
+// crates/node/src/mempool.rs
+//! Minimal in-proc mempool for T30.
+//!
+//! Goals (T30):
+//! - Bounded queue (len + bytes).
+//! - Per-IP token-bucket rate limiting.
+//! - Tx status tracking: pending / included(height) / rejected(reason).
+//! - Zero coupling to ledger types (store opaque bytes + hash).
+//!
+//! Wire-up plan:
+//! - HTTP POST /tx will parse JSON, compute hash, and call `SharedMempool::submit`.
+//! - Proposer loop will call `pop_batch()` then try to apply; it will mark included/rejected.
+//! - GET /tx/{hash} surfaces `status()`.
+//!
+//! NOTE: This module intentionally avoids importing eezo_ledger to keep
+//! compile order simple. The proposer will handle decoding/apply.
+
+use std::{
+    collections::{HashMap, VecDeque},
+    net::IpAddr,
+    sync::Arc,
+    time::Instant,
+};
+
+use tokio::sync::Mutex;
+#[cfg(feature = "metrics")]
+use crate::metrics::{EEZO_MEMPOOL_BYTES, EEZO_MEMPOOL_LEN, EEZO_TX_REJECTED_TOTAL};
+
+/// 32-byte transaction hash (blake2/sha256/ssz-root etc. — computed by the caller).
+pub type TxHash = [u8; 32];
+
+/// Runtime view of a transaction stored in the mempool.
+#[derive(Debug)]
+pub struct TxEntry {
+    pub hash: TxHash,
+    pub bytes: Arc<Vec<u8>>, // opaque payload; proposer will decode
+    pub received_at: Instant,
+}
+
+/// Public status exposed to `/tx/{hash}`.
+#[derive(Debug, Clone)]
+pub enum TxStatus {
+    Pending,
+    Included { block_height: u64 },
+    Rejected { error: String },
+}
+
+#[derive(Debug)]
+pub enum SubmitError {
+    RateLimited,
+    QueueFull,
+    BytesCapReached,
+    Duplicate, // already known (pending/included/rejected)
+}
+
+impl std::fmt::Display for SubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use SubmitError::*;
+        match self {
+            RateLimited => write!(f, "rate limited"),
+            QueueFull => write!(f, "mempool full"),
+            BytesCapReached => write!(f, "mempool byte cap reached"),
+            Duplicate => write!(f, "duplicate transaction"),
+        }
+    }
+}
+impl std::error::Error for SubmitError {}
+
+/// Simple token-bucket per IP.
+#[derive(Debug, Clone)]
+struct RateBucket {
+    capacity: u32,
+    tokens: f64,
+    refill_per_sec: f64,
+    last_refill: Instant,
+}
+
+impl RateBucket {
+    fn new(capacity: u32, refill_per_sec: f64) -> Self {
+        Self {
+            capacity,
+            tokens: capacity as f64,
+            refill_per_sec,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn allow(&mut self, cost: u32) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        if elapsed > 0.0 {
+            self.tokens =
+                (self.tokens + elapsed * self.refill_per_sec).min(self.capacity as f64);
+            self.last_refill = now;
+        }
+        if self.tokens >= cost as f64 {
+            self.tokens -= cost as f64;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Core mempool (not thread-safe). Wrap with `SharedMempool` for concurrent use.
+pub struct Mempool {
+    // Bounded queue of pending entries (FIFO by receive time).
+    queue: VecDeque<Arc<TxEntry>>,
+    // Quick lookup to avoid duplicates while pending.
+    pending_index: HashMap<TxHash, ()>,
+
+    // Status map (includes pending/included/rejected). This survives even after draining from queue.
+    statuses: HashMap<TxHash, TxStatus>,
+
+    // Limits
+    max_len: usize,
+    max_bytes: usize,
+    cur_bytes: usize,
+
+    // Per-IP rate buckets
+    ip_buckets: HashMap<IpAddr, RateBucket>,
+    // Rate params
+    bucket_capacity: u32,
+    bucket_refill_per_sec: f64,
+}
+
+impl Mempool {
+    pub fn new(max_len: usize, max_bytes: usize, bucket_capacity: u32, per_minute: u32) -> Self {
+        let refill_per_sec = per_minute as f64 / 60.0;
+        Self {
+            queue: VecDeque::with_capacity(max_len.min(1024)),
+            pending_index: HashMap::new(),
+            statuses: HashMap::new(),
+            max_len,
+            max_bytes,
+            cur_bytes: 0,
+            ip_buckets: HashMap::new(),
+            bucket_capacity,
+            bucket_refill_per_sec: refill_per_sec,
+        }
+    }
+
+    fn bucket_mut(&mut self, ip: IpAddr) -> &mut RateBucket {
+        self.ip_buckets
+            .entry(ip)
+            .or_insert_with(|| RateBucket::new(self.bucket_capacity, self.bucket_refill_per_sec))
+    }
+
+    /// Try to enqueue a tx. Caller must supply `hash` and raw `bytes`.
+    /// On success, status becomes Pending.
+    pub fn submit(&mut self, ip: IpAddr, hash: TxHash, bytes: Vec<u8>) -> Result<(), SubmitError> {
+        // De-dupe: if we already know about this hash, reject duplicate.
+        if self.statuses.contains_key(&hash) || self.pending_index.contains_key(&hash) {
+            return Err(SubmitError::Duplicate);
+        }
+
+        // Rate limit (cost=1 op)
+        if !self.bucket_mut(ip).allow(1) {
+            return Err(SubmitError::RateLimited);
+        }
+
+        // Capacity checks
+        if self.queue.len() >= self.max_len {
+            return Err(SubmitError::QueueFull);
+        }
+        let b = bytes.len();
+        if self.cur_bytes + b > self.max_bytes {
+            return Err(SubmitError::BytesCapReached);
+        }
+
+        let entry = Arc::new(TxEntry {
+            hash,
+            bytes: Arc::new(bytes),
+            received_at: Instant::now(),
+        });
+        self.queue.push_back(entry);
+        self.pending_index.insert(hash, ());
+        self.statuses.insert(hash, TxStatus::Pending);
+        self.cur_bytes += b;
+        #[cfg(feature = "metrics")]
+        self.refresh_gauges();
+        Ok(())
+    }
+
+    /// Pop up to `target_bytes` of txs (FIFO). Returns opaque entries to be applied by the proposer.
+    pub fn pop_batch(&mut self, target_bytes: usize) -> Vec<Arc<TxEntry>> {
+        let mut out = Vec::new();
+        let mut used = 0usize;
+        while let Some(front) = self.queue.front() {
+            let sz = front.bytes.len();
+            if !out.is_empty() && used + sz > target_bytes {
+                break;
+            }
+            let entry = self.queue.pop_front().expect("front just checked");
+            self.pending_index.remove(&entry.hash);
+            // Do not change cur_bytes yet; we only shrink cur_bytes when we finally mark included/rejected.
+            used += sz;
+            out.push(entry);
+        }
+        #[cfg(feature = "metrics")]
+        self.refresh_gauges();
+        out
+    }
+
+    /// Mark tx as included at `block_height`. Also shrink the byte accounting.
+    pub fn mark_included(&mut self, hash: &TxHash, block_height: u64, approx_bytes: usize) {
+        // Guard against callers accidentally passing 0 (genesis) as the height.
+        // T32 expects first produced block to be height >= 1.
+        let h = if block_height == 0 { 1 } else { block_height };
+        self.statuses
+            .insert(*hash, TxStatus::Included { block_height: h });
+
+        // Best-effort shrink. If underflow, clamp to 0.
+        self.cur_bytes = self.cur_bytes.saturating_sub(approx_bytes);
+        #[cfg(feature = "metrics")]
+        self.refresh_gauges();
+    }
+
+    /// Mark tx as rejected with a reason. Also shrink byte accounting.
+    pub fn mark_rejected(&mut self, hash: &TxHash, reason: impl Into<String>, approx_bytes: usize) {
+        let reason_str = reason.into();
+        self.statuses
+            .insert(*hash, TxStatus::Rejected { error: reason_str.clone() });
+        self.cur_bytes = self.cur_bytes.saturating_sub(approx_bytes);
+        #[cfg(feature = "metrics")]
+        {
+            EEZO_TX_REJECTED_TOTAL
+                .with_label_values(&[reason_str.as_str()])
+                .inc();
+            self.refresh_gauges();
+        }
+    }
+
+    pub fn status(&self, hash: &TxHash) -> Option<TxStatus> {
+        self.statuses.get(hash).cloned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    // Keep Prometheus gauges in sync with current queue contents.
+    #[cfg(feature = "metrics")]
+    fn refresh_gauges(&self) {
+        EEZO_MEMPOOL_LEN.set(self.queue.len() as i64);
+        let bytes: usize = self.queue.iter().map(|e| e.bytes.len()).sum();
+        EEZO_MEMPOOL_BYTES.set(bytes as i64);
+    }
+
+    pub fn cur_bytes(&self) -> usize {
+        self.cur_bytes
+    }
+
+    pub fn max_len(&self) -> usize {
+        self.max_len
+    }
+
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+}
+
+/// Concurrent wrapper used by the HTTP layer & proposer.
+#[derive(Clone)]
+pub struct SharedMempool(Arc<Mutex<Mempool>>);
+
+impl SharedMempool {
+    pub fn new(inner: Mempool) -> Self {
+        Self(Arc::new(Mutex::new(inner)))
+    }
+
+    pub async fn submit(
+        &self,
+        ip: IpAddr,
+        hash: TxHash,
+        bytes: Vec<u8>,
+    ) -> Result<(), SubmitError> {
+        let mut g = self.0.lock().await;
+        g.submit(ip, hash, bytes)
+    }
+
+    pub async fn pop_batch(&self, target_bytes: usize) -> Vec<Arc<TxEntry>> {
+        let mut g = self.0.lock().await;
+        g.pop_batch(target_bytes)
+    }
+
+    pub async fn mark_included(&self, hash: &TxHash, height: u64, approx_bytes: usize) {
+        let mut g = self.0.lock().await;
+        g.mark_included(hash, height, approx_bytes);
+    }
+
+    pub async fn mark_rejected(&self, hash: &TxHash, reason: impl Into<String>, approx_bytes: usize) {
+        let mut g = self.0.lock().await;
+        g.mark_rejected(hash, reason, approx_bytes);
+    }
+
+    pub async fn status(&self, hash: &TxHash) -> Option<TxStatus> {
+        let g = self.0.lock().await;
+        g.status(hash)
+    }
+
+    pub async fn stats(&self) -> (usize, usize, usize, usize) {
+        let g = self.0.lock().await;
+        (g.len(), g.cur_bytes(), g.max_len(), g.max_bytes())
+    }
+
+    /// Return the number of transactions currently in the mempool.
+    pub async fn len(&self) -> usize {
+        let g = self.0.lock().await;
+        g.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
+
+    fn h(n: u8) -> TxHash {
+        let mut x = [0u8; 32];
+        x[0] = n;
+        x
+    }
+
+    #[tokio::test]
+    async fn basic_submit_and_pop() {
+        let mp = SharedMempool::new(Mempool::new(4, 10_000, 10, 600));
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        mp.submit(ip, h(1), vec![0u8; 100]).await.unwrap();
+        mp.submit(ip, h(2), vec![0u8; 200]).await.unwrap();
+        assert_eq!(mp.stats().await.0, 2);
+        assert_eq!(mp.len().await, 2); // test the new len() method
+
+        let batch = mp.pop_batch(150).await;
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].hash, h(1));
+
+        // mark included / bytes shrink
+        mp.mark_included(&h(1), 42, 100).await;
+        let (_, cur, _, _) = mp.stats().await;
+        assert!(cur >= 200 && cur < 1000); // only best-effort accounting remained
+
+        // status checks
+        assert!(matches!(mp.status(&h(1)).await, Some(TxStatus::Included { block_height: 42 })));
+        assert!(matches!(mp.status(&h(2)).await, Some(TxStatus::Pending)));
+    }
+
+    #[tokio::test]
+    async fn capacity_and_duplicate() {
+        let mp = SharedMempool::new(Mempool::new(1, 1024, 10, 600));
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        mp.submit(ip, h(1), vec![0u8; 100]).await.unwrap();
+        // full by len
+        let e = mp.submit(ip, h(2), vec![0u8; 100]).await.err().unwrap();
+        assert!(matches!(e, SubmitError::QueueFull));
+
+        // duplicate
+        let e = mp.submit(ip, h(1), vec![0u8; 100]).await.err().unwrap();
+        assert!(matches!(e, SubmitError::Duplicate));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_and_bytes_cap() {
+        let mp = SharedMempool::new(Mempool::new(10, 128, 1, 60)); // capacity=1 token, refill 1/sec
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        mp.submit(ip, h(1), vec![0u8; 64]).await.unwrap();
+        let e = mp.submit(ip, h(2), vec![0u8; 64]).await.err().unwrap();
+        assert!(matches!(e, SubmitError::RateLimited));
+
+        // wait ~1.1s to refill
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        mp.submit(ip, h(2), vec![0u8; 80]).await.unwrap();
+
+        // bytes cap reached now (64 + 80 > 128) on a third submit
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let e = mp.submit(ip, h(3), vec![0u8; 64]).await.err().unwrap();
+        assert!(matches!(e, SubmitError::BytesCapReached));
+    }
+}

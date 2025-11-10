@@ -1,0 +1,16 @@
+# EEZO — Proof of Task T3 Completion (Hardened PQ Authentication)
+
+## ✅ Scope
+Adds a post-quantum authentication layer over the T2 secure transport with robust, audit-ready defenses.
+
+## 🔐 Security Properties Implemented
+- **Domain-separated transcript hash** (versioned, canonical, session-bound):
+  - `EEZO-PQC-AUTH-V1` domain
+  - Canonical `ClientHelloCore` + `ServerHelloCore` (auth fields excluded)
+  - Bound to context: `salt_c || salt_s || session_id`
+- **ML-DSA-44 signatures** (detached) with explicit context binding.
+- **Race-free session exposure**: session is returned to caller **only after** signature verify.
+- **Replay resistance** across sessions: transcript hash changes with context, so signatures don’t transfer.
+- **DoS groundwork**: LRU cache scaffold included for verification path (to be wired in T3.1).
+
+## 📦 Code Touched

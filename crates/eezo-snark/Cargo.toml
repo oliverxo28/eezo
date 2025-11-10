@@ -1,0 +1,38 @@
+[package]
+name = "eezo-snark"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "EEZO SNARK mini-circuit wrapper (T38.9)"
+publish = false
+
+[lib]
+name = "eezo_snark"
+path = "src/lib.rs"
+
+[features]
+# turns on the mini wrapper and its tests; safe to keep off by default
+snark-mini = ["eezo-prover/stark-air"]
+
+# optional: pick a backend later (we'll wire one in a later step)
+backend-arkworks = []
+backend-placeholder = []
+
+# ✅ NEW: PLONK-KZG backend feature
+plonk_kzg = []
+
+[dependencies]
+# we import StarkProofPublic from the prover; do NOT pull heavy features
+eezo-prover = { path = "../eezo-prover", default-features = false, features = ["stark-air"] }
+
+# lightweight utils
+blake3 = { version = "1", default-features = false, features = ["std"] }
+anyhow = "1"
+thiserror = "1"
+
+# optional backends (stubbed for now; we'll gate code)
+ark-ff = { version = "0.4", optional = true, default-features = false }
+ark-serialize = { version = "0.4", optional = true, default-features = false }
+
+[dev-dependencies]
+rand = "0.8"

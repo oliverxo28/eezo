@@ -1,18 +1,15 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
-use zeroize::Zeroize;
 use pqcrypto_mldsa::mldsa44 as pq44;
 use pqcrypto_traits::sign::{PublicKey as PkTrait, SecretKey as SkTrait};
+use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
+use zeroize::Zeroize;
 
 use eezo_crypto::sig::SignatureScheme;
 use eezo_ledger::cert_store::{CertLookup, ValidatedPk};
-use eezo_ledger::config::BatchVerifyCfg;
 use eezo_ledger::consensus::{
-    signer_id_from_pk, ConsensusMsgCore, PreVote, SignedConsensusMsg, PkBytes as LedPk,
+    signer_id_from_pk, ConsensusMsgCore, PkBytes as LedPk, PreVote, SignedConsensusMsg,
 };
 use eezo_ledger::consensus_sig::sign_core;
-use eezo_ledger::consensus::validate_consensus_batch;
-use eezo_ledger::VerifyCache;
 
 type PqPk = pq44::PublicKey;
 
@@ -83,7 +80,11 @@ impl DummyCerts {
 }
 
 impl CertLookup for DummyCerts {
-    fn get_pk(&self, _validator_id: &eezo_ledger::consensus::SignerId, _at_height: u64) -> Option<ValidatedPk> {
+    fn get_pk(
+        &self,
+        _validator_id: &eezo_ledger::consensus::SignerId,
+        _at_height: u64,
+    ) -> Option<ValidatedPk> {
         Some(ValidatedPk {
             pk: self.pk.clone(),
             valid_until: u64::MAX,
@@ -143,16 +144,8 @@ fn make_msgs(
 }
 
 fn bench_consensus_batch(c: &mut Criterion) {
-    let sizes = [16usize, 64, 256, 1024];
+    let sizes = [1usize, 8, 64, 256];
     let ratios = [(1.0, "100%"), (0.9, "90%"), (0.5, "50%")];
-
-    // shared config knobs
-    let mut cfg = BatchVerifyCfg::default();
-    cfg.threshold = 64;      // batch kicks in at >=64
-    cfg.max_batch = 4096;
-    cfg.parallel = true;     // toggle to false to compare serial
-    cfg.cache_enabled = true;
-    cfg.cache_capacity = 100_000;
 
     const CHAIN_LABEL: &[u8] = b"eezo-devnet";
     let mut chain_id = [0u8; 20];
@@ -166,26 +159,13 @@ fn bench_consensus_batch(c: &mut Criterion) {
     for &n in &sizes {
         group.throughput(Throughput::Elements(n as u64));
         for &(ratio, lbl) in &ratios {
-            // fresh msgs
             let msgs = make_msgs(n, &sk, &pk, &chain_id, ratio);
-
-            // optional cache warmup pass (simulates hot validator set)
-            let cache = if cfg.cache_enabled {
-                Some(VerifyCache::new(cfg.cache_capacity))
-            } else { None };
-
-            if let Some(ref vc) = cache {
-                // warm: verify once so second pass benefits from hits
-                let mut warm = msgs.clone();
-                validate_consensus_batch(chain_id, &certs, &cfg, &mut warm, Some(vc));
-            }
-
             group.bench_function(
                 BenchmarkId::new(format!("n={}", n), format!("valid={}", lbl)),
                 |b| {
                     b.iter(|| {
-                        let mut m = msgs.clone();
-                        validate_consensus_batch(chain_id, &certs, &cfg, &mut m, cache.as_ref());
+                        let m = msgs.clone();
+                        let _bits = eezo_ledger::consensus_sig::verify_batch(&m, chain_id, &certs);
                         criterion::black_box(&m);
                     });
                 },

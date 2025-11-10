@@ -9,7 +9,9 @@ pub struct VerifyCache {
 impl VerifyCache {
     pub fn new(capacity: usize) -> Self {
         let cap = NonZeroUsize::new(capacity.max(1)).unwrap();
-        Self { inner: RwLock::new(LruCache::new(cap)) }
+        Self {
+            inner: RwLock::new(LruCache::new(cap)),
+        }
     }
 
     #[inline]
@@ -20,5 +22,11 @@ impl VerifyCache {
     #[inline]
     pub fn put(&self, key: Vec<u8>, val: bool) {
         self.inner.write().put(key, val);
+    }
+}
+
+impl Default for VerifyCache {
+    fn default() -> Self {
+        Self::new(1024)
     }
 }

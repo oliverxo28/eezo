@@ -1,0 +1,34 @@
+## Node configuration & precedence
+
+The node merges configuration in this exact order:
+
+1. **Defaults** (hardcoded)
+2. **Config file** (TOML), chosen by `--config-file` or `EEZO_CONFIG_FILE`
+3. **Environment** (`EEZO_*` variables)
+4. **CLI flags** (highest precedence)
+
+Effective values are exposed at `GET /config`.
+
+### Supported flags / env
+
+| Purpose           | CLI flags                                 | Env var             | Example                         |
+|-------------------|--------------------------------------------|---------------------|----------------------------------|
+| Listen address    | `--listen` (alias: `--listen-addr`)        | `EEZO_LISTEN`       | `127.0.0.1:18080`                |
+| Data directory    | `--datadir` (alias: `--data-dir`, `--data_dir`) | `EEZO_DATADIR`  | `crates/node/target/testdata/x`  |
+| Genesis path      | `--genesis`                                | `EEZO_GENESIS`      | `crates/genesis.min.json`        |
+| Log level         | `--log-level` (alias: `--log_level`)       | `EEZO_LOG_LEVEL`    | `debug`                          |
+| Config file       | `--config-file`                            | `EEZO_CONFIG_FILE`  | `crates/node/target/testdata/node.toml` |
+| Metrics on/off    | _n/a (ENV only)_                           | `EEZO_METRICS`      | `on` / `off` / `true` / `false`  |
+| Metrics port      | _n/a (ENV only)_                           | `EEZO_METRICS_PORT` | `18100`                          |
+
+> Notes  
+> • `/metrics` route is compiled only with feature `metrics`.  
+> • With feature `metrics` on, `/config` reflects `metrics_on` and `metrics_port` based on ENV.  
+> • Tests enforce the precedence and reflection guarantees.
+
+### Example `node.toml`
+
+```toml
+listen = "127.0.0.1:19999"
+datadir = "crates/node/target/testdata/from_file"
+log_level = "warn"

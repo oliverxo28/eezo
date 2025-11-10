@@ -1,0 +1,59 @@
+[package]
+name = "eezo-ledger-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.eezo-ledger]
+path = "../crates/ledger"
+# ✅ Bake features here so you don't need --features on CLI
+features = ["pq44-runtime", "eth-ssz", "testing"]
+
+[dependencies.eezo-serde]
+path = "../crates/serde"
+features = ["eth-ssz"]
+
+# Optional: only uncomment if you still see "no signature scheme enabled"
+# [dependencies.eezo-crypto]
+# path = "../crates/crypto"
+# features = ["mldsa"]
+
+[features]
+# Enable eth-ssz by default so cfg(feature = "eth-ssz") in fuzz targets is active
+default = ["eth-ssz"]
+# Forward the fuzz-crate feature to the dependencies' eth-ssz features
+eth-ssz = ["eezo-ledger/eth-ssz", "eezo-serde/eth-ssz"]
+
+[[bin]]
+name = "eth_tx_decode"      # ETH-SSZ fuzzing target
+path = "fuzz_targets/eth_tx_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tx_decode"          # SSZ-lite fuzzing target
+path = "fuzz_targets/tx_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "eth_header_only"
+path = "fuzz_targets/eth_header_only.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "eth_signedtx_only"
+path = "fuzz_targets/eth_signedtx_only.rs"
+test = false
+doc = false
+bench = false

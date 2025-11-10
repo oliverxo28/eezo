@@ -1,2 +1,0 @@
-   Compiling eezo-ledger v0.1.0 (/home/saeed/Block/eezo/crates/ledger)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.72s

@@ -1,0 +1,46 @@
+[package]
+name = "eezo-wallet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# error fixes: bring in anyhow and the local ledger crate
+anyhow = "1"
+# Use the package named `eezo-ledger`, but keep the crate name `eezo_ledger` in code.
+eezo_ledger = { package = "eezo-ledger", path = "../ledger" }
+eezo-crypto = { path = "../crypto", version = "0.1.0", default-features = false, features = ["mldsa"] }
+bech32 = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+argon2 = "0.5"
+rand = "0.8"
+zeroize = "1"
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+thiserror = "1"
+clap = { version = "4.5", features = ["derive"] }
+hex = "0.4"
+rpassword = "7"
+ureq = { version = "2", features = ["json"] }
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tiny-keccak = { version = "2", features = ["keccak"] }
+pqcrypto-mldsa  = { version = "0.1.2", optional = true }
+pqcrypto-traits = { version = "0.3.5", optional = true }
+
+[[bin]]
+name = "wallet"
+path = "src/bin/wallet.rs"
+
+[features]
+default = []
+pq44-runtime = [
+  "eezo_ledger/pq44-runtime",
+  "eezo-crypto/pq44-runtime",
+  "pqcrypto-mldsa",
+  "pqcrypto-traits",
+]
+testing = []
+
+[dev-dependencies]
+tempfile = "3"

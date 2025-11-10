@@ -1,0 +1,15 @@
+[package]
+name = "eezo-serde"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror = "1"
+blake3 = { version = "1", optional = true }
+
+[features]
+default = []
+# expose the ETH-SSZ surface only when enabled
+eth-ssz = ["dep:blake3"]

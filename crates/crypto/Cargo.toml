@@ -1,0 +1,63 @@
+[package]
+name = "eezo-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# PQ backends (optional; enabled via features)
+pqcrypto-mldsa       = { version = "0.1", optional = true }
+pqcrypto-mlkem       = { version = "0.1", optional = true }
+pqcrypto-sphincsplus = { version = "0.7", optional = true }
+pqcrypto-traits      = { version = "0.3", package = "pqcrypto-traits", optional = true }
+
+# ML-KEM helpers
+chacha20poly1305 = { version = "0.10", optional = true }
+hkdf             = { version = "0.12", optional = true }
+
+# Core deps
+blake3   = "1"
+sha3     = "0.10"
+thiserror = "1"
+zeroize  = "1"            # used by some modules
+
+# Optional serde when serde_support feature is enabled
+serde = { version = "1", features = ["derive"], optional = true }
+anyhow = "1.0.100"
+# eezo-kats was moved to dev-dependencies
+
+[build-dependencies]
+# Only used when PQ backends are active
+pqcrypto-internals = { version = "0.2.11", optional = true }
+
+[dev-dependencies]
+eezo-kats = { version = "0.1.0", path = "../eezo-kats" }
+
+[features]
+# Default to a usable combo so plain `cargo check -p eezo-crypto` builds
+default = ["mldsa", "mlkem"] # <-- Added "mlkem"
+
+# Backend selector (empty switch for cfgs)
+backend-pqcrypto = []
+
+# Individual schemes
+mldsa   = ["dep:pqcrypto-mldsa", "dep:pqcrypto-internals", "dep:pqcrypto-traits"]
+mlkem   = ["dep:pqcrypto-mlkem", "dep:pqcrypto-internals", "dep:pqcrypto-traits", "dep:chacha20poly1305", "dep:hkdf"]
+slh-dsa = ["dep:pqcrypto-sphincsplus", "dep:pqcrypto-traits"]
+
+# SLH-DSA backend selectors (choose exactly one with slh-dsa)
+slh-dsa-backend-sha2-128f-simple  = []
+slh-dsa-backend-shake-128f-simple = []
+
+# What the node expects (enables ML-DSA)
+pq44-runtime = ["mldsa"]
+
+# Convenience roll-up
+ml-suite = ["mldsa", "mlkem"]
+
+# Dev/test helper used by sig/mod.rs (bypass real verify)
+skip-sig-verify = []
+
+# Present because code checks it; also pulls serde derive when enabled
+serde_support = ["dep:serde"]
