@@ -4,6 +4,13 @@
 //! - SLH-DSA-128f (optional) => AlgoId::SlhDsa128f (0x0244)
 use super::{AlgoId, SignatureScheme};
 
+// --- T40.1 shadow verify metrics ---
+use crate::metrics::{
+    sig_shadow_success_inc,
+    sig_shadow_failure_inc,
+    sig_shadow_attempts_inc,
+};
+
 // Concrete schemes behind the features (match the crypto crate features).
 #[cfg(feature = "mldsa")]
 use super::ml_dsa::{
@@ -64,6 +71,60 @@ impl SignatureRegistry {
             SignatureRegistry::SlhDsa128f => <SlhDsa128f as SignatureScheme>::SIG_MAX_LEN,
         }
     }
+
+    /// T40.1 — Shadow Verification Wrapper
+    ///
+    /// This function performs:
+    /// 1. Strict verification using active suite (consensus)
+    /// 2. Shadow verification using next suite (metrics only)  
+    /// 3. Emits metrics for next-suite behavior
+    ///
+    /// IMPORTANT:
+    /// - Consensus behavior does NOT change.
+    /// - Only metrics are emitted.
+    /// - Return value only reflects active-suite result.
+    pub fn verify_dual_accept(
+        &self,
+        state: &RotationState,
+        height: u64,
+        pubkey: &[u8],
+        msg: &[u8],
+        sig: &[u8],
+    ) -> ShadowResult {
+        // --- strict verification with active suite ---
+        let active_suite = state.active_suite;
+        let active_ok = verify_with_algo(active_suite, pubkey, msg, sig);
+
+        // --- prepare shadow result ---
+        let mut next_ok = false;
+        let mut shadow_attempted = false;
+
+        // --- only run shadow verify if window open and next suite exists ---
+        if let Some(next_suite) = state.next_suite {
+            if state.accepts(height, next_suite) {
+                shadow_attempted = true;
+
+                // record attempt
+                sig_shadow_attempts_inc();
+
+                // shadow verification with next suite
+                next_ok = verify_with_algo(next_suite, pubkey, msg, sig);
+
+                // record metrics
+                if next_ok {
+                    sig_shadow_success_inc();
+                } else {
+                    sig_shadow_failure_inc();
+                }
+            }
+        }
+
+        ShadowResult {
+            active_ok,
+            next_ok,
+            shadow_attempted,
+        }
+    }
 }
 
 // -------------------- T34: Suite Rotation Helpers --------------------
@@ -97,6 +158,16 @@ impl RotationState {
         }
         false
     }
+}
+
+// =====================================================================
+// T40.1: Shadow Verification Result (non-consensus, metrics-only)
+// =====================================================================
+#[derive(Debug, Clone, Copy)]
+pub struct ShadowResult {
+    pub active_ok: bool,
+    pub next_ok: bool,
+    pub shadow_attempted: bool,
 }
 
 /// Map an AlgoId to our public suite id (u8) for UI/telemetry/governance.

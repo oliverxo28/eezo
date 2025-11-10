@@ -1,3 +1,4 @@
+//crates/node/src/metrics.rs
 use once_cell::sync::Lazy;
 use prometheus::{
     register_histogram_vec, register_int_counter, register_int_counter_vec,
@@ -454,6 +455,14 @@ pub fn register_t36_bridge_metrics() {
 pub fn register_t37_kemtls_metrics() {
     // delegate to eezo-net's registrar (idempotent)
     register_kemtls_net_metrics();
+}
+// ─────────────────────────── T40.1: Shadow sig metrics registrar ───────────
+/// Eagerly register the crypto crate's shadow-verify counters so they are
+/// visible on `/metrics` even before the first shadow verification attempt.
+#[cfg(feature = "metrics")]
+pub fn register_t40_shadow_sig_metrics() {
+    // idempotent touch of Lazy statics in eezo-crypto
+    eezo_crypto::metrics::register_t40_shadow_metrics();
 }
 
 /// Helper: increment emitted counter when a checkpoint is written.

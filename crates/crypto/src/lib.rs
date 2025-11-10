@@ -25,6 +25,8 @@ pub mod hash;
 pub mod kem;
 pub mod sig;
 pub mod suite;
+pub mod metrics; // for T40.1 shadow verify counters
+
 
 // Commonly used verifier shortcut
 // Only re-export when a verifier is actually compiled in.

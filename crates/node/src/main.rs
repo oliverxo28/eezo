@@ -96,6 +96,15 @@ mod consensus_runner;
 // T36.6: expose bridge metrics immediately at boot
 #[cfg(feature = "metrics")]
 use crate::metrics::register_t36_bridge_metrics;
+// T40.1: shadow signature counters (eager registrar)
+#[cfg(feature = "metrics")]
+use crate::metrics::register_t40_shadow_sig_metrics;
+// (optional) add missing registrars your friend flagged:
+#[cfg(feature = "metrics")]
+use crate::metrics::{register_t33_bridge_metrics, register_t34_rotation_metrics, register_t37_kemtls_metrics};
+// T40.1: shadow signature counters (eager registrar)
+#[cfg(feature = "metrics")]
+use crate::metrics::register_t40_shadow_sig_metrics;
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
 #[cfg(feature = "checkpoints")]
@@ -1813,6 +1822,13 @@ async fn main() -> anyhow::Result<()> {
     // T36.6: ensure bridge metrics are registered before serving HTTP
     #[cfg(feature = "metrics")]
     register_t36_bridge_metrics();
+    // T40.1: ensure shadow-signature counters appear on /metrics at boot
+    register_t40_shadow_sig_metrics();
+    // (optional) your friend says these aren’t currently called at startup:
+    // safe to add here; all are idempotent
+    register_t33_bridge_metrics();
+    register_t34_rotation_metrics();
+    register_t37_kemtls_metrics();	
     // T37: spawn a dedicated /metrics HTTP server on EEZO_METRICS_BIND (or default)
     let metrics_bind = std::env::var("EEZO_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9898".into());
     tokio::spawn(spawn_metrics_server(metrics_bind.clone()));
