@@ -36,6 +36,15 @@ pub struct GenesisConfig {
     pub initial_accounts: Vec<(Address, u128)>, // (address, balance)
     pub initial_supply: Supply,
     pub consensus_params: ConsensusParams,
+    // --- T34: crypto-suite rotation policy (optional; keeps old JSONs valid) ---
+    // If absent in genesis JSON, these come out as None and the node will
+    // fall back to ENV (if set) or hardcoded defaults.
+    #[serde(default)]
+    pub active_suite_id: Option<u8>,
+    #[serde(default)]
+    pub next_suite_id: Option<u8>,
+    #[serde(default)]
+    pub dual_accept_until: Option<u64>,	
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

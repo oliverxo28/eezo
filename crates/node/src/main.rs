@@ -2101,7 +2101,7 @@ async fn main() -> anyhow::Result<()> {
         let single: SingleNode = SingleNode::new(cfg, sk, pk);
 
         // Tick cadence & error behavior (env-tunable)
-        let tick_ms = env_u64("EEZO_CONSENSUS_TICK_MS", 200);
+        let tick_ms: u64 = env_u64(&["EEZO_CONSENSUS_TICK_MS"]).unwrap_or(200);
         let rollback_on_error = true;
 
         // NEW: pass the DB (Some(persistence.clone())) so T36.5 can read real roots/timestamp
@@ -2202,24 +2202,52 @@ async fn main() -> anyhow::Result<()> {
         mp_rate_capacity,
         mp_rate_per_min,
     ));
-    // -- T34.0: Crypto-suite rotation policy (env) ------------------------------
-    // Defaults: “old only” (active=1, no next, no window)
-    let active_suite_id: u8 = std::env::var("EEZO_ACTIVE_SUITE")
-        .ok()
-        .and_then(|s| s.parse::<u8>().ok())
+    // -- T34.0: Crypto-suite rotation policy (ENV > GENESIS > DEFAULTS) ---------
+    // We support both EEZO_ROTATION_* and EEZO_* env keys (either may be set).
+    fn env_u8(keys: &[&str]) -> Option<u8> {
+        for k in keys {
+            if let Ok(v) = std::env::var(k) {
+                if let Ok(x) = v.trim().parse::<u8>() { return Some(x); }
+            }
+        }
+        None
+    }
+    fn env_u64(keys: &[&str]) -> Option<u64> {
+        for k in keys {
+            if let Ok(v) = std::env::var(k) {
+                let t = v.trim();
+                if t.is_empty() { continue; }
+                if let Ok(x) = t.parse::<u64>() { return Some(x); }
+            }
+        }
+        None
+    }
+
+    // 1) Try to read rotation defaults from genesis (if any)
+    #[cfg(feature = "persistence")]
+    let (gen_active, gen_next, gen_until) = {
+        if let Some(gen_path) = &cfg.genesis {
+            if let Ok(text) = std::fs::read_to_string(gen_path) {
+                if let Ok(gc) = serde_json::from_str::<eezo_ledger::GenesisConfig>(&text) {
+                    (gc.active_suite_id, gc.next_suite_id, gc.dual_accept_until)
+                } else { (None, None, None) }
+            } else { (None, None, None) }
+        } else { (None, None, None) }
+    };
+    #[cfg(not(feature = "persistence"))]
+    let (gen_active, gen_next, gen_until) = (None, None, None);
+
+    // 2) Resolve with precedence: ENV > GENESIS > DEFAULTS
+    let active_suite_id: u8 = env_u8(&["EEZO_ROTATION_ACTIVE_SUITE","EEZO_ACTIVE_SUITE"])
+        .or(gen_active)
         .unwrap_or(1);
-    let next_suite_id: Option<u8> = std::env::var("EEZO_NEXT_SUITE")
-        .ok()
-        .and_then(|s| {
-            let t = s.trim();
-            if t.is_empty() { None } else { t.parse::<u8>().ok() }
-        });
-    let dual_accept_until: Option<u64> = std::env::var("EEZO_DUAL_ACCEPT_UNTIL")
-        .ok()
-        .and_then(|s| {
-            let t = s.trim();
-            if t.is_empty() { None } else { t.parse::<u64>().ok() }
-        });
+
+    let next_suite_id: Option<u8> = env_u8(&["EEZO_ROTATION_NEXT_SUITE","EEZO_NEXT_SUITE"])
+        .or(gen_next);
+
+    let dual_accept_until: Option<u64> =
+        env_u64(&["EEZO_ROTATION_DUAL_UNTIL","EEZO_DUAL_ACCEPT_UNTIL"])
+            .or(gen_until);
     // A simple boolean for logs (and later, a metric/gauge in metrics.rs)
     let window_open = match (next_suite_id, dual_accept_until) {
         (Some(_), Some(h)) if h > 0 => true,
