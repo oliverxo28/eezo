@@ -9,6 +9,7 @@
 pub type QcHash = [u8; 32];
 
 use crate::rotation::RotationPolicy;
+use crate::qc_sidecar::{QcSidecarV2, ReanchorReason}; // T41.1/41.2: sidecar types (additive)
 use eezo_crypto::suite::{CryptoSuite, SuiteError};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -357,6 +358,11 @@ pub struct BridgeHeader {
     /// Backward compatible: omitted in older files; defaults to 1.
     #[serde(default = "BridgeHeader::default_suite_id")]
     pub suite_id: u8,
+    /// Optional QC sidecar v2 (re-anchor envelope). Additive & backward-compatible:
+    /// - omitted on old files,
+    /// - not serialized when None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qc_sidecar_v2: Option<QcSidecarV2>,	
 }
 
 impl BridgeHeader {
@@ -382,6 +388,8 @@ impl BridgeHeader {
             timestamp,
             finality_depth,
             suite_id: Self::default_suite_id(),
+            // T41.1: additive field defaults to None for writers
+            qc_sidecar_v2: None,
         }
     }
 
@@ -404,6 +412,8 @@ impl BridgeHeader {
             timestamp,
             finality_depth,
             suite_id,
+            // T41.1: additive field defaults to None for writers
+            qc_sidecar_v2: None
         }
     }
 
@@ -418,8 +428,101 @@ impl BridgeHeader {
     pub fn set_suite(&mut self, s: CryptoSuite) {
         self.suite_id = s.as_id();
     }
+    // ---------- T41.1: tiny helper; no enforcement ----------
+    /// Format-only sanity for an attached sidecar (if any). Does **not** verify crypto.
+    #[inline]
+    pub fn sidecar_v2_is_sane(&self) -> bool {
+        match &self.qc_sidecar_v2 {
+            None => true,
+            Some(sc) => sc.is_sane_for_height(self.height),
+        }
+    }
+    /// Convenience setter (purely additive; used in later tasks/tests).
+    #[inline]
+    pub fn with_sidecar_v2(mut self, sc: QcSidecarV2) -> Self {
+        self.qc_sidecar_v2 = Some(sc);
+        self
+    }	
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// T41.2: QC sidecar emit helpers (policy + shape), kept in ledger so node can use.
+// These are additive and do not change verification or consensus behavior.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns true iff we should emit a QC sidecar v2 at `height` according to rotation policy.
+/// Rule (A): emit on the **first block after rotation cutoff**.
+///   cutoff ≔ dual_accept_until; emit at height == cutoff + 1
+/// (Rules (B) gap-recovery and (C) admin-override will be added later.)
+pub fn should_emit_qc_sidecar_v2(height: u64, rot: &RotationPolicy) -> bool {
+    match rot.dual_accept_until {
+        Some(cut) => height == cut.saturating_add(1),
+        None => false,
+    }
 }
 
+/// Builds a stub QC sidecar v2 for emission (no cryptographic verification here).
+/// We carry non-empty, size-bounded bytes so format sanity passes; real signing can be added later.
+pub fn build_stub_sidecar_v2(suite_id: u8, anchor_height: u64, reason: ReanchorReason) -> QcSidecarV2 {
+    // minimal non-empty placeholders; sized so `is_sane_for_height` passes
+    let anchor_pub = vec![0u8; 32]; // placeholder pubkey bytes
+    let anchor_sig = vec![0u8; 64]; // placeholder signature bytes
+    QcSidecarV2 {
+        anchor_suite: suite_id,
+        anchor_sig,
+        anchor_pub,
+        anchor_height,
+        reason,
+    }
+}
+/// T41.3: lightweight reader-only validator for QC sidecar v2.
+/// Behavior: returns `Ok(())` if no sidecar, or if present and format-sane and suite matches.
+/// No cryptographic checks here (reader path only).
+pub fn validate_sidecar_v2_for_header(h: &BridgeHeader) -> Result<(), &'static str> {
+    match &h.qc_sidecar_v2 {
+        None => Ok(()),
+        Some(sc) => {
+            if !sc.is_sane_for_height(h.height) {
+                return Err("qc_sidecar_v2: not sane for header height");
+            }
+            if sc.anchor_suite != h.suite_id {
+                return Err("qc_sidecar_v2: suite_id mismatch");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Optional: obtain a rotation policy from env vars (lightweight, avoids plumbing now).
+/// Usage (in node): if `Some(rot)`, callers can attach sidecar based on policy.
+///
+/// Env knobs:
+/// - EEZO_ROTATION_ACTIVE_ID: u8 (default 1)
+/// - EEZO_ROTATION_NEXT_ID:   u8 (optional; if absent → no rotation scheduled)
+/// - EEZO_ROTATION_CUTOFF:    u64 (dual_accept_until) (optional)
+/// - EEZO_ROTATION_ACTIVATED_AT: u64 (optional)
+pub fn rotation_policy_from_env() -> Option<RotationPolicy> {
+    use std::str::FromStr;
+    use eezo_crypto::suite::CryptoSuite;
+
+    // active id (default 1 = ml-dsa-44 in your mapping)
+    let active_id: u8 = std::env::var("EEZO_ROTATION_ACTIVE_ID")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let active = CryptoSuite::try_from(active_id).ok()?;
+
+    // optional next id
+    let next = std::env::var("EEZO_ROTATION_NEXT_ID")
+        .ok()
+        .and_then(|s| s.parse::<u8>().ok())
+        .and_then(|id| CryptoSuite::try_from(id).ok());
+
+    // optional cutoff / activated-at
+    let dual_accept_until = std::env::var("EEZO_ROTATION_CUTOFF").ok().and_then(|s| s.parse().ok());
+    let activated_at_height = std::env::var("EEZO_ROTATION_ACTIVATED_AT").ok().and_then(|s| s.parse().ok());
+
+    Some(RotationPolicy { active, next, dual_accept_until, activated_at_height })
+}
 /// Filename for a checkpoint header JSON (zero-padded height for lexicographic order).
 #[inline]
 pub fn checkpoint_filename(height: u64) -> String {

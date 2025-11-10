@@ -473,6 +473,91 @@ pub fn register_t40_shadow_sig_metrics() {
 pub fn register_t40_cutover_metrics() {
     eezo_crypto::metrics::register_t40_shadow_metrics();
 }
+// ─────────────────────────── T41.3: QC sidecar v2 metrics ───────────
+#[cfg(feature = "metrics")]
+pub static EEZO_QC_SIDECAR_V2_EMITTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_qc_sidecar_v2_emitted_total",
+        "QC-sidecar v2 objects attached/emitted alongside checkpoints"
+    )
+    .expect("metric registered")
+});
+
+#[cfg(feature = "metrics")]
+pub static EEZO_QC_SIDECAR_V2_VERIFY_OK_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_qc_sidecar_v2_verify_ok_total",
+        "QC-sidecar v2 format checks passed (reader-only)"
+    )
+    .expect("metric registered")
+});
+
+#[cfg(feature = "metrics")]
+pub static EEZO_QC_SIDECAR_V2_VERIFY_ERR_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_qc_sidecar_v2_verify_err_total",
+        "QC-sidecar v2 format checks failed (reader-only)"
+    )
+    .expect("metric registered")
+});
+// ── T41.4: strict mode outcomes ─────────────────────────────────────────────
+#[cfg(feature = "metrics")]
+pub static EEZO_QC_SIDECAR_V2_ENFORCE_OK_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_qc_sidecar_v2_enforce_ok_total",
+        "QC-sidecar v2 enforcement passed at cutover+1"
+    )
+    .expect("metric registered")
+});
+
+#[cfg(feature = "metrics")]
+pub static EEZO_QC_SIDECAR_V2_ENFORCE_FAIL_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_qc_sidecar_v2_enforce_fail_total",
+        "QC-sidecar v2 enforcement failed at cutover+1 (missing/malformed)"
+    )
+    .expect("metric registered")
+});
+
+/// Eagerly register T41.3 QC sidecar metrics so they show on /metrics immediately.
+#[cfg(feature = "metrics")]
+pub fn register_t41_qc_sidecar_metrics() {
+    let _ = &*EEZO_QC_SIDECAR_V2_EMITTED_TOTAL;
+    let _ = &*EEZO_QC_SIDECAR_V2_VERIFY_OK_TOTAL;
+    let _ = &*EEZO_QC_SIDECAR_V2_VERIFY_ERR_TOTAL;
+    let _ = &*EEZO_QC_SIDECAR_V2_ENFORCE_OK_TOTAL;   // T41.4
+    let _ = &*EEZO_QC_SIDECAR_V2_ENFORCE_FAIL_TOTAL; // T41.4	
+}
+
+#[inline]
+pub fn qc_sidecar_emitted_inc() {
+    #[cfg(feature = "metrics")]
+    { EEZO_QC_SIDECAR_V2_EMITTED_TOTAL.inc(); }
+}
+
+#[inline]
+pub fn qc_sidecar_verify_ok_inc() {
+    #[cfg(feature = "metrics")]
+    { EEZO_QC_SIDECAR_V2_VERIFY_OK_TOTAL.inc(); }
+}
+
+#[inline]
+pub fn qc_sidecar_verify_err_inc() {
+    #[cfg(feature = "metrics")]
+    { EEZO_QC_SIDECAR_V2_VERIFY_ERR_TOTAL.inc(); }
+}
+
+#[inline]
+pub fn qc_sidecar_enforce_ok_inc() {
+    #[cfg(feature = "metrics")]
+    { EEZO_QC_SIDECAR_V2_ENFORCE_OK_TOTAL.inc(); }
+}
+
+#[inline]
+pub fn qc_sidecar_enforce_fail_inc() {
+    #[cfg(feature = "metrics")]
+    { EEZO_QC_SIDECAR_V2_ENFORCE_FAIL_TOTAL.inc(); }
+}
 
 /// Helper: increment emitted counter when a checkpoint is written.
 #[inline]

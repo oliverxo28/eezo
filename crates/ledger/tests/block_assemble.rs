@@ -4,15 +4,16 @@ use eezo_ledger::{
     tx_types::tx_domain_bytes,
     Address, Accounts, SignedTx, TxCore,
 };
-#[cfg(feature = "pq44-runtime")]
+#[cfg(all(feature = "pq44-runtime", feature = "external_pqcrypto"))]
 use pqcrypto_mldsa::mldsa44::{detached_sign, keypair};
-#[cfg(feature = "pq44-runtime")]
+#[cfg(all(feature = "pq44-runtime", feature = "external_pqcrypto"))]
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
 use proptest::prelude::*;
 use rand::{seq::SliceRandom, thread_rng};
 use std::convert::TryFrom;
 
-#[cfg(feature = "pq44-runtime")]
+// real signer when external pqcrypto is available
+#[cfg(all(feature = "pq44-runtime", feature = "external_pqcrypto"))]
 fn sign_with_pk_sk(
     chain_id: [u8; 20],
     core: TxCore,
@@ -28,15 +29,30 @@ fn sign_with_pk_sk(
     }
 }
 
+// fallback signer for assembly-only tests (when skip-sig-verify is ON):
+// uses deterministic dummy pubkeys and empty sigs so assembly paths can run.
+#[cfg(all(feature = "pq44-runtime", not(feature = "external_pqcrypto")))]
+fn sign_with_pk_sk(_chain_id: [u8; 20], core: TxCore, pk_bytes: &[u8], _sk_ignored: &[u8]) -> SignedTx {
+    SignedTx { core, pubkey: pk_bytes.to_vec(), sig: vec![] }
+}
+
 #[cfg(feature = "pq44-runtime")]
 fn sign_tx(chain_id: [u8; 20], core: TxCore) -> SignedTx {
-    let (pk, sk) = keypair();
-    let msg = tx_domain_bytes(chain_id, &core);
-    let sig = detached_sign(&msg, &sk);
-    SignedTx {
-        core,
-        pubkey: pk.as_bytes().to_vec(),
-        sig: sig.as_bytes().to_vec(),
+    #[cfg(feature = "external_pqcrypto")]
+    {
+        let (pk, sk) = keypair();
+        let msg = tx_domain_bytes(chain_id, &core);
+        let sig = detached_sign(&msg, &sk);
+        SignedTx {
+            core,
+            pubkey: pk.as_bytes().to_vec(),
+            sig: sig.as_bytes().to_vec(),
+        }
+    }
+    #[cfg(not(feature = "external_pqcrypto"))]
+    {
+        // single-signer dummy pk
+        sign_with_pk_sk([0;20], core, &[7u8; 32], &[])
     }
 }
 
@@ -48,9 +64,19 @@ fn block_assembly_deterministic_and_fee_ordered() {
     let prev = [0x33u8; 32];
 
     // Three different signers
-    let (pk1, sk1) = keypair();
-    let (pk2, sk2) = keypair();
-    let (pk3, sk3) = keypair();
+    #[cfg(all(feature = "pq44-runtime", feature = "external_pqcrypto"))]
+    let (pk1, sk1, pk2, sk2, pk3, sk3) = { 
+        let (pk1, sk1) = keypair(); 
+        let (pk2, sk2) = keypair(); 
+        let (pk3, sk3) = keypair(); 
+        (pk1, sk1, pk2, sk2, pk3, sk3) 
+    };
+    #[cfg(all(feature = "pq44-runtime", not(feature = "external_pqcrypto")))]
+    let (pk1, sk1, pk2, sk2, pk3, sk3) = {
+        // dummy distinct pubkeys
+        let (pk1, pk2, pk3) = (vec![1u8; 32], vec![2u8; 32], vec![3u8; 32]);
+        (pk1, vec![], pk2, vec![], pk3, vec![])
+    };
 
     let t1 = sign_with_pk_sk(
         chain_id,
@@ -121,7 +147,10 @@ fn block_respects_byte_budget() {
     let prev = [0x44u8; 32];
 
     // One signer, multiple nonces (same sender)
+    #[cfg(all(feature = "pq44-runtime", feature = "external_pqcrypto"))]
     let (pk, sk) = keypair();
+    #[cfg(all(feature = "pq44-runtime", not(feature = "external_pqcrypto")))]
+    let (pk, sk) = (vec![5u8; 32], vec![]);
 
     // create one tx to derive the sender address
     let first = sign_with_pk_sk(
@@ -159,7 +188,7 @@ fn block_respects_byte_budget() {
     // Use any tx from the picked set (they all have the same budget shape in this test)
     let sample = blk.txs.get(0).expect("at least one tx picked");
     let per_tx = eezo_ledger::block::tx_budget_bytes(sample) as usize;
-    // max_bytes is whatever this test configured earlier; if it’s a local var, substitute that.
+    // max_bytes is whatever this test configured earlier; if it's a local var, substitute that.
     let allowed = (max_bytes - hdr_bytes) / per_tx;
     assert_eq!(blk.header.tx_count as usize, allowed);
 

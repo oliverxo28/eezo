@@ -31,6 +31,18 @@ use crate::metrics::{bridge_emitted_inc, bridge_latest_set, register_t36_bridge_
 #[cfg(feature = "checkpoints")]
 use eezo_ledger::checkpoints::{
     is_checkpoint_height, BridgeHeader, write_checkpoint_json_default,
+    // T41.2 helpers:
+    rotation_policy_from_env, should_emit_qc_sidecar_v2, build_stub_sidecar_v2,
+    // T41.3 validator:
+    validate_sidecar_v2_for_header,
+};
+#[cfg(feature = "checkpoints")]
+use eezo_ledger::qc_sidecar::ReanchorReason;
+#[cfg(feature = "metrics")]
+use crate::metrics::{
+    qc_sidecar_emitted_inc, qc_sidecar_verify_ok_inc, qc_sidecar_verify_err_inc,
+    // T41.4 (new):
+    qc_sidecar_enforce_ok_inc, qc_sidecar_enforce_fail_inc,
 };
 // persistence handle (methods live on &Persistence)
 #[cfg(feature = "persistence")]
@@ -38,6 +50,20 @@ use eezo_ledger::persistence::Persistence;
 #[cfg(feature = "persistence")]
 use eezo_ledger::persistence::StateSnapshot;
 // --------------------
+// T41.4: strict consumption toggle
+// Enabled only when the build has `--features qc-sidecar-v2-enforce` AND env EEZO_QC_SIDECAR_ENFORCE=1/true/on/yes
+#[cfg(feature = "checkpoints")]
+#[inline]
+fn qc_sidecar_enforce_on() -> bool {
+    #[cfg(feature = "qc-sidecar-v2-enforce")]
+    {
+        std::env::var("EEZO_QC_SIDECAR_ENFORCE")
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+            .unwrap_or(false)
+    }
+    #[cfg(not(feature = "qc-sidecar-v2-enforce"))]
+    { false }
+}
 
 /// Drives a `SingleNode` by calling `run_one_slot()` on a fixed cadence.
 /// No networking, no HTTP, no persistence here. Pure runner.
@@ -333,7 +359,7 @@ impl CoreRunnerHandle {
                                 };
 
 
-                                let hdr = BridgeHeader::new(
+                                let mut hdr = BridgeHeader::new(
                                     height,
 
                                     committed_header_hash, // Use hash of the header at 'height'
@@ -344,6 +370,47 @@ impl CoreRunnerHandle {
 
                                     finality_depth,        // env or default(2)
                                 );
+                                // T41.2: optionally attach QC sidecar v2 at cutover+1
+                                #[cfg(feature = "checkpoints")]
+                                if let Some(rot) = rotation_policy_from_env() {
+                                    if should_emit_qc_sidecar_v2(height, &rot) {
+                                        let sc = build_stub_sidecar_v2(hdr.suite_id, height, ReanchorReason::RotationCutover);
+                                        if sc.is_sane_for_height(height) {
+                                            hdr = hdr.with_sidecar_v2(sc);
+                                            #[cfg(feature = "metrics")]
+                                            { qc_sidecar_emitted_inc(); }
+                                        } else {
+                                            log::warn!("qc-sidecar: built sidecar not sane at h={}, skipping attach", height);
+                                        }
+                                    }
+                                }
+                                // T41.3: validate (reader-only) and bump metrics
+                                if hdr.qc_sidecar_v2.is_some() {
+                                    match validate_sidecar_v2_for_header(&hdr) {
+                                        Ok(()) => { #[cfg(feature = "metrics")] qc_sidecar_verify_ok_inc(); }
+                                        Err(e) => {
+                                            #[cfg(feature = "metrics")] qc_sidecar_verify_err_inc();
+                                            log::warn!("qc-sidecar: validate failed at h={}: {}", height, e);
+                                        }
+                                    }
+                                }
+                                // T41.4: strict mode — require sidecar at cutover+1; reject if missing/bad
+                                if qc_sidecar_enforce_on() {
+                                    if let Some(rot) = rotation_policy_from_env() {
+                                        if should_emit_qc_sidecar_v2(height, &rot) {
+                                            let present = hdr.qc_sidecar_v2.is_some();
+                                            let valid = present && validate_sidecar_v2_for_header(&hdr).is_ok();
+                                            if valid {
+                                                #[cfg(feature = "metrics")] qc_sidecar_enforce_ok_inc();
+                                            } else {
+                                                #[cfg(feature = "metrics")] qc_sidecar_enforce_fail_inc();
+                                                log::error!("qc-sidecar(enforce): missing or invalid at h={} → refusing to write checkpoint", height);
+                                                // Skip writing this checkpoint
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
                                 // --- MODIFIED BLOCK: skip default writer when outbox task is enabled ---
                                 let outbox_enabled = std::env::var("EEZO_BRIDGE_OUTBOX_ENABLED")
                                     .map(|v| { let v = v.to_lowercase(); v == "1" || v == "true" || v == "yes" })
@@ -651,7 +718,31 @@ impl CoreRunnerHandle {
                                         .unwrap_or([0u8;32])
                                 };
 
-                                let hdr = BridgeHeader::new(height, committed_header_hash, sr, tr, ts, finality_depth);
+                                let mut hdr = BridgeHeader::new(height, committed_header_hash, sr, tr, ts, finality_depth);
+                                // T41.2: optionally attach QC sidecar v2 at cutover+1
+                                #[cfg(feature = "checkpoints")]
+                                if let Some(rot) = rotation_policy_from_env() {
+                                    if should_emit_qc_sidecar_v2(height, &rot) {
+                                        let sc = build_stub_sidecar_v2(hdr.suite_id, height, ReanchorReason::RotationCutover);
+                                        if sc.is_sane_for_height(height) {
+                                            hdr = hdr.with_sidecar_v2(sc);
+                                            #[cfg(feature = "metrics")]
+                                            { qc_sidecar_emitted_inc(); }
+                                        } else {
+                                            log::warn!("qc-sidecar: built sidecar not sane at h={}, skipping attach", height);
+                                        }
+                                    }
+                                }
+                                // T41.3: validate (reader-only) and bump metrics
+                                if hdr.qc_sidecar_v2.is_some() {
+                                    match validate_sidecar_v2_for_header(&hdr) {
+                                        Ok(()) => { #[cfg(feature = "metrics")] qc_sidecar_verify_ok_inc(); }
+                                        Err(e) => {
+                                            #[cfg(feature = "metrics")] qc_sidecar_verify_err_inc();
+                                            log::warn!("qc-sidecar: validate failed at h={}: {}", height, e);
+                                        }
+                                    }
+                                }
                                 // --- MODIFIED BLOCK: skip default writer when outbox task is enabled ---
                                 let outbox_enabled = std::env::var("EEZO_BRIDGE_OUTBOX_ENABLED")
                                     .map(|v| { let v = v.to_lowercase(); v == "1" || v == "true" || v == "yes" })

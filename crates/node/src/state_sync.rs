@@ -12,7 +12,37 @@ use eezo_ledger::{
 #[cfg(all(feature = "state-sync", feature = "checkpoints"))]
 use eezo_crypto::suite::CryptoSuite;
 #[cfg(all(feature = "state-sync", feature = "checkpoints"))]
-use eezo_ledger::checkpoints::{build_rotation_headers, write_checkpoint_json_default, BridgeHeader};
+use eezo_ledger::checkpoints::{
+    build_rotation_headers,
+    write_checkpoint_json_default,
+    BridgeHeader,
+    // T41.3 validator:
+    validate_sidecar_v2_for_header,
+    // T41.2 — qc sidecar helpers
+    should_emit_qc_sidecar_v2,
+    build_stub_sidecar_v2,
+};
+#[cfg(all(feature = "state-sync", feature = "checkpoints"))]
+use eezo_ledger::qc_sidecar::ReanchorReason;
+// T41.4: strict consumption toggle (same semantics as runner)
+#[cfg(all(feature = "state-sync", feature = "checkpoints"))]
+#[inline]
+fn qc_sidecar_enforce_on() -> bool {
+    #[cfg(feature = "qc-sidecar-v2-enforce")]
+    {
+        std::env::var("EEZO_QC_SIDECAR_ENFORCE")
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+            .unwrap_or(false)
+    }
+    #[cfg(not(feature = "qc-sidecar-v2-enforce"))]
+    { false }
+}
+#[cfg(all(feature = "state-sync", feature = "checkpoints"))]
+use crate::metrics::{
+    qc_sidecar_emitted_inc, qc_sidecar_verify_ok_inc, qc_sidecar_verify_err_inc,
+    // T41.4 (new):
+    qc_sidecar_enforce_ok_inc, qc_sidecar_enforce_fail_inc,
+};
 #[cfg(all(feature = "state-sync", feature = "checkpoints"))]
 use eezo_ledger::rotation::RotationPolicy;
 #[cfg(all(feature = "state-sync", feature = "checkpoints"))]
@@ -1357,7 +1387,7 @@ pub fn emit_checkpoint_from_current_anchor(
         Ok(Some(a)) => {
             // Map anchor fields → BridgeHeader. We use qc_hash as the header_hash
             // placeholder until the real block header hash is plumbed.
-            let hdr = BridgeHeader::new(
+            let mut hdr = BridgeHeader::new(
                 a.height,
                 a.qc_hash,      // placeholder for header hash
                 a.state_root,   // ETH-SSZ v2 state root from anchor
@@ -1365,6 +1395,45 @@ pub fn emit_checkpoint_from_current_anchor(
                 0,              // timestamp (TODO: fill from producer path)
                 finality_depth,
             );
+            // T41.2: if rotation policy is defined and we are at cutover+1, attach a QC sidecar v2
+            if let Some(pol) = rotation_policy_from_env() {
+                if should_emit_qc_sidecar_v2(a.height, &pol) {
+                    let sc = build_stub_sidecar_v2(hdr.suite_id, a.height, ReanchorReason::RotationCutover);
+                    if sc.is_sane_for_height(a.height) {
+                        hdr = hdr.with_sidecar_v2(sc);
+                        // T41.3: metrics for emit
+                        qc_sidecar_emitted_inc();
+                    } else {
+                        log::warn!("qc-sidecar(state_sync single-emit): built sidecar not sane at h={}, skipping", a.height);
+                    }
+                }
+            }
+            // T41.3: reader-only validate and bump metrics
+            if hdr.qc_sidecar_v2.is_some() {
+                match validate_sidecar_v2_for_header(&hdr) {
+                    Ok(()) => qc_sidecar_verify_ok_inc(),
+                    Err(e) => {
+                        qc_sidecar_verify_err_inc();
+                        log::warn!("qc-sidecar(state_sync): validate failed at h={}: {}", a.height, e);
+                    }
+                }
+            }
+            // T41.4: strict mode — at cutover+1, sidecar must exist & be valid
+            if qc_sidecar_enforce_on() {
+                if let Some(pol) = rotation_policy_from_env() {
+                    if should_emit_qc_sidecar_v2(a.height, &pol) {
+                        let present = hdr.qc_sidecar_v2.is_some();
+                        let valid = present && validate_sidecar_v2_for_header(&hdr).is_ok();
+                        if valid {
+                            qc_sidecar_enforce_ok_inc();
+                        } else {
+                            qc_sidecar_enforce_fail_inc();
+                            log::error!("qc-sidecar(state_sync enforce): missing/invalid at h={} → refusing to write", a.height);
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
             let p = write_checkpoint_json_default(&hdr)?;
             Ok(Some(p))
         }
@@ -1388,7 +1457,7 @@ fn emit_rotation_checkpoints_from_anchor(
     let mut out: Vec<PathBuf> = Vec::new();
     if let Ok(Some(a)) = db.load_checkpoint_anchor() {
         // Build one or two headers based on the window/policy
-        let headers = build_rotation_headers(
+        let mut headers = build_rotation_headers(
             policy,
             a.height,
             a.qc_hash,            // placeholder for header hash (until producer path plumbs it)
@@ -1403,8 +1472,47 @@ fn emit_rotation_checkpoints_from_anchor(
         let dir_sp = base.join("sphincs");
         let _ = fs::create_dir_all(&dir_ml);
         let _ = fs::create_dir_all(&dir_sp);
+        // If this anchor is at cutover+1, attach QC sidecar v2 to each header we emit
+        if should_emit_qc_sidecar_v2(a.height, policy) {
+            for h in &mut headers {
+                let suite_id = h.suite().map(|s| s.as_id()).unwrap_or(BridgeHeader::default_suite_id());
+                let sc = build_stub_sidecar_v2(suite_id, a.height, ReanchorReason::RotationCutover);
+                if sc.is_sane_for_height(a.height) {
+                    *h = h.clone().with_sidecar_v2(sc);
+                    // T41.3: metrics for emit
+                    qc_sidecar_emitted_inc();
+                } else {
+                    log::warn!("qc-sidecar(state_sync dual-emit): built sidecar not sane at h={}, skipping", a.height);
+                }
+            }
+        }
+
         // Write each header to the corresponding suite dir
         for h in headers {
+            // T41.4: strict mode for dual-emit flow as well
+            if qc_sidecar_enforce_on() {
+                if should_emit_qc_sidecar_v2(a.height, policy) {
+                    let present = h.qc_sidecar_v2.is_some();
+                    let valid = present && validate_sidecar_v2_for_header(&h).is_ok();
+                    if valid {
+                        qc_sidecar_enforce_ok_inc();
+                    } else {
+                        qc_sidecar_enforce_fail_inc();
+                        log::error!("qc-sidecar(state_sync dual enforce): missing/invalid at h={} → dropping header", a.height);
+                        continue; // drop this header from being written
+                    }
+                }
+            }
+            // T41.3: reader-only validate and bump metrics
+            if h.qc_sidecar_v2.is_some() {
+                match validate_sidecar_v2_for_header(&h) {
+                    Ok(()) => qc_sidecar_verify_ok_inc(),
+                    Err(e) => {
+                        qc_sidecar_verify_err_inc();
+                        log::warn!("qc-sidecar(state_sync dual-emit): validate failed at h={}: {}", a.height, e);
+                    }
+                }
+            }
             match h.suite().unwrap_or(CryptoSuite::MlDsa44) {
                 CryptoSuite::MlDsa44 => {
                     out.push(eezo_ledger::checkpoints::write_checkpoint_json(&dir_ml, &h)?);

@@ -10,6 +10,7 @@ publish.workspace = true
 default = []
 skip-sig-verify = []
 serde = []
+dev-tools = []  
 
 # ---- Existing feature flags ----
 rayon = ["dep:rayon"]

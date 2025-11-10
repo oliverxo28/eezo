@@ -107,6 +107,7 @@ pub mod pq44_runtime;
 
 // T34.2 — expose suite-rotation policy/helpers to dependents
 pub mod rotation;
+pub mod qc_sidecar; // T41.1: additive types for QC sidecar v2
 pub use crate::rotation::RotationPolicy;
 
 // NEW

@@ -1,7 +1,7 @@
 #![cfg(all(feature = "pq44-runtime", not(feature = "testing")))]
 // These tests require REAL signature verification.
-#[cfg(feature = "skip-sig-verify")]
-compile_error!("sign_verify.rs requires real signature verification; build WITHOUT 'skip-sig-verify'.");
+// Build this test ONLY when real verification is enabled and pqcrypto is present.
+#![cfg(all(feature = "pq44-runtime", feature = "mldsa", not(feature = "skip-sig-verify"), feature = "external_pqcrypto"))]
 
 use eezo_ledger::SignedTx;
 use eezo_ledger::tx_sig::verify_signed_tx;

@@ -107,6 +107,9 @@ consensus-core-testing = []
 # T37.1: enable KEMTLS resumption paths in node
 kemtls-resume = ["eezo-net/kemtls-resume"]
 
+# T41.4: opt-in strict mode for QC sidecar v2 (enforce at cutover+1)
+qc-sidecar-v2-enforce = []
+
 [dev-dependencies]
 tempfile = "3.10"
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }

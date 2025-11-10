@@ -46,11 +46,9 @@ use blake3; // used by post_tx_raw_admin
 // PathBuf is needed even when only `checkpoints` is enabled (e.g., resolve_outbox_dir).
 use std::path::PathBuf;
 use clap::Parser;
-use eezo_ledger::{Block, BlockHeader, Supply};
+use eezo_ledger::{Block, BlockHeader, Supply, StateSnapshot};
 #[cfg(feature = "pq44-runtime")]
 use eezo_ledger::consensus::{SingleNode, SingleNodeCfg};
-#[cfg(feature = "persistence")]
-use eezo_ledger::StateSnapshot;
 use std::time::{SystemTime, UNIX_EPOCH};
 // Persistence (RocksDB) + genesis helpers are only available when the binary
 // is built with the `persistence` feature.
@@ -94,17 +92,16 @@ use axum::serve;
 mod consensus_runner;
 
 // T36.6: expose bridge metrics immediately at boot
+// metrics registrars used at boot
 #[cfg(feature = "metrics")]
-use crate::metrics::register_t36_bridge_metrics;
-// T40.1: shadow signature counters (eager registrar)
-#[cfg(feature = "metrics")]
-use crate::metrics::register_t40_shadow_sig_metrics;
-// (optional) add missing registrars your friend flagged:
-#[cfg(feature = "metrics")]
-use crate::metrics::{register_t33_bridge_metrics, register_t34_rotation_metrics, register_t37_kemtls_metrics};
-// T40.1: shadow signature counters (eager registrar)
-#[cfg(feature = "metrics")]
-use crate::metrics::register_t40_shadow_sig_metrics;
+use crate::metrics::{
+    register_t33_bridge_metrics,
+    register_t34_rotation_metrics,
+    register_t36_bridge_metrics,
+    register_t37_kemtls_metrics,
+    register_t40_shadow_sig_metrics,
+    register_t40_cutover_metrics,
+};
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
 #[cfg(feature = "checkpoints")]
@@ -1821,15 +1818,17 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
     // T36.6: ensure bridge metrics are registered before serving HTTP
     #[cfg(feature = "metrics")]
-    register_t36_bridge_metrics();
-    // T40.1: ensure shadow-signature counters appear on /metrics at boot
-    register_t40_shadow_sig_metrics();
-	register_t40_cutover_metrics();
-    // (optional) your friend says these aren’t currently called at startup:
-    // safe to add here; all are idempotent
-    register_t33_bridge_metrics();
-    register_t34_rotation_metrics();
-    register_t37_kemtls_metrics();	
+    {
+	    // existing registrars
+        register_t36_bridge_metrics();
+        register_t33_bridge_metrics();
+        register_t34_rotation_metrics();
+        register_t37_kemtls_metrics();
+
+        // T40: make shadow + cutover counters visible at boot
+        register_t40_shadow_sig_metrics();
+        register_t40_cutover_metrics();
+	}	
     // T37: spawn a dedicated /metrics HTTP server on EEZO_METRICS_BIND (or default)
     let metrics_bind = std::env::var("EEZO_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9898".into());
     tokio::spawn(spawn_metrics_server(metrics_bind.clone()));
@@ -1971,6 +1970,8 @@ async fn main() -> anyhow::Result<()> {
 
                 if !resume {
                     log::warn!("state-sync: resume disabled; clearing existing sync progress.");
+                    #[cfg(feature = "persistence")]
+                    // Use the persistence handle created above instead of the not-yet-constructed AppState.
                     if let Err(e) = crate::state_sync::clear_sync_progress(persistence.as_ref()) {
                         log::error!("state-sync: failed to clear progress: {}", e);
                     }
@@ -1978,6 +1979,8 @@ async fn main() -> anyhow::Result<()> {
 
                 // --- NON-BLOCKING / BACKGROUND BOOTSTRAP (fix for T29.8) ---
                 let base_url_owned = base_url.clone();
+                #[cfg(feature = "persistence")]
+                // Clone the persistence handle for use in the background bootstrap task.
                 let db_ptr = persistence.clone();
                 let ready_flag_bg = ready_flag.clone();
 
@@ -2467,7 +2470,8 @@ async fn main() -> anyhow::Result<()> {
                 let mut tip = last_emitted;
                 loop {
                     let next = tip.saturating_add(1);
-                    match state_clone.db.get_header(next) {
+                    #[cfg(feature = "persistence")]
+					match state_clone.db.get_header(next) {
                         Ok(_) => tip = next,
                         Err(_) => break,
                     }
@@ -2482,18 +2486,22 @@ async fn main() -> anyhow::Result<()> {
                 let mut h = ((last_emitted / checkpoint_every) + 1) * checkpoint_every;
                 while h <= tip {
                     // Gather data
+					#[cfg(feature = "persistence")]
                     let hdr = match state_clone.db.get_header(h) {
                         Ok(h) => h,
                         Err(e) => { log::warn!("bridge: header {} missing: {e}", h); break; }
                     };
+					#[cfg(feature = "persistence")]
                     let state_root = match state_clone.db.get_state_root_v2(h) {
                         Ok(r) => r,
                         Err(e) => { log::warn!("bridge: state_root {} missing: {e}", h); break; }
                     };
+					#[cfg(feature = "persistence")]
                     let tx_root = match state_clone.db.get_tx_root_v2(h) {
                         Ok(r) => r,
                         Err(e) => { log::warn!("bridge: tx_root {} missing: {e}", h); break; }
                     };
+					#[cfg(feature = "persistence")]
                     let ts_secs = match state_clone.db.get_header_timestamp_secs(h) {
                         Ok(t) => t,
                         Err(e) => { log::warn!("bridge: timestamp {} missing: {e}", h); break; }
@@ -2660,7 +2668,8 @@ async fn main() -> anyhow::Result<()> {
     {
         let state_clone = state.clone();
         let interval_ms = env_usize("EEZO_PROPOSER_INTERVAL_MS", 400) as u64;
-        let db = persistence.clone();
+        #[cfg(feature = "persistence")]
+        let db = state_clone.db.clone();
         tokio::spawn(async move {
             let mut tick = interval(Duration::from_millis(interval_ms));
             loop {

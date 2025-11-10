@@ -171,4 +171,5 @@ mod tests {
         assert!(p.enforce_suite(200, CryptoSuite::MlDsa44).is_err());
         assert!(p.enforce_suite(200, CryptoSuite::SphincsPq).is_ok());
     }
+	
 }
