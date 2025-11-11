@@ -1554,6 +1554,7 @@ dependencies = [
  "clap",
  "eezo-crypto",
  "eezo-kats",
+ "eezo-ledger",
  "eezo-ssz-bridge",
  "env_logger",
  "hex",
@@ -1573,6 +1574,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dotenvy",
+ "eezo-ledger",
  "eezo-net",
  "eezo-ssz-bridge",
  "ethers",
@@ -1583,6 +1585,7 @@ dependencies = [
  "rand 0.8.5",
  "reqwest 0.12.24",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

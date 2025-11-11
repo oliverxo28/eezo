@@ -28,9 +28,15 @@ prometheus = "0.13"
 axum = "0.7"
 lazy_static = "1.4"
 rand = "0.8"
+eezo-ledger = { path = "../ledger", default-features = false, features = ["checkpoints", "pq44-runtime"] }
 
 [features]
- stark-air = []
+# enable STARK AIR types (pi_canonical, etc.)
+stark-air = []
+# forwarder so `--features pq44-runtime` on eezo-prover also turns it on in ledger
+pq44-runtime = ["eezo-ledger/pq44-runtime"]
+# make it default so builds/runs work without extra flags
+default = ["stark-air"]
 
 [lib]
 path = "src/lib.rs"

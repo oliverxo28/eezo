@@ -332,6 +332,24 @@ pub static EEZO_QC_SIDECAR_V2_INVALID_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 #[cfg(all(feature = "metrics", feature = "checkpoints"))]
+pub static EEZO_QC_SIDECAR_V2_MISSING_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_qc_sidecar_v2_missing_total",
+        "qc_sidecar_v2 payloads missing at required checkpoints (cutover+1)"
+    )
+    .expect("register eezo_qc_sidecar_v2_missing_total")
+});
+
+#[cfg(all(feature = "metrics", feature = "checkpoints"))]
+pub static EEZO_QC_SIDECAR_V2_REJECTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_qc_sidecar_v2_rejected_total",
+        "checkpoints rejected because of qc_sidecar_v2 enforcement"
+    )
+    .expect("register eezo_qc_sidecar_v2_rejected_total")
+});
+
+#[cfg(all(feature = "metrics", feature = "checkpoints"))]
 #[inline]
 pub fn inc_sidecar_seen() {
     EEZO_QC_SIDECAR_V2_SEEN_TOTAL.inc();
@@ -347,6 +365,18 @@ pub fn inc_sidecar_valid() {
 #[inline]
 pub fn inc_sidecar_invalid() {
     EEZO_QC_SIDECAR_V2_INVALID_TOTAL.inc();
+}
+
+#[cfg(all(feature = "metrics", feature = "checkpoints"))]
+#[inline]
+pub fn inc_sidecar_missing() {
+    EEZO_QC_SIDECAR_V2_MISSING_TOTAL.inc();
+}
+
+#[cfg(all(feature = "metrics", feature = "checkpoints"))]
+#[inline]
+pub fn inc_sidecar_rejected() {
+    EEZO_QC_SIDECAR_V2_REJECTED_TOTAL.inc();
 }
 
 // ── T27: Consensus metrics ───────────────────────────────────────────

@@ -475,6 +475,14 @@ pub fn should_emit_qc_sidecar_v2(height: u64, rot: &RotationPolicy) -> bool {
     // Fire when cutover+1 falls after the previous boundary and up to (and including) this one.
     cutover_plus_one > prev_boundary && cutover_plus_one <= this_boundary
 }
+/// Runtime override: force-emit a QC sidecar at checkpoints for bring-up/tests.
+#[inline]
+fn sidecar_force_from_env() -> bool {
+    std::env::var("EEZO_QC_SIDECAR_FORCE")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
 
 /// Builds a stub QC sidecar v2 for emission (no cryptographic verification here).
 /// We carry non-empty, size-bounded bytes so format sanity passes; real signing can be added later.
@@ -563,8 +571,9 @@ pub fn write_checkpoint_json(dir: &Path, hdr: &BridgeHeader) -> std::io::Result<
     // T41.4: strict enforcement when the flag is on (only if env policy is available)
     #[cfg(feature = "qc-sidecar-v2-enforce")]
     {
+        let force = sidecar_force_from_env();
         if let Some(policy) = rotation_policy_from_env() {
-            if should_emit_qc_sidecar_v2(hdr.height, &policy) {
+            if force || should_emit_qc_sidecar_v2(hdr.height, &policy) {
                 match &hdr.qc_sidecar_v2 {
                     Some(_) => {
                         if validate_sidecar_v2_for_header(hdr).is_err() {
@@ -574,11 +583,11 @@ pub fn write_checkpoint_json(dir: &Path, hdr: &BridgeHeader) -> std::io::Result<
                     }
                     None => {
                         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            "qc_sidecar_v2 missing at cutover+1"));
+                            "qc_sidecar_v2 missing (required by policy/force)"));
                     }
                 }
-            } else if hdr.qc_sidecar_v2.is_some() {
-                // defensive: sidecar only allowed at cutover+1
+            } else if !force && hdr.qc_sidecar_v2.is_some() {
+                // defensive: when not forced, sidecar only allowed at cutover+1
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
                     "qc_sidecar_v2 present at non-cutover+1 height"));
             }
@@ -630,8 +639,9 @@ pub fn write_checkpoint_json_tagged(dir: &Path, hdr: &BridgeHeader, tag: &str) -
     // T41.4: strict enforcement when the flag is on (only if env policy is available)
     #[cfg(feature = "qc-sidecar-v2-enforce")]
     {
+        let force = sidecar_force_from_env();
         if let Some(policy) = rotation_policy_from_env() {
-            if should_emit_qc_sidecar_v2(hdr.height, &policy) {
+            if force || should_emit_qc_sidecar_v2(hdr.height, &policy) {
                 match &hdr.qc_sidecar_v2 {
                     Some(_) => {
                         if validate_sidecar_v2_for_header(hdr).is_err() {
@@ -641,10 +651,10 @@ pub fn write_checkpoint_json_tagged(dir: &Path, hdr: &BridgeHeader, tag: &str) -
                     }
                     None => {
                         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            "qc_sidecar_v2 missing at cutover+1 (tagged)"));
+                            "qc_sidecar_v2 missing (required by policy/force)"));
                     }
                 }
-            } else if hdr.qc_sidecar_v2.is_some() {
+            } else if !force && hdr.qc_sidecar_v2.is_some() {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
                     "qc_sidecar_v2 present at non-cutover+1 height (tagged)"));
             }
@@ -767,10 +777,18 @@ pub fn build_rotation_headers(
         finality_depth,
         first.as_id(),
     );
-    // T41.2/41.3: emit qc_sidecar_v2 exactly at cutover+1 (policy.dual_accept_until + 1)
-    if should_emit_qc_sidecar_v2(height, policy) {
-        // reason = RotationCutover; deterministic content derived from QC preimage
-        let sc = build_qc_sidecar_v2(height, &header_hash, h_active.suite_id, ReanchorReason::RotationCutover);
+    // T41.2/41.3: emit qc_sidecar_v2 at first checkpoint ≥ (cutover+1),
+    // or when forced via env for bring-up. Record provenance height (cutover+1).
+    let force = sidecar_force_from_env();
+    let emit = force || should_emit_qc_sidecar_v2(height, policy);
+    if emit {
+        let cutover_plus_one = policy.dual_accept_until.unwrap_or(0).saturating_add(1);
+        let sc = build_qc_sidecar_v2(
+            cutover_plus_one,          // <- provenance height
+            &header_hash,
+            h_active.suite_id,
+            ReanchorReason::RotationCutover,
+        );
         h_active = h_active.with_sidecar_v2(sc);
     }
     out.push(h_active);
@@ -786,8 +804,14 @@ pub fn build_rotation_headers(
             next.as_id(),
         );
         // If we wrote a sidecar for active at cutover+1, mirror it for the "next" tag of same height
-        if should_emit_qc_sidecar_v2(height, policy) {
-            let sc = build_qc_sidecar_v2(height, &header_hash, h_next.suite_id, ReanchorReason::RotationCutover);
+        if emit {
+            let cutover_plus_one = policy.dual_accept_until.unwrap_or(0).saturating_add(1);
+            let sc = build_qc_sidecar_v2(
+                cutover_plus_one,      // <- provenance height
+                &header_hash,
+                h_next.suite_id,
+                ReanchorReason::RotationCutover,
+            );
             h_next = h_next.with_sidecar_v2(sc);
         }		
         out.push(h_next);
@@ -816,6 +840,55 @@ pub fn write_rotation_headers(
         timestamp,
         finality_depth,
     );
+    // ── T41.5: runtime+feature enforcement before writing (active/next)
+    // This path enforces even when the compile-time feature is off.
+    // Set EEZO_QC_SIDECAR_ENFORCE=1 (or true/yes/on) to enable at runtime.
+    let enforce_runtime = std::env::var("EEZO_QC_SIDECAR_ENFORCE")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let enforce = cfg!(feature = "qc-sidecar-v2-enforce") || enforce_runtime;
+    let force = sidecar_force_from_env();
+    if enforce && (force || should_emit_qc_sidecar_v2(height, policy)) {
+        // validate presence + basic shape for each header we’re about to write
+        let mut check_one = |tag: &str, h: &BridgeHeader| -> std::io::Result<()> {
+            if h.qc_sidecar_v2.is_none() {
+                #[cfg(feature = "metrics")]
+                {
+                    // observability: count missing + rejected-at-enforce
+                    crate::metrics::inc_sidecar_missing();
+                    crate::metrics::inc_sidecar_rejected();
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("qc_sidecar_v2 required at cutover+1 checkpoint ({tag})"),
+                ));
+            }
+            if validate_sidecar_v2_for_header(h).is_err() {
+                #[cfg(feature = "metrics")]
+                {
+                    // count invalid + rejected
+                    crate::metrics::inc_sidecar_invalid();
+                    crate::metrics::inc_sidecar_rejected();
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("qc_sidecar_v2 invalid at cutover+1 ({tag})"),
+                ));
+            }
+            Ok(())
+        };
+        match headers.as_slice() {
+            [h_active] => {
+                check_one("active", h_active)?;
+            }
+            [h_active, h_next] => {
+                check_one("active", h_active)?;
+                check_one("next",   h_next)?;
+            }
+            _ => {}
+        }
+    }	
     let mut paths = Vec::with_capacity(headers.len());
 
     // Emit deterministic, rotation-aware filenames:

@@ -7,6 +7,7 @@ edition = "2021"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs", "net", "io-util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ethers = { version = "2", default-features = false, features = ["abigen", "rustls"] }
 dotenvy = "0.15"
 anyhow = "1"
@@ -20,6 +21,9 @@ eezo-ssz-bridge = { path = "../crates/eezo-ssz-bridge" }
 
 # ✅ critical fix ─ compile eezo-net with BOTH features
 eezo-net = { path = "../crates/net", default-features = false, features = ["mlkem", "kemtls-resume"]}
+
+# ✅ new: read + validate checkpoints / sidecars using ledger helpers
+eezo-ledger = { path = "../crates/ledger", default-features = false, features = ["checkpoints", "pq44-runtime"] }
 
 # your PQC crates (unchanged)
 pqcrypto-mlkem   = { version = "0.1", optional = true }

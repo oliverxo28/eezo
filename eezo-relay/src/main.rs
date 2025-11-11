@@ -12,6 +12,7 @@ use ethers::types::{H160, H256, U256};
 use hex::FromHex;
 use reqwest::Client;
 use serde::Deserialize;
+use serde_json;
 use std::env;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 // ── T39.3: optional SNARK-on-chain path (verifier adapter) ──
 mod snark; // <<< PATCH 1: Import the new snark module
+mod checkpoint; // <<< NEW: read checkpoint JSONs for sidecar parsing
 use tracing_subscriber::EnvFilter;
 
 /// File name placed by the prover when h{H} is fully written (atomic ready signal)
@@ -181,6 +183,8 @@ struct Config {
     strict_pi: bool,   // T37.7: EEZO_PI_SSZ_STRICT toggle	
     // T39.3: optional on-chain SNARK verification path
     snark_onchain: bool, // <<< PATCH 2a: Config: add a runtime toggle for SNARK path
+    // T41.5: enforce sidecar presence at first-eligible height
+    qc_enforce: bool,	
     // T37.1 (optional): if provided, the relay will establish a resumable
     // KEMTLS connection to the node to exercise/measure session resumption.
     // EEZO_KEMTLS_ADDR example: "127.0.0.1:18281"
@@ -222,6 +226,8 @@ impl Config {
             strict_pi: env_flag("EEZO_PI_SSZ_STRICT") || env_flag("EEZO_RELAY_STRICT_CHECK"),
             // new: enable SNARK path with EEZO_SNARK_ONCHAIN=1/true
             snark_onchain: env_bool("EEZO_SNARK_ONCHAIN", false), // <<< PATCH 2b: Read SNARK config
+            // new: enable relay-side sidecar enforcement logging path
+            qc_enforce: env_bool("EEZO_QC_SIDECAR_ENFORCE", false),			
             #[cfg(feature = "kemtls-resume")]
             kemtls_addr: env::var("EEZO_KEMTLS_ADDR").ok(),
             #[cfg(feature = "kemtls-resume")]
@@ -259,6 +265,57 @@ fn env_bool(name: &str, default: bool) -> bool {
             matches!(v.as_str(), "1" | "true" | "yes" | "on")
         }
         Err(_) => default,
+    }
+}
+
+#[inline]
+fn reason_str(r: &eezo_ledger::qc_sidecar::ReanchorReason) -> &'static str {
+    use eezo_ledger::qc_sidecar::ReanchorReason::*;
+    match r {
+        RotationCutover => "rotation_cutover",
+        MissedWindowRecovery => "missed_window_recovery",
+        AdminOverride => "admin_override",
+    }
+}
+// T41.5 — validate qc_sidecar_v2 if present; log one-liner + export metrics
+async fn check_sidecar_for_height(
+    metrics: &RelayMetrics,
+    cfg: &Config,
+    height: u64,
+    rot_policy: &Option<eezo_ledger::rotation::RotationPolicy>,
+) {
+    use eezo_ledger::checkpoints::{validate_sidecar_v2_for_header, should_emit_qc_sidecar_v2};
+    if let Ok(Some(hdr)) = checkpoint::read_checkpoint(&cfg.proof_dir, height) {
+        if let Some(sc) = &hdr.qc_sidecar_v2 {
+            metrics.sc_seen();
+            // reader-side validation via ledger helper (format + suite match)
+            match validate_sidecar_v2_for_header(&hdr) {
+                Ok(()) => {
+                    let lag = hdr.height.saturating_sub(sc.anchor_height);
+                    metrics.sc_observe_lag(lag);
+                    metrics.sc_set_last_anchor(sc.anchor_height);
+                    info!(
+                        "relay: sidecar_v2 ok at h={} anchor={} suite={} reason={} lag={}",
+                        hdr.height, sc.anchor_height, hdr.suite_id, reason_str(&sc.reason), lag
+                    );
+                    metrics.sc_valid();
+                }
+                Err(code) => {
+                    warn!("relay: sidecar_v2 reject at h={} code={}", hdr.height, code);
+                    metrics.sc_rejected();
+                }
+            }
+        } else {
+            // missing — count only if enforce flag is on AND this height is first-eligible
+            if cfg.qc_enforce {
+                if let Some(rp) = rot_policy {
+                    if should_emit_qc_sidecar_v2(height, rp) {
+                        warn!("relay: sidecar_v2 missing at first-eligible h={}", height);
+                        metrics.sc_missing();
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -377,8 +434,6 @@ async fn read_height_scoped_pi_digest(height: u64, cfg: &Config) -> Result<Optio
         Err(e) => Err(e).with_context(|| format!("failed checking metadata for {}", path.display())),
     }
 }
-// --- Metrics struct and serve_metrics function remain unchanged ---
-#[derive(Default)]
 struct RelayMetrics {
     attempts: AtomicU64,        // -> eezo_relay_submit_total
     successes: AtomicU64,       // -> eezo_relay_store_success_total
@@ -397,6 +452,47 @@ struct RelayMetrics {
     pi_digest_missing_total: AtomicU64,        // -> eezo_relay_pi_digest_missing_total
     pi_digest_store_ok_total: AtomicU64,       // -> eezo_relay_pi_digest_store_ok_total
     pi_digest_store_err_total: AtomicU64,      // -> eezo_relay_pi_digest_store_err_total
+    // T41.5 — qc_sidecar_v2 metrics
+    sc_seen_total: AtomicU64,                  // -> eezo_qc_sidecar_v2_seen_total
+    sc_valid_total: AtomicU64,                 // -> eezo_qc_sidecar_v2_valid_total
+    sc_rejected_total: AtomicU64,              // -> eezo_qc_sidecar_v2_rejected_total
+    sc_missing_total: AtomicU64,               // -> eezo_qc_sidecar_v2_missing_total
+    sc_last_anchor_height: AtomicU64,          // -> eezo_qc_sidecar_v2_last_anchor_height
+    // simple histogram buckets for anchor lag in blocks:
+    // [0,1,2,4,8,16,32,64,128,+Inf]
+    sc_lag_buckets: [AtomicU64; 10],
+    sc_lag_sum: AtomicU64,
+    sc_lag_count: AtomicU64,	
+}
+
+impl Default for RelayMetrics {
+    fn default() -> Self {
+        Self {
+            attempts: Default::default(),
+            successes: Default::default(),
+            onchain_height: Default::default(),
+            node_latest: Default::default(),
+            backoff_secs: Default::default(),
+            pi_cv_mismatch_total: Default::default(),
+            submit_revert_total: Default::default(),
+            suite_mismatch_total: Default::default(),
+            strict_skips_total: Default::default(),
+            strict_mismatches_total: Default::default(),
+            strict_header_mismatch_total: Default::default(),
+            strict_chainid_mismatch_total: Default::default(),
+            pi_digest_missing_total: Default::default(),
+            pi_digest_store_ok_total: Default::default(),
+            pi_digest_store_err_total: Default::default(),
+            sc_seen_total: Default::default(),
+            sc_valid_total: Default::default(),
+            sc_rejected_total: Default::default(),
+            sc_missing_total: Default::default(),
+            sc_last_anchor_height: Default::default(),
+            sc_lag_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            sc_lag_sum: Default::default(),
+            sc_lag_count: Default::default(),
+        }
+    }
 }
 
 impl RelayMetrics {
@@ -428,7 +524,24 @@ impl RelayMetrics {
              eezo_relay_strict_chainid_mismatch_total {}\n\
              eezo_relay_pi_digest_missing_total {}\n\
              eezo_relay_pi_digest_store_ok_total {}\n\
-             eezo_relay_pi_digest_store_err_total {}\n",
+             eezo_relay_pi_digest_store_err_total {}\n\
+             eezo_qc_sidecar_v2_seen_total {}\n\
+             eezo_qc_sidecar_v2_valid_total {}\n\
+             eezo_qc_sidecar_v2_rejected_total {}\n\
+             eezo_qc_sidecar_v2_missing_total {}\n\
+             eezo_qc_sidecar_v2_last_anchor_height {}\n\
+             eezo_qc_sidecar_v2_anchor_lag_bucket{{le=\"0\"}} {}\n\
+             eezo_qc_sidecar_v2_anchor_lag_bucket{{le=\"1\"}} {}\n\
+             eezo_qc_sidecar_v2_anchor_lag_bucket{{le=\"2\"}} {}\n\
+             eezo_qc_sidecar_v2_anchor_lag_bucket{{le=\"4\"}} {}\n\
+             eezo_qc_sidecar_v2_anchor_lag_bucket{{le=\"8\"}} {}\n\
+             eezo_qc_sidecar_v2_anchor_lag_bucket{{le=\"16\"}} {}\n\
+             eezo_qc_sidecar_v2_anchor_lag_bucket{{le=\"32\"}} {}\n\
+             eezo_qc_sidecar_v2_anchor_lag_bucket{{le=\"64\"}} {}\n\
+             eezo_qc_sidecar_v2_anchor_lag_bucket{{le=\"128\"}} {}\n\
+             eezo_qc_sidecar_v2_anchor_lag_bucket{{le=\"+Inf\"}} {}\n\
+             eezo_qc_sidecar_v2_anchor_lag_sum {}\n\
+             eezo_qc_sidecar_v2_anchor_lag_count {}\n",			 
             self.attempts.load(Ordering::Relaxed),
             self.successes.load(Ordering::Relaxed),
             self.onchain_height.load(Ordering::Relaxed),
@@ -445,8 +558,41 @@ impl RelayMetrics {
             self.pi_digest_missing_total.load(Ordering::Relaxed),
             self.pi_digest_store_ok_total.load(Ordering::Relaxed),
             self.pi_digest_store_err_total.load(Ordering::Relaxed),
+             self.sc_seen_total.load(Ordering::Relaxed),
+             self.sc_valid_total.load(Ordering::Relaxed),
+             self.sc_rejected_total.load(Ordering::Relaxed),
+             self.sc_missing_total.load(Ordering::Relaxed),
+             self.sc_last_anchor_height.load(Ordering::Relaxed),
+             self.sc_lag_buckets[0].load(Ordering::Relaxed),
+             self.sc_lag_buckets[1].load(Ordering::Relaxed),
+             self.sc_lag_buckets[2].load(Ordering::Relaxed),
+             self.sc_lag_buckets[3].load(Ordering::Relaxed),
+             self.sc_lag_buckets[4].load(Ordering::Relaxed),
+             self.sc_lag_buckets[5].load(Ordering::Relaxed),
+             self.sc_lag_buckets[6].load(Ordering::Relaxed),
+             self.sc_lag_buckets[7].load(Ordering::Relaxed),
+             self.sc_lag_buckets[8].load(Ordering::Relaxed),
+             self.sc_lag_buckets[9].load(Ordering::Relaxed),
+             self.sc_lag_sum.load(Ordering::Relaxed),
+             self.sc_lag_count.load(Ordering::Relaxed),			
         )
     }
+    // --- sidecar helpers ---
+    fn sc_seen(&self) { self.sc_seen_total.fetch_add(1, Ordering::Relaxed); }
+    fn sc_valid(&self) { self.sc_valid_total.fetch_add(1, Ordering::Relaxed); }
+    fn sc_rejected(&self) { self.sc_rejected_total.fetch_add(1, Ordering::Relaxed); }
+    fn sc_missing(&self) { self.sc_missing_total.fetch_add(1, Ordering::Relaxed); }
+    fn sc_set_last_anchor(&self, h: u64) { self.sc_last_anchor_height.store(h, Ordering::Relaxed); }
+    fn sc_observe_lag(&self, lag: u64) {
+        const EDGES: [u64; 10] = [0,1,2,4,8,16,32,64,128,u64::MAX];
+        for (i, &le) in EDGES.iter().enumerate() {
+            if lag <= le {
+                self.sc_lag_buckets[i].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.sc_lag_sum.fetch_add(lag, Ordering::Relaxed);
+        self.sc_lag_count.fetch_add(1, Ordering::Relaxed);
+    }	
 }
 
 async fn serve_metrics(metrics: Arc<RelayMetrics>, bind: String) -> Result<()> {
@@ -615,6 +761,36 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
     info!("Relay logging initialized.");
+
+    // cheap CLI: eezo-relay inspect-ckpt <path>
+    if let Some(cmd) = std::env::args().nth(1) {
+        if cmd == "inspect-ckpt" {
+            let p = std::env::args().nth(2).expect("usage: eezo-relay inspect-ckpt <path>");
+            let f = std::fs::File::open(&p).with_context(|| format!("open {}", p))?;
+            let r = std::io::BufReader::new(f);
+            let hdr: eezo_ledger::checkpoints::BridgeHeader = serde_json::from_reader(r)
+                .with_context(|| format!("parse {}", p))?;
+            match eezo_ledger::checkpoints::validate_sidecar_v2_for_header(&hdr) {
+                Ok(()) => {
+                    if let Some(sc) = &hdr.qc_sidecar_v2 {
+                        let lag = hdr.height.saturating_sub(sc.anchor_height);
+                        println!(
+                            "status: OK | h={} anchor={} suite={} reason={} lag={}",
+                            hdr.height, sc.anchor_height, hdr.suite_id, reason_str(&sc.reason), lag
+                        );
+                    } else {
+                        println!("status: OK | no sidecar");
+                    }
+                    std::process::exit(0);
+                }
+                Err(code) => {
+                    eprintln!("status: FAIL | h={} code={}", hdr.height, code);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
     // ── SSZ bridge ↔ ledger version handshake (advertise + assert compatibility)
     log_ssz_versions("relay");
     assert_compat_or_warn();
@@ -792,6 +968,11 @@ async fn main() -> Result<()> {
                                     (proof_hex, pubin_hex) = t;
                                     backoff = Duration::from_secs(1);
                                     metrics.set_backoff(backoff.as_secs());
+									
+									// T41.5: parse/validate qc_sidecar_v2 and export metrics
+									let rot_policy = eezo_ledger::checkpoints::rotation_policy_from_env();
+									check_sidecar_for_height(&metrics, &cfg, target, &rot_policy).await;
+									
                                 }
                                 Ok(None) => {
                                     info!(
