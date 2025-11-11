@@ -24,6 +24,7 @@ fn bridge_header_hex_json_roundtrip() {
         timestamp: 1_234_567_890,
         finality_depth: 2,
         suite_id: 1,
+		qc_sidecar_v2: None,
     };
 
     // serialize → string must contain 0x-hex (not arrays)
@@ -77,6 +78,7 @@ fn rotation_filename_is_stable_and_writes() {
         timestamp: 777,
         finality_depth: 2,
         suite_id: 1,
+		qc_sidecar_v2: None,
     };
 
     // write with tag "active"

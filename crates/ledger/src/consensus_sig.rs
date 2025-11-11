@@ -12,6 +12,7 @@ use pqcrypto_mldsa::mldsa44 as pq44;
 use pqcrypto_traits::sign::{DetachedSignature, PublicKey as _}; // brings in from_bytes(), as_bytes()
 
 use sha3::{Digest, Sha3_256};
+use crate::qc_sidecar::{QcSidecarV2, ReanchorReason};
 use thiserror::Error;
 
 // Metrics (unchanged)
@@ -269,4 +270,31 @@ pub fn qc_message_bytes(chain_id: [u8; 20], height: u64, block_hash: &[u8; 32]) 
     msg.extend_from_slice(&height.to_le_bytes());
     msg.extend_from_slice(block_hash);
     msg
+}
+/// T41.3: deterministic builder for QC sidecar v2 (no crypto verify/enforce).
+/// Uses the canonical QC preimage and SHA3-256 to derive stable placeholder fields.
+#[inline]
+pub fn build_qc_sidecar_v2(
+    height: u64,
+    block_hash: &[u8; 32],
+    suite_id: u8,
+    reason: ReanchorReason,
+) -> QcSidecarV2 {
+    // until enforcement lands, use a fixed chain id to keep format deterministic
+    let fake_chain: [u8; 20] = [0u8; 20];
+    let preimage = qc_message_bytes(fake_chain, height, block_hash);
+    // derive stable, bounded bytes
+    let d1 = Sha3_256::digest(&preimage);
+    let d2 = Sha3_256::digest(b"EEZO:QC|anchor|v2");
+    let mut anchor_sig = Vec::with_capacity(64);
+    anchor_sig.extend_from_slice(&d1);
+    anchor_sig.extend_from_slice(&d2);
+    let anchor_pub = Sha3_256::digest(b"EEZO:QC|anchor-pk|v2").to_vec();
+    QcSidecarV2 {
+        anchor_suite: suite_id,
+        anchor_sig,
+        anchor_pub,
+        anchor_height: height,
+        reason,
+    }
 }

@@ -10,6 +10,7 @@ pub type QcHash = [u8; 32];
 
 use crate::rotation::RotationPolicy;
 use crate::qc_sidecar::{QcSidecarV2, ReanchorReason}; // T41.1/41.2: sidecar types (additive)
+use crate::consensus_sig::build_qc_sidecar_v2; // T41.3: deterministic sidecar builder
 use eezo_crypto::suite::{CryptoSuite, SuiteError};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -20,6 +21,9 @@ use std::time::SystemTime;
 // --- ADDED Imports for OpenOptions logic ---
 use std::io::{ErrorKind, Write};
 // --- END ADDED Imports ---
+// T41.3: sidecar v2 metrics (read-only validation counters)
+#[cfg(all(feature = "metrics", feature = "checkpoints"))]
+use crate::metrics::{inc_sidecar_invalid, inc_sidecar_seen, inc_sidecar_valid};
 // T37.8: logging on successful writes
 // (use fully-qualified `log::info!` to avoid adding a new `use` line)
 
@@ -449,19 +453,32 @@ impl BridgeHeader {
 // These are additive and do not change verification or consensus behavior.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Returns true iff we should emit a QC sidecar v2 at `height` according to rotation policy.
-/// Rule (A): emit on the **first block after rotation cutoff**.
-///   cutoff ≔ dual_accept_until; emit at height == cutoff + 1
-/// (Rules (B) gap-recovery and (C) admin-override will be added later.)
+/// Returns true iff we should emit a QC sidecar v2 at this checkpoint `height`
+/// according to rotation policy and the configured checkpoint cadence.
+/// Long-term rule: **emit at the first checkpoint whose height is ≥ (cutover+1)**,
+/// where cutover ≔ `dual_accept_until`.
 pub fn should_emit_qc_sidecar_v2(height: u64, rot: &RotationPolicy) -> bool {
-    match rot.dual_accept_until {
-        Some(cut) => height == cut.saturating_add(1),
-        None => false,
+    let Some(cutover) = rot.dual_accept_until else { return false };
+    let cutover_plus_one = cutover.saturating_add(1);
+    // Discover cadence from env (same knob the node uses); default=32.
+    let every = std::env::var("EEZO_CHECKPOINT_EVERY")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(32);
+    if every == 0 {
+        // degenerate/disabled checkpoints → never emit
+        return false;
     }
+    // Compute the current checkpoint boundary for `height` and the previous boundary.
+    let this_boundary = height.saturating_sub(height % every);
+    let prev_boundary = this_boundary.saturating_sub(every);
+    // Fire when cutover+1 falls after the previous boundary and up to (and including) this one.
+    cutover_plus_one > prev_boundary && cutover_plus_one <= this_boundary
 }
 
 /// Builds a stub QC sidecar v2 for emission (no cryptographic verification here).
 /// We carry non-empty, size-bounded bytes so format sanity passes; real signing can be added later.
+#[allow(dead_code)]
 pub fn build_stub_sidecar_v2(suite_id: u8, anchor_height: u64, reason: ReanchorReason) -> QcSidecarV2 {
     // minimal non-empty placeholders; sized so `is_sane_for_height` passes
     let anchor_pub = vec![0u8; 32]; // placeholder pubkey bytes
@@ -543,6 +560,42 @@ pub fn write_checkpoint_json(dir: &Path, hdr: &BridgeHeader) -> std::io::Result<
     fs::create_dir_all(dir)?;
     let mut path = PathBuf::from(dir);
     path.push(checkpoint_filename(hdr.height));
+    // T41.4: strict enforcement when the flag is on (only if env policy is available)
+    #[cfg(feature = "qc-sidecar-v2-enforce")]
+    {
+        if let Some(policy) = rotation_policy_from_env() {
+            if should_emit_qc_sidecar_v2(hdr.height, &policy) {
+                match &hdr.qc_sidecar_v2 {
+                    Some(_) => {
+                        if validate_sidecar_v2_for_header(hdr).is_err() {
+                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                                "qc_sidecar_v2 invalid at cutover+1"));
+                        }
+                    }
+                    None => {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            "qc_sidecar_v2 missing at cutover+1"));
+                    }
+                }
+            } else if hdr.qc_sidecar_v2.is_some() {
+                // defensive: sidecar only allowed at cutover+1
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                    "qc_sidecar_v2 present at non-cutover+1 height"));
+            }
+        }
+    }	
+    // T41.3: reader-only validation + metrics (no enforcement/gating here)
+    #[cfg(all(feature = "metrics", feature = "checkpoints"))]
+    {
+        if hdr.qc_sidecar_v2.is_some() {
+            inc_sidecar_seen();
+            if validate_sidecar_v2_for_header(hdr).is_ok() {
+                inc_sidecar_valid();
+            } else {
+                inc_sidecar_invalid();
+            }
+        }
+    }
     let bytes = serde_json::to_vec_pretty(hdr).expect("BridgeHeader JSON serialize");
 
     // --- MODIFIED BLOCK: Use OpenOptions to write idempotently (skip if already exists) ---
@@ -574,6 +627,41 @@ pub fn write_checkpoint_json_tagged(dir: &Path, hdr: &BridgeHeader, tag: &str) -
     fs::create_dir_all(dir)?;
     let mut path = PathBuf::from(dir);
     path.push(checkpoint_filename_tagged(hdr.height, tag));
+    // T41.4: strict enforcement when the flag is on (only if env policy is available)
+    #[cfg(feature = "qc-sidecar-v2-enforce")]
+    {
+        if let Some(policy) = rotation_policy_from_env() {
+            if should_emit_qc_sidecar_v2(hdr.height, &policy) {
+                match &hdr.qc_sidecar_v2 {
+                    Some(_) => {
+                        if validate_sidecar_v2_for_header(hdr).is_err() {
+                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                                "qc_sidecar_v2 invalid at cutover+1 (tagged)"));
+                        }
+                    }
+                    None => {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            "qc_sidecar_v2 missing at cutover+1 (tagged)"));
+                    }
+                }
+            } else if hdr.qc_sidecar_v2.is_some() {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                    "qc_sidecar_v2 present at non-cutover+1 height (tagged)"));
+            }
+        }
+    }	
+    // T41.3: reader-only validation + metrics (no enforcement/gating here)
+    #[cfg(all(feature = "metrics", feature = "checkpoints"))]
+    {
+        if hdr.qc_sidecar_v2.is_some() {
+            inc_sidecar_seen();
+            if validate_sidecar_v2_for_header(hdr).is_ok() {
+                inc_sidecar_valid();
+            } else {
+                inc_sidecar_invalid();
+            }
+        }
+    }
     let bytes = serde_json::to_vec_pretty(hdr).expect("BridgeHeader JSON serialize");
     
     // --- MODIFIED BLOCK: Use OpenOptions to write idempotently (skip if already exists) ---
@@ -670,7 +758,7 @@ pub fn build_rotation_headers(
     let (first, second) = policy.verify_order(height);
     let mut out = Vec::with_capacity(2);
     // active
-    let h_active = BridgeHeader::new_with_suite(
+    let mut h_active = BridgeHeader::new_with_suite(
         height,
         header_hash,
         state_root_v2,
@@ -679,10 +767,16 @@ pub fn build_rotation_headers(
         finality_depth,
         first.as_id(),
     );
+    // T41.2/41.3: emit qc_sidecar_v2 exactly at cutover+1 (policy.dual_accept_until + 1)
+    if should_emit_qc_sidecar_v2(height, policy) {
+        // reason = RotationCutover; deterministic content derived from QC preimage
+        let sc = build_qc_sidecar_v2(height, &header_hash, h_active.suite_id, ReanchorReason::RotationCutover);
+        h_active = h_active.with_sidecar_v2(sc);
+    }
     out.push(h_active);
     // optional next (e.g., SPHINCS+) while window is open
     if let Some(next) = second {
-        let h_next = BridgeHeader::new_with_suite(
+        let mut h_next = BridgeHeader::new_with_suite(
             height,
             header_hash,
             state_root_v2,
@@ -691,6 +785,11 @@ pub fn build_rotation_headers(
             finality_depth,
             next.as_id(),
         );
+        // If we wrote a sidecar for active at cutover+1, mirror it for the "next" tag of same height
+        if should_emit_qc_sidecar_v2(height, policy) {
+            let sc = build_qc_sidecar_v2(height, &header_hash, h_next.suite_id, ReanchorReason::RotationCutover);
+            h_next = h_next.with_sidecar_v2(sc);
+        }		
         out.push(h_next);
     }
     out
@@ -1210,5 +1309,34 @@ mod tests {
         assert_eq!(hs.len(), 1);
         assert!(matches!(hs[0].suite(), Ok(CryptoSuite::MlDsa44)));
     }
+    #[test]
+    fn sidecar_emits_exactly_at_cutover_plus_one() {
+        // dual_accept_until = 150  → emit at 151
+        let policy = RotationPolicy {
+            active: CryptoSuite::MlDsa44,
+            next: Some(CryptoSuite::SphincsPq),
+            dual_accept_until: Some(150),
+            activated_at_height: Some(100),
+        };
+        // not at cutover+1 → None
+        let hs_150 = build_rotation_headers(&policy, 150, [1u8; 32], [2u8; 32], [3u8; 32], 123, 2);
+        assert!(hs_150.iter().all(|h| h.qc_sidecar_v2.is_none()));
+        // exactly cutover+1 → Some(...)
+        let hs_151 = build_rotation_headers(&policy, 151, [1u8; 32], [2u8; 32], [3u8; 32], 124, 2);
+        assert!(hs_151.iter().all(|h| h.qc_sidecar_v2.is_some()));
+    }
+
+    #[test]
+    fn sidecar_not_emitted_when_no_cutover() {
+        // No dual_accept_until → never emit a sidecar
+        let policy = RotationPolicy {
+            active: CryptoSuite::MlDsa44,
+            next: None,
+            dual_accept_until: None,
+            activated_at_height: Some(0),
+        };
+        let hs = build_rotation_headers(&policy, 42, [9u8; 32], [8u8; 32], [7u8; 32], 999, 1);
+        assert!(hs.iter().all(|h| h.qc_sidecar_v2.is_none()));
+    }	
 }
 

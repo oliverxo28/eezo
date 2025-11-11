@@ -52,6 +52,9 @@ crypto-mlkem   = ["mlkem"]
 # ---- Test-only helpers (never included in prod) ----
 testing = []
 
+# ---- T41.4 enforcement flag (ledger-side, optional) ----
+qc-sidecar-v2-enforce = []
+
 [dependencies]
 # Do not pull crypto defaults; select schemes via features above.
 eezo-crypto = { path = "../crypto", version = "0.1.0", default-features = false, features = ["mldsa"] }

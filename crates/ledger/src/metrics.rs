@@ -303,6 +303,52 @@ pub fn inc_qc_attached() {
     QC_ATTACHED_TOTAL.inc();
 }
 
+// ── T41.3: qc_sidecar_v2 observability ─────────────────────────────────────
+#[cfg(all(feature = "metrics", feature = "checkpoints"))]
+pub static EEZO_QC_SIDECAR_V2_SEEN_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_qc_sidecar_v2_seen_total",
+        "qc_sidecar_v2 payloads encountered (any reason)"
+    )
+    .expect("register eezo_qc_sidecar_v2_seen_total")
+});
+
+#[cfg(all(feature = "metrics", feature = "checkpoints"))]
+pub static EEZO_QC_SIDECAR_V2_VALID_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_qc_sidecar_v2_valid_total",
+        "qc_sidecar_v2 payloads passing reader-side validation"
+    )
+    .expect("register eezo_qc_sidecar_v2_valid_total")
+});
+
+#[cfg(all(feature = "metrics", feature = "checkpoints"))]
+pub static EEZO_QC_SIDECAR_V2_INVALID_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_qc_sidecar_v2_invalid_total",
+        "qc_sidecar_v2 payloads failing reader-side validation"
+    )
+    .expect("register eezo_qc_sidecar_v2_invalid_total")
+});
+
+#[cfg(all(feature = "metrics", feature = "checkpoints"))]
+#[inline]
+pub fn inc_sidecar_seen() {
+    EEZO_QC_SIDECAR_V2_SEEN_TOTAL.inc();
+}
+
+#[cfg(all(feature = "metrics", feature = "checkpoints"))]
+#[inline]
+pub fn inc_sidecar_valid() {
+    EEZO_QC_SIDECAR_V2_VALID_TOTAL.inc();
+}
+
+#[cfg(all(feature = "metrics", feature = "checkpoints"))]
+#[inline]
+pub fn inc_sidecar_invalid() {
+    EEZO_QC_SIDECAR_V2_INVALID_TOTAL.inc();
+}
+
 // ── T27: Consensus metrics ───────────────────────────────────────────
 #[cfg(feature = "metrics")]
 pub static CONSENSUS_PROPOSALS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
