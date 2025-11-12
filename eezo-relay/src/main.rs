@@ -291,6 +291,28 @@ async fn check_sidecar_for_height(
             // reader-side validation via ledger helper (format + suite match)
             match validate_sidecar_v2_for_header(&hdr) {
                 Ok(()) => {
+                    // T41.6: enforce provenance at first-eligible height = (dual_accept_until + 1)
+                    let expected_anchor = rot_policy
+                        .as_ref()
+                        .and_then(|rp| rp.dual_accept_until.map(|c| c.saturating_add(1)));
+
+                    let first_eligible = expected_anchor.map(|ea| hdr.height == ea).unwrap_or(false);
+
+                    if first_eligible {
+                        if let Some(exp) = expected_anchor {
+                            if sc.anchor_height != exp {
+                                // Wrong provenance at the very first eligible height → reject (no crash)
+                                warn!(
+                                    "sidecar_v2 reject: wrong_provenance h={} expected_anchor={} got={}",
+                                    hdr.height, exp, sc.anchor_height
+                                );
+                                metrics.sc_rejected();
+                                return; // exit this match arm early; do not log 'ok' or mark valid
+                            }
+                        }
+                    }
+
+                    // normal success path
                     let lag = hdr.height.saturating_sub(sc.anchor_height);
                     metrics.sc_observe_lag(lag);
                     metrics.sc_set_last_anchor(sc.anchor_height);
