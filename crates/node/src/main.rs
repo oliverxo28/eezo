@@ -2535,16 +2535,20 @@ async fn main() -> anyhow::Result<()> {
                         Err(e) => { log::warn!("bridge: timestamp {} missing: {e}", h); break; }
                     };
 
-                    // Rotation policy from AppState
-                    let policy = eezo_ledger::rotation::RotationPolicy {
-                        active: eezo_crypto::suite::CryptoSuite::try_from(state_clone.active_suite_id)
+                    // Rotation policy: prefer explicit env override (T41.7/T41.8),
+                    // fall back to AppState rotation view if env is not set.
+                    let policy = eezo_ledger::checkpoints::rotation_policy_from_env()
+                        .unwrap_or_else(|| eezo_ledger::rotation::RotationPolicy {
+                            active: eezo_crypto::suite::CryptoSuite::try_from(
+                                state_clone.active_suite_id,
+                            )
                             .unwrap_or(eezo_crypto::suite::CryptoSuite::MlDsa44),
-                        next: state_clone
-                            .next_suite_id
-                            .and_then(|id| eezo_crypto::suite::CryptoSuite::try_from(id).ok()),
-                        dual_accept_until: state_clone.dual_accept_until,
-                        activated_at_height: None,
-                    };
+                            next: state_clone.next_suite_id.and_then(|id| {
+                                eezo_crypto::suite::CryptoSuite::try_from(id).ok()
+                            }),
+                            dual_accept_until: state_clone.dual_accept_until,
+                            activated_at_height: None,
+                        });
 
                     let header_hash = eezo_ledger::block::header_hash(&hdr);
                     let finality_depth = 2u64;
