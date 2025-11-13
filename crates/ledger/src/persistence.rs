@@ -23,7 +23,7 @@ use thiserror::Error;
 #[cfg(all(feature = "persistence", feature = "state-sync"))]
 use crate::checkpoints::{AnchorSig, CheckpointAnchor};
 #[cfg(all(feature = "persistence", feature = "state-sync"))]
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 #[cfg(all(feature = "persistence", feature = "state-sync"))]
 use std::cmp::Ordering;
 
