@@ -525,8 +525,20 @@ pub static EEZO_CHECKPOINTS_WRITTEN_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 
 /// Force registration so names appear on /metrics even before first use.
 pub fn register_t32_metrics() {
-    let _ = &*EEZO_BLOCK_E2E_LATENCY_SECONDS;
-    let _ = &*EEZO_TX_VERIFY_SECONDS;
+    // For HistogramVec we must create labeled children so families appear.
+    // These labels match how we actually use them in consensus / tx paths.
+
+    // block e2e latency: assemble | validate | commit
+    let _ = EEZO_BLOCK_E2E_LATENCY_SECONDS.with_label_values(&["assemble"]);
+    let _ = EEZO_BLOCK_E2E_LATENCY_SECONDS.with_label_values(&["validate"]);
+    let _ = EEZO_BLOCK_E2E_LATENCY_SECONDS.with_label_values(&["commit"]);
+
+    // tx verify timings: decode | sig | apply
+    let _ = EEZO_TX_VERIFY_SECONDS.with_label_values(&["decode"]);
+    let _ = EEZO_TX_VERIFY_SECONDS.with_label_values(&["sig"]);
+    let _ = EEZO_TX_VERIFY_SECONDS.with_label_values(&["apply"]);
+
+    // Simple, unlabeled metrics: touching the Lazy is enough.
     let _ = &*EEZO_QC_FORMED_TOTAL;
     let _ = &*EEZO_CHAIN_HEIGHT_GAUGE;
     let _ = &*EEZO_STATE_SYNC_PAGE_APPLY_SECONDS;
