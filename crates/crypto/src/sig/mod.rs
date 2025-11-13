@@ -79,3 +79,11 @@ pub fn verify_sig(_pubkey: &[u8], _msg: &[u8], _sig: &[u8]) -> bool {
 pub fn verify_sig(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     registry::verify(pubkey, msg, sig)
 }
+
+// Keep older import path working for tests and external users
+pub use crate::sig::registry::RotationState;
+
+// Back-compat alias: `sig::mldsa::*` now points to `sig::ml_dsa::*`
+pub mod mldsa {
+    pub use super::ml_dsa::*;
+}

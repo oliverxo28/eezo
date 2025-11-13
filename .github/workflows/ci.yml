@@ -8,18 +8,26 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build-test-audit:
+  lint-build-test:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    env:
-      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # You can optionally pin a channel or add components here
+          # components: rustfmt, clippy
+          # profile: minimal (not yet supported by this action)
+          # toolchain: stable
+          # Leave as-is if you want latest stable always
+          override: true
 
       - name: Cache cargo registry + target
         uses: actions/cache@v4
@@ -30,11 +38,39 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: rustfmt check
+        run: cargo fmt --all -- --check
+
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: Build (all targets)
         run: cargo build --workspace --all-targets
 
-      - name: Test
+      - name: Test (workspace, non-Linux)
+        if: runner.os != 'Linux'
         run: cargo test --workspace
+
+      - name: Test each crate (Linux only, granular)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          chmod +x scripts/test-each-crate.sh
+          scripts/test-each-crate.sh
+
+  supply-chain-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked

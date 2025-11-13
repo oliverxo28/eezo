@@ -21,6 +21,8 @@ blake3   = "1"
 sha3     = "0.10"
 thiserror = "1"
 zeroize  = "1"            # used by some modules
+once_cell = { version = "1", optional = true }
+prometheus = { version = "0.13", optional = true }
 
 # Optional serde when serde_support feature is enabled
 serde = { version = "1", features = ["derive"], optional = true }
@@ -45,6 +47,7 @@ backend-pqcrypto = []
 mldsa   = ["dep:pqcrypto-mldsa", "dep:pqcrypto-internals", "dep:pqcrypto-traits"]
 mlkem   = ["dep:pqcrypto-mlkem", "dep:pqcrypto-internals", "dep:pqcrypto-traits", "dep:chacha20poly1305", "dep:hkdf"]
 slh-dsa = ["dep:pqcrypto-sphincsplus", "dep:pqcrypto-traits"]
+metrics = ["dep:once_cell", "dep:prometheus"]
 
 # SLH-DSA backend selectors (choose exactly one with slh-dsa)
 slh-dsa-backend-sha2-128f-simple  = []
