@@ -45,7 +45,6 @@ pub mod ml_dsa;
 pub mod slh_dsa;
 
 // Optional hybrid helper (disabled in EEZO builds).
-// If you ever add a real feature for it, re-enable with a proper cfg.
 // pub mod hybrid;
 
 // -----------------------------------------------------------------------------
@@ -61,29 +60,37 @@ pub use registry::verify_anchor_mldsa_44;
 // Unified verification entry point
 // -----------------------------------------------------------------------------
 
-/// Verify a signature over the **exact message bytes** (no re-hash).
+/// Verify a signature over the exact message bytes (no re-hash).
 /// Active schemes are controlled by features: `mldsa`, `slh-dsa`, or `skip-sig-verify`.
-#[cfg(not(any(feature = "mldsa", feature = "slh-dsa", feature = "skip-sig-verify")))]
-compile_error!("eezo-crypto: no signature scheme enabled; enable mldsa or slh-dsa (prod) or skip-sig-verify (dev/tests).");
 
-// Dev/test bypass: accept all signatures.
+/// Dev/test bypass: accept all signatures.
 #[cfg(feature = "skip-sig-verify")]
 pub fn verify_sig(_pubkey: &[u8], _msg: &[u8], _sig: &[u8]) -> bool {
     true
 }
 
-// Real verification path (one or both schemes enabled), only when not skipping.
+/// Real verification path (one or both schemes enabled), only when not skipping.
 #[cfg(all(not(feature = "skip-sig-verify"), any(feature = "mldsa", feature = "slh-dsa")))]
 pub fn verify_sig(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     registry::verify(pubkey, msg, sig)
 }
 
-// Keep older import path working for tests and external users
+/// Fallback: if no signature scheme (and not skipping) is enabled, verification is unavailable.
+/// Return false so the crate still compiles under `--no-default-features`.
+#[cfg(not(any(feature = "mldsa", feature = "slh-dsa", feature = "skip-sig-verify")))]
+pub fn verify_sig(_pubkey: &[u8], _msg: &[u8], _sig: &[u8]) -> bool {
+    false
+}
+
+// Keep older import path working for tests and external users,
+// but only when the registry exists.
+#[cfg(any(feature = "mldsa", feature = "slh-dsa"))]
 pub use crate::sig::registry::RotationState;
 
-// Back-compat alias: `sig::mldsa::*` now points to `sig::ml_dsa::*`
+// Back-compat alias: `sig::mldsa::*` now points to `sig::ml_dsa::*` when available.
+#[cfg(feature = "mldsa")]
 pub mod mldsa {
-    // NEW: also re-export the trait so tests can import it from this path
+    // Also re-export the trait so `sig::mldsa::SignatureScheme` keeps working.
     pub use super::SignatureScheme;
     pub use super::ml_dsa::*;
 }
