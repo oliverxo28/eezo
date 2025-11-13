@@ -65,7 +65,13 @@ skip-sig-verify = []
 # Present because code checks it; also pulls serde derive when enabled
 serde_support = ["dep:serde"]
 
+# Only run ML-DSA roundtrip and registry dispatch tests when the real backend is enabled.
 [[test]]
 name = "mldsa_roundtrip"
 path = "tests/mldsa_roundtrip.rs"
+required-features = ["pq44-runtime"]
+
+[[test]]
+name = "registry_dispatch"
+path = "tests/registry_dispatch.rs"
 required-features = ["pq44-runtime"]
