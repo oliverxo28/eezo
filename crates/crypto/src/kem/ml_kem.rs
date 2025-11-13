@@ -55,6 +55,7 @@ pub fn initiator_encaps(pk: &PublicKey) -> (Ciphertext, [u8; 32]) {
 }
 
 /// Helper: construct an AEAD from derived key.
+#[allow(deprecated)]
 pub fn aead_from_key(key: &[u8; 32]) -> ChaCha20Poly1305 {
     ChaCha20Poly1305::new(Key::from_slice(key))
 }

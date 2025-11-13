@@ -45,7 +45,6 @@ pub mod ml_dsa;
 pub mod slh_dsa;
 
 // Optional hybrid helper (disabled in EEZO builds).
-// If you ever add a real feature for it, re-enable with a proper cfg.
 // pub mod hybrid;
 
 // -----------------------------------------------------------------------------
@@ -61,10 +60,8 @@ pub use registry::verify_anchor_mldsa_44;
 // Unified verification entry point
 // -----------------------------------------------------------------------------
 
-/// Verify a signature over the **exact message bytes** (no re-hash).
+/// Verify a signature over the exact message bytes (no re-hash).
 /// Active schemes are controlled by features: `mldsa`, `slh-dsa`, or `skip-sig-verify`.
-
-// If neither real scheme nor skip flag is enabled, hard fail at compile time.
 #[cfg(not(any(feature = "mldsa", feature = "slh-dsa", feature = "skip-sig-verify")))]
 compile_error!("eezo-crypto: no signature scheme enabled; enable mldsa or slh-dsa (prod) or skip-sig-verify (dev/tests).");
 
@@ -85,5 +82,7 @@ pub use crate::sig::registry::RotationState;
 
 // Back-compat alias: `sig::mldsa::*` now points to `sig::ml_dsa::*`
 pub mod mldsa {
+    // Added trait re-export so tests can import SignatureScheme from this path
+    pub use super::SignatureScheme;
     pub use super::ml_dsa::*;
 }
