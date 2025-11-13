@@ -10,7 +10,7 @@ publish.workspace = true
 default = []
 skip-sig-verify = []
 serde = []
-dev-tools = []  
+dev-tools = []
 
 # ---- Existing feature flags ----
 rayon = ["dep:rayon"]
@@ -55,6 +55,9 @@ testing = []
 # ---- T41.4 enforcement flag (ledger-side, optional) ----
 qc-sidecar-v2-enforce = []
 
+# ---- Add no-op feature to silence unexpected cfg in tests ----
+external_pqcrypto = []
+
 [dependencies]
 # Do not pull crypto defaults; select schemes via features above.
 eezo-crypto = { path = "../crypto", version = "0.1.0", default-features = false, features = ["mldsa"] }
@@ -63,7 +66,8 @@ eezo-serde  = { path = "../serde",  version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 # used by checkpoints.rs to write BridgeHeader JSON (enabled via `checkpoints` feature)
 serde_json = { version = "1", optional = true }
-base64 = { version = "0.21", default-features = false, optional = true }
+# IMPORTANT: enable default features so Engine::encode/decode are available
+base64 = { version = "0.21", optional = true }
 bincode = "1"
 bitvec = { version = "1", features = ["serde"] }
 sha3 = "0.10"
@@ -103,3 +107,57 @@ harness = false
 name = "eezo-ledger"
 path = "src/bin/eezo-ledger.rs"
 required-features = ["persistence", "checkpoints", "state-sync"]
+
+# ----------------------------
+# Gate integration tests by required features
+# ----------------------------
+
+# Consensus / mempool / signing paths
+[[test]]
+name = "block_validate_apply"
+path = "tests/block_validate_apply.rs"
+required-features = ["pq44-runtime"]
+
+[[test]]
+name = "double_sign"
+path = "tests/double_sign.rs"
+required-features = ["pq44-runtime"]
+
+[[test]]
+name = "mempool_admit"
+path = "tests/mempool_admit.rs"
+required-features = ["pq44-runtime"]
+
+[[test]]
+name = "mempool_prop"
+path = "tests/mempool_prop.rs"
+required-features = ["pq44-runtime"]
+
+[[test]]
+name = "header_preflight"
+path = "tests/header_preflight.rs"
+required-features = ["pq44-runtime"]
+
+# Checkpoint JSON/bridge header
+[[test]]
+name = "bridge_header_json"
+path = "tests/bridge_header_json.rs"
+required-features = ["pq44-runtime", "checkpoints"]
+
+# Property tests that rely on internal testing helpers
+[[test]]
+name = "invariants_txroot_prop"
+path = "tests/invariants_txroot_prop.rs"
+required-features = ["pq44-runtime", "testing"]
+
+# Optional: sign_verify references an extra cfg flag; keep it behind pq44-runtime
+[[test]]
+name = "sign_verify"
+path = "tests/sign_verify.rs"
+required-features = ["pq44-runtime"]
+
+# Stateful tx tests (if they rely on runtime types)
+[[test]]
+name = "tx_stateful"
+path = "tests/tx_stateful.rs"
+required-features = ["pq44-runtime"]
