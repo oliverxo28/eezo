@@ -7,64 +7,59 @@ publish.workspace = true
 
 [features]
 # Keep minimal defaults; opt-in per build/test.
-default = []
-skip-sig-verify = []
+default = ["pq44-runtime", "checkpoints"]
+
+# Public features used in code and/or tests
+skip-sig-verify = ["eezo-crypto/skip-sig-verify"]
 serde = []
 dev-tools = []
 
-# ---- Existing feature flags ----
+# Rayon parallelism (optional)
 rayon = ["dep:rayon"]
 
-# Runtime bundle: PQ44 = ML-DSA-44 enabled by default
+# Runtime PQ bundle; enables ML-DSA-44 path via eezo-crypto
 pq44-runtime = ["dep:pqcrypto-mldsa", "dep:pqcrypto-traits", "mldsa"]
 
 metrics = ["dep:prometheus", "dep:once_cell"]
 mempool-batch-verify = []
 consensus-tests = []
 
-# Storage/persistence (now gates RocksDB)
+# Storage/persistence
 persistence = ["dep:rocksdb"]
 
-# Checkpoint JSON writer needs serde_json
+# Checkpoints JSON helpers
 checkpoints = ["dep:serde_json"]
-# Real QC verification on (else StubQcVerifier)
+# QC verification hooked to checkpoints
 checkpoints-verify = ["checkpoints"]
 
-# ---- State sync APIs (anchors + snapshot_iter + SMT verify) ----
+# State Sync (anchors + snapshot + SMT verify), pulls base64
 state-sync = ["persistence", "checkpoints", "dep:base64"]
 
-# ---- Public feature names that forward to eezo-crypto ----
+# Forward crypto features to eezo-crypto
 slh-dsa  = ["eezo-crypto/slh-dsa"]
 mldsa    = ["eezo-crypto/mldsa"]
 mlkem    = ["eezo-crypto/mlkem"]
 ml-suite = ["mldsa", "mlkem"]
-# Forward the flag down to eezo-serde. (No code changes in ledger yet.)
+
+# Forward to eezo-serde
 eth-ssz = ["eezo-serde/eth-ssz"]
 
-# (No-op) feature used by code that gates SPHINCS+ paths with `#[cfg(feature = "pq_sphincs")]`
+# Optional guard used in a test cfg, define no-op to silence unexpected cfg
 pq_sphincs = []
-
-# ---- Back-compat aliases ----
-crypto-slh-dsa = ["slh-dsa"]
-crypto-mldsa   = ["mldsa"]
-crypto-mlkem   = ["mlkem"]
-
-# ---- Test-only helpers (never included in prod) ----
-testing = []
-
-# ---- T41.4 enforcement flag (ledger-side, optional) ----
-qc-sidecar-v2-enforce = []
-
-# ---- Add no-op feature to silence unexpected cfg in tests ----
 external_pqcrypto = []
 
+# Test-only helpers (property/integration tests that rely on internal APIs)
+testing = []
+
+# Optional enforcement flag
+qc-sidecar-v2-enforce = []
+
 [dependencies]
-# Do not pull crypto defaults; select schemes via features above.
-eezo-crypto = { path = "../crypto", version = "0.1.0", default-features = false, features = ["mldsa"] }
+# Don’t pull crypto defaults; select schemes via features above
+eezo-crypto = { path = "../crypto", version = "0.1.0", default-features = false }
 eezo-serde  = { path = "../serde",  version = "0.1.0" }
 
 serde = { version = "1", features = ["derive"] }
-# used by checkpoints.rs to write BridgeHeader JSON (enabled via `checkpoints` feature)
 serde_json = { version = "1", optional = true }
 # IMPORTANT: enable default features so Engine::encode/decode are available
 base64 = { version = "0.21", optional = true }
@@ -79,7 +74,7 @@ primitive-types = "0.12"
 log = "0.4"
 anyhow = "1"
 
-# RocksDB is now optional; pulled in only when `persistence` is enabled
+# RocksDB only when `persistence` is enabled
 rocksdb = { version = "0.21", default-features = false, features = ["lz4"], optional = true }
 
 # feature-gated deps
@@ -87,7 +82,7 @@ rayon        = { version = "1.11", optional = true }
 once_cell    = { version = "1",    optional = true }
 prometheus   = { version = "0.13", optional = true }
 
-# PQ stack (used by pq44-runtime)
+# PQ stack for runtime/tests
 pqcrypto-mldsa  = { version = "0.1.2", optional = true, package = "pqcrypto-mldsa" }
 pqcrypto-traits = { version = "0.3.5", optional = true, package = "pqcrypto-traits" }
 
@@ -98,6 +93,9 @@ rand      = { version = "0.8", features = ["std", "std_rng"] }
 zeroize   = { version = "1", features = ["derive"] }
 tempfile  = "3"
 serde_json = "1"
+# Tests that import pqcrypto crates directly
+pqcrypto-mldsa  = { version = "0.1.2", package = "pqcrypto-mldsa" }
+pqcrypto-traits = { version = "0.3.5", package = "pqcrypto-traits" }
 
 [[bench]]
 name = "consensus_verify"
@@ -108,9 +106,9 @@ name = "eezo-ledger"
 path = "src/bin/eezo-ledger.rs"
 required-features = ["persistence", "checkpoints", "state-sync"]
 
-# ----------------------------
-# Gate integration tests by required features
-# ----------------------------
+# ---------------------------------
+# Gate integration tests by features
+# ---------------------------------
 
 # Consensus / mempool / signing paths
 [[test]]
@@ -138,26 +136,63 @@ name = "header_preflight"
 path = "tests/header_preflight.rs"
 required-features = ["pq44-runtime"]
 
+[[test]]
+name = "mempool_limits"
+path = "tests/mempool_limits.rs"
+required-features = ["pq44-runtime"]
+
+# Support helpers (test-only utilities referencing pqcrypto)
+[[test]]
+name = "helpers"
+path = "tests/helpers.rs"
+required-features = ["pq44-runtime"]
+
 # Checkpoint JSON/bridge header
 [[test]]
 name = "bridge_header_json"
 path = "tests/bridge_header_json.rs"
 required-features = ["pq44-runtime", "checkpoints"]
 
-# Property tests that rely on internal testing helpers
+# Checkpoint safety/auth/supply
+[[test]]
+name = "cp_checkpoints_safety"
+path = "tests/cp_checkpoints_safety.rs"
+required-features = ["pq44-runtime", "checkpoints"]
+
+[[test]]
+name = "cp_sig_auth"
+path = "tests/cp_sig_auth.rs"
+required-features = ["pq44-runtime", "checkpoints"]
+
+[[test]]
+name = "cp_supply_conservation"
+path = "tests/cp_supply_conservation.rs"
+required-features = ["pq44-runtime", "checkpoints"]
+
+[[test]]
+name = "checkpoints_smoke"
+path = "tests/checkpoints_smoke.rs"
+required-features = ["pq44-runtime", "checkpoints"]
+
+# Persistence + checkpoints (heavier)
+[[test]]
+name = "persistence_blocks"
+path = "tests/persistence_blocks.rs"
+required-features = ["pq44-runtime", "persistence", "checkpoints"]
+
+# Property tests that rely on non-public helpers
 [[test]]
 name = "invariants_txroot_prop"
 path = "tests/invariants_txroot_prop.rs"
 required-features = ["pq44-runtime", "testing"]
 
-# Optional: sign_verify references an extra cfg flag; keep it behind pq44-runtime
 [[test]]
-name = "sign_verify"
-path = "tests/sign_verify.rs"
-required-features = ["pq44-runtime"]
+name = "nonce_integrity_prop"
+path = "tests/nonce_integrity_prop.rs"
+required-features = ["pq44-runtime", "testing"]
 
-# Stateful tx tests (if they rely on runtime types)
+# Genesis config smoke (requires extra fields / internal wiring)
 [[test]]
-name = "tx_stateful"
-path = "tests/tx_stateful.rs"
-required-features = ["pq44-runtime"]
+name = "genesis_smoke"
+path = "tests/genesis_smoke.rs"
+required-features = ["pq44-runtime", "consensus-tests"]

@@ -1,4 +1,7 @@
 #[cfg(feature = "metrics")]
+use prometheus::Encoder;
+
+#[cfg(feature = "metrics")]
 #[test]
 fn t32_metrics_register_and_appear() {
     // Force registration

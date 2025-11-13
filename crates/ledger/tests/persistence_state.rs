@@ -31,6 +31,8 @@ fn snapshot_and_recover_roundtrip() {
         codec_version: 2, // v2 marker for ETH-SSZ snapshots
         #[cfg(feature = "eth-ssz")]
         state_root_v2: [0u8; 32], // dummy root for test
+		// new bridge field added in StateSnapshot; use its Default for test
+		bridge: Default::default(),
     };
     store.put_state_snapshot(&snap).expect("put snapshot");
 
