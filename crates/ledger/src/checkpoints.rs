@@ -1384,19 +1384,25 @@ mod tests {
     }
     #[test]
     fn sidecar_emits_exactly_at_cutover_plus_one() {
-        // dual_accept_until = 150  → emit at 151
+        // dual_accept_until = 150 → cutover+1 = 151.
+        // With default EEZO_CHECKPOINT_EVERY = 32, checkpoints are:
+        //   ..., 96, 128, 160, 192, ...
+        // So the first checkpoint height ≥ 151 is 160.
         let policy = RotationPolicy {
             active: CryptoSuite::MlDsa44,
             next: Some(CryptoSuite::SphincsPq),
             dual_accept_until: Some(150),
             activated_at_height: Some(100),
         };
-        // not at cutover+1 → None
-        let hs_150 = build_rotation_headers(&policy, 150, [1u8; 32], [2u8; 32], [3u8; 32], 123, 2);
-        assert!(hs_150.iter().all(|h| h.qc_sidecar_v2.is_none()));
-        // exactly cutover+1 → Some(...)
-        let hs_151 = build_rotation_headers(&policy, 151, [1u8; 32], [2u8; 32], [3u8; 32], 124, 2);
-        assert!(hs_151.iter().all(|h| h.qc_sidecar_v2.is_some()));
+        // before the first eligible checkpoint (128) → never emit
+        let hs_128 =
+            build_rotation_headers(&policy, 128, [1u8; 32], [2u8; 32], [3u8; 32], 123, 2);
+        assert!(hs_128.iter().all(|h| h.qc_sidecar_v2.is_none()));
+
+        // at the first checkpoint ≥ cutover+1 (160) → must emit
+        let hs_160 =
+            build_rotation_headers(&policy, 160, [1u8; 32], [2u8; 32], [3u8; 32], 124, 2);
+        assert!(hs_160.iter().all(|h| h.qc_sidecar_v2.is_some()));
     }
 
     #[test]

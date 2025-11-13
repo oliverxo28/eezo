@@ -27,11 +27,13 @@ fn qc_sidecar_provenance_matches_cutover_plus_one_for_all_headers() {
         activated_at_height: Some(100),
     };
 
-    // Height chosen so that qc_sidecar_v2 is already emitted
-    // (mirrors your sidecar_emits_exactly_at_cutover_plus_one test).
+    // Height chosen so that qc_sidecar_v2 is already emitted.
+    // dual_accept_until = 150 → cutover+1 = 151.
+    // With default EEZO_CHECKPOINT_EVERY = 32, checkpoints are ..., 128, 160, 192, ...
+    // So 160 is the first checkpoint height ≥ cutover+1.
     let headers = build_rotation_headers(
         &policy,
-        151,              // height
+        160,              // first checkpoint ≥ cutover+1
         [1u8; 32],        // header_hash
         [2u8; 32],        // state_root_v2
         [3u8; 32],        // tx_root_v2
