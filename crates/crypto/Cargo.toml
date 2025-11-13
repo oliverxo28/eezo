@@ -64,3 +64,8 @@ skip-sig-verify = []
 
 # Present because code checks it; also pulls serde derive when enabled
 serde_support = ["dep:serde"]
+
+[[test]]
+name = "mldsa_roundtrip"
+path = "tests/mldsa_roundtrip.rs"
+required-features = ["pq44-runtime"]
