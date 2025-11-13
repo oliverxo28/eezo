@@ -17,15 +17,15 @@ chacha20poly1305 = { version = "0.10", optional = true }
 hkdf             = { version = "0.12", optional = true }
 
 # Core deps
-blake3   = "1"
-sha3     = "0.10"
-thiserror = "1"
-zeroize  = "1"            # used by some modules
-once_cell = { version = "1", optional = true }
+blake3     = "1"
+sha3       = "0.10"
+thiserror  = "1"
+zeroize    = "1"            # used by some modules
+once_cell  = { version = "1", optional = true }
 prometheus = { version = "0.13", optional = true }
 
 # Optional serde when serde_support feature is enabled
-serde = { version = "1", features = ["derive"], optional = true }
+serde  = { version = "1", features = ["derive"], optional = true }
 anyhow = "1.0.100"
 # eezo-kats was moved to dev-dependencies
 
@@ -38,7 +38,7 @@ eezo-kats = { version = "0.1.0", path = "../eezo-kats" }
 
 [features]
 # Default to a usable combo so plain `cargo check -p eezo-crypto` builds
-default = ["mldsa", "mlkem"] # <-- Added "mlkem"
+default = ["mldsa", "mlkem"]
 
 # Backend selector (empty switch for cfgs)
 backend-pqcrypto = []
@@ -65,6 +65,10 @@ skip-sig-verify = []
 # Present because code checks it; also pulls serde derive when enabled
 serde_support = ["dep:serde"]
 
+# ----------------------------
+# Test targets and gating
+# ----------------------------
+
 # Only run ML-DSA roundtrip and registry dispatch tests when the real backend is enabled.
 [[test]]
 name = "mldsa_roundtrip"
@@ -80,3 +84,20 @@ required-features = ["pq44-runtime"]
 name = "smoke"
 path = "tests/smoke.rs"
 required-features = ["pq44-runtime"]
+
+# T40 registry/router unit tests compile-time depend on having at least one sig scheme (mldsa) present.
+# They don't require the real backend, just the module surface.
+[[test]]
+name = "t40_registry_tests"
+path = "tests/t40_registry_tests.rs"
+required-features = ["mldsa"]
+
+# ----------------------------
+# Example targets and gating
+# ----------------------------
+
+# Only build this example when ML-KEM is enabled.
+[[example]]
+name = "print_mlkem_pk"
+path = "examples/print_mlkem_pk.rs"
+required-features = ["mlkem"]
