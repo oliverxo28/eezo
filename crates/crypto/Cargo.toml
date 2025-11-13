@@ -75,3 +75,8 @@ required-features = ["pq44-runtime"]
 name = "registry_dispatch"
 path = "tests/registry_dispatch.rs"
 required-features = ["pq44-runtime"]
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"
+required-features = ["pq44-runtime"]
