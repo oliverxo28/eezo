@@ -12,7 +12,17 @@ use serde::Deserialize;
 // needed for `.abi_encode()` on the PI tuple
 use alloy_sol_types::SolValue;
 
-use crate::metrics::{JOBS_TOTAL, LAST_HEIGHT, FAILURES_TOTAL, JobTimer, GC_REMOVED_TOTAL};
+use crate::metrics::{
+    JOBS_TOTAL,
+    LAST_HEIGHT,
+    FAILURES_TOTAL,
+    JobTimer,
+    GC_REMOVED_TOTAL,
+    CLAIMS_TOTAL,
+    CLAIM_TIMEOUTS_TOTAL,
+    GAPS_HEALED_TOTAL,
+};
+
 use crate::pi_builder::build_pi_for_height;
 use crate::v1_mldsa::prove_mldsa_batch;
 
@@ -138,8 +148,10 @@ fn maybe_reclaim_stale_lock(dir: &Path, stale_secs: u64) -> Result<bool> {
     let meta = fs::metadata(&lp).context("lock metadata")?;
     let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     let age = SystemTime::now().duration_since(mtime).unwrap_or(Duration::from_secs(0)).as_secs();
-    if age >= stale_secs {
+        if age >= stale_secs {
         fs::remove_file(&lp).context("remove stale lock")?;
+        // metrics: this is a stale claim timeout
+        CLAIM_TIMEOUTS_TOTAL.inc();
         return Ok(true);
     }
     Ok(false)
@@ -212,10 +224,18 @@ pub async fn run_prover_loop(cfg: ProverConfig) -> Result<()> {
     // healer: reclaim stale locks & clean partials once on startup
     let lock_stale_secs = env_u64("EEZO_PROVER_LOCK_STALE_SECS", 300); // 5 minutes
     let (healed, reclaimed) = heal_backlog(&cfg.proof_root, cfg.checkpoint_every, lock_stale_secs)?;
-    if healed > 0 || reclaimed > 0 {
-        log::info!("prover: startup heal — cleaned_partials={} reclaimed_locks={}", healed, reclaimed);
-        // TODO(metrics): eezo_prover_gaps_healed_total.add(healed as i64);
+        if healed > 0 || reclaimed > 0 {
+        log::info!(
+            "prover: startup heal — cleaned_partials={} reclaimed_locks={}",
+            healed,
+            reclaimed
+        );
+        // metrics: count how many gap dirs we healed (partials cleaned)
+        GAPS_HEALED_TOTAL.inc_by(healed as u64);
+        // metrics: reclaimed stale locks are also counted as claim timeouts
+        CLAIM_TIMEOUTS_TOTAL.inc_by(reclaimed as u64);
     }
+
     // how many checkpoint rotations to keep on disk (T37.8 lifecycle policy)
     // e.g., with interval=32 and retain_rotations=2, we keep ~64 heights worth.
     let retain_rotations = env_u64("EEZO_PROVER_RETAIN_ROTATIONS", 2);
@@ -275,7 +295,8 @@ pub async fn run_prover_loop(cfg: ProverConfig) -> Result<()> {
         }
         // we own the lock from here; drop on success or on giving up
         let mut _lock_file = maybe_lock.unwrap();
-        // TODO(metrics): eezo_prover_claims_total.inc();
+        // metrics: track claimed heights
+        CLAIMS_TOTAL.inc();		
 
         // bounded retry with exponential backoff for this height
         let mut tries: u32 = 0;

@@ -46,7 +46,9 @@ use blake3; // used by post_tx_raw_admin
 // PathBuf is needed even when only `checkpoints` is enabled (e.g., resolve_outbox_dir).
 use std::path::PathBuf;
 use clap::Parser;
-use eezo_ledger::{Block, BlockHeader, Supply, StateSnapshot};
+use eezo_ledger::{Block, BlockHeader};
+#[cfg(feature = "persistence")]
+use eezo_ledger::{Supply, StateSnapshot};
 #[cfg(feature = "pq44-runtime")]
 use eezo_ledger::consensus::{SingleNode, SingleNodeCfg};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1840,25 +1842,60 @@ async fn main() -> anyhow::Result<()> {
         Ok(s) => match parse_chain_id20_flexible(&s) {
             Some(id) => id,
             None => {
-                log::warn!("EEZO_CHAIN_ID='{}' invalid; falling back to --genesis", s);
-                let gpath = cfg.genesis.clone()
-                    .ok_or_else(|| anyhow::anyhow!("EEZO_CHAIN_ID invalid and no --genesis provided"))?;
+                #[cfg(feature = "persistence")]
+                {
+                    log::warn!(
+                        "EEZO_CHAIN_ID='{}' invalid; falling back to genesis.chain_id",
+                        s
+                    );
+                    let gpath = cfg.genesis.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "EEZO_CHAIN_ID invalid and no --genesis provided (persistence on)"
+                        )
+                    })?;
+                    let gtxt = std::fs::read_to_string(&gpath)
+                        .with_context(|| format!("failed to read genesis file: {}", gpath))?;
+                    let g: eezo_ledger::GenesisConfig = serde_json::from_str(&gtxt)
+                        .with_context(|| format!("invalid genesis JSON: {}", gpath))?;
+                    g.chain_id
+                }
+                #[cfg(not(feature = "persistence"))]
+                {
+                    eprintln!(
+                        "EEZO_CHAIN_ID invalid and persistence is off; \
+                         defaulting to devnet chain_id=...0001"
+                    );
+                    let mut out = [0u8; 20];
+                    out[19] = 1; // 0x...0001
+                    out
+                }
+            }
+        },
+        Err(_) => {
+            #[cfg(feature = "persistence")]
+            {
+                // Fallback: derive chain_id from the supplied genesis file
+                let gpath = cfg.genesis.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "EEZO_CHAIN_ID not set and no --genesis provided (persistence on)"
+                    )
+                })?;
                 let gtxt = std::fs::read_to_string(&gpath)
                     .with_context(|| format!("failed to read genesis file: {}", gpath))?;
                 let g: eezo_ledger::GenesisConfig = serde_json::from_str(&gtxt)
                     .with_context(|| format!("invalid genesis JSON: {}", gpath))?;
                 g.chain_id
             }
-        },
-        Err(_) => {
-            // Fallback: derive chain_id from the supplied genesis file
-            let gpath = cfg.genesis.clone()
-                .ok_or_else(|| anyhow::anyhow!("EEZO_CHAIN_ID not set and no --genesis provided"))?;
-            let gtxt = std::fs::read_to_string(&gpath)
-                .with_context(|| format!("failed to read genesis file: {}", gpath))?;
-            let g: eezo_ledger::GenesisConfig = serde_json::from_str(&gtxt)
-                .with_context(|| format!("invalid genesis JSON: {}", gpath))?;
-            g.chain_id
+            #[cfg(not(feature = "persistence"))]
+            {
+                eprintln!(
+                    "EEZO_CHAIN_ID not set and persistence is off; \
+                     defaulting to devnet chain_id=...0001"
+                );
+                let mut out = [0u8; 20];
+                out[19] = 1; // 0x...0001
+                out
+            }
         }
     };
     println!("🔍 Chain ID (effective): {}", hex::encode(chain_id));
@@ -1915,11 +1952,9 @@ async fn main() -> anyhow::Result<()> {
     // If built without `persistence`, bail at runtime with a clear message.
     #[cfg(not(feature = "persistence"))]
     {
-        anyhow::bail!(
-            "eezo-node was built without the `persistence` feature, \
-             but this run path requires RocksDB. Rebuild with: \
-             cargo build -p eezo-node --features \"pq44-runtime,state-sync,persistence\""
-        );
+        // This is safe to keep since Patch 4 correctly guards the persistence usage
+        // but removing it since the original code block was guarded by `#[cfg(feature = "persistence")]`
+        // which would include it. Leaving it out as per the instructions is cleaner.
     }
 
 
@@ -1931,7 +1966,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // --- State Sync Bootstrap ---
-    #[cfg(feature = "state-sync")]
+    #[cfg(all(feature = "state-sync", feature = "persistence"))]
     {
         // Prefer CLI/Clap (which may be populated from env), but also fall back
         // to raw env reads so tests that only set env still work reliably.
@@ -2100,8 +2135,8 @@ async fn main() -> anyhow::Result<()> {
 		    .map_err(|e| anyhow::anyhow!("wallet key load failed: {e}"))?;
         let single: SingleNode = SingleNode::new(cfg, sk, pk);
 
-        // Tick cadence & error behavior (env-tunable)
-        let tick_ms: u64 = env_u64(&["EEZO_CONSENSUS_TICK_MS"]).unwrap_or(200);
+        // tick cadence & error behavior (env-tunable)
+        let tick_ms: u64 = env_u64("EEZO_CONSENSUS_TICK_MS", 200);
         let rollback_on_error = true;
 
         // NEW: pass the DB (Some(persistence.clone())) so T36.5 can read real roots/timestamp
@@ -2202,22 +2237,29 @@ async fn main() -> anyhow::Result<()> {
         mp_rate_capacity,
         mp_rate_per_min,
     ));
-    // -- T34.0: Crypto-suite rotation policy (ENV > GENESIS > DEFAULTS) ---------
-    // We support both EEZO_ROTATION_* and EEZO_* env keys (either may be set).
+    // -- T34.0: crypto-suite rotation policy (env > genesis > defaults) ---------
+    // we support both EEZO_ROTATION_* and EEZO_* env keys (either may be set).
     fn env_u8(keys: &[&str]) -> Option<u8> {
         for k in keys {
             if let Ok(v) = std::env::var(k) {
-                if let Ok(x) = v.trim().parse::<u8>() { return Some(x); }
+                if let Ok(x) = v.trim().parse::<u8>() {
+                    return Some(x);
+                }
             }
         }
         None
     }
-    fn env_u64(keys: &[&str]) -> Option<u64> {
+
+    fn env_u64_opt(keys: &[&str]) -> Option<u64> {
         for k in keys {
             if let Ok(v) = std::env::var(k) {
                 let t = v.trim();
-                if t.is_empty() { continue; }
-                if let Ok(x) = t.parse::<u64>() { return Some(x); }
+                if t.is_empty() {
+                    continue;
+                }
+                if let Ok(x) = t.parse::<u64>() {
+                    return Some(x);
+                }
             }
         }
         None
@@ -2246,7 +2288,7 @@ async fn main() -> anyhow::Result<()> {
         .or(gen_next);
 
     let dual_accept_until: Option<u64> =
-        env_u64(&["EEZO_ROTATION_DUAL_UNTIL","EEZO_DUAL_ACCEPT_UNTIL"])
+        env_u64_opt(&["EEZO_ROTATION_DUAL_UNTIL","EEZO_DUAL_ACCEPT_UNTIL"])
             .or(gen_until);
     // A simple boolean for logs (and later, a metric/gauge in metrics.rs)
     let window_open = match (next_suite_id, dual_accept_until) {
@@ -2375,6 +2417,7 @@ async fn main() -> anyhow::Result<()> {
     println!("🔍 Zero-peer mode status: {}", zero_peer_mode);
 
     // Restore block height from RocksDB (fallback to 0)
+    #[cfg(feature = "persistence")]
     let start_h = match persistence.get_tip() {
         Ok(h) => {
             if h > 0 {
@@ -2389,6 +2432,10 @@ async fn main() -> anyhow::Result<()> {
             0
         }
     };
+
+    #[cfg(not(feature = "persistence"))]
+    let start_h: u64 = 0;
+    
     let block_height = Arc::new(AtomicU64::new(start_h));
     let accounts = Accounts::new();
     accounts.mint("0x01", 1_000_000).await;
@@ -2454,145 +2501,147 @@ async fn main() -> anyhow::Result<()> {
             .set(1.0);
     }
 	
-    if std::env::var("EEZO_BRIDGE_OUTBOX_ENABLED").ok().as_deref() == Some("1") {
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            use std::{env, fs, path::PathBuf, time::Duration};
-            log::info!("🚀 Bridge checkpoint emitter task starting...");
+    #[cfg(feature = "persistence")]
+    {
+        if std::env::var("EEZO_BRIDGE_OUTBOX_ENABLED").ok().as_deref() == Some("1") {
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                use std::{env, fs, path::PathBuf, time::Duration};
+                log::info!("🚀 Bridge checkpoint emitter task starting...");
 
-            // How often to emit (heights): default 32
-            let checkpoint_every: u64 = env::var("EEZO_CHECKPOINT_EVERY")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(32);
+                // How often to emit (heights): default 32
+                let checkpoint_every: u64 = env::var("EEZO_CHECKPOINT_EVERY")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(32);
 
-            // Resolve outbox directory once
-            let outbox_dir: PathBuf = env::var("EEZO_BRIDGE_OUTBOX_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    let mut p = state_clone
-                        .datadir
-                        .clone()
-                        .unwrap_or_else(|| PathBuf::from("."));
-                    p.push("proof");
-                    p.push("checkpoints");
-                    p
-                });
-            if let Err(e) = fs::create_dir_all(&outbox_dir) {
-                log::error!("❌ bridge: failed to create outbox dir {}: {e}", outbox_dir.display());
-            }
-            log::info!(
-                "bridge: emitter configured: outbox_dir={}, checkpoint_every={}",
-                outbox_dir.display(),
-                checkpoint_every
-            );
+                // Resolve outbox directory once
+                let outbox_dir: PathBuf = env::var("EEZO_BRIDGE_OUTBOX_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        let mut p = state_clone
+                            .datadir
+                            .clone()
+                            .unwrap_or_else(|| PathBuf::from("."));
+                        p.push("proof");
+                        p.push("checkpoints");
+                        p
+                    });
+                if let Err(e) = fs::create_dir_all(&outbox_dir) {
+                    log::error!("❌ bridge: failed to create outbox dir {}: {e}", outbox_dir.display());
+                }
+                log::info!(
+                    "bridge: emitter configured: outbox_dir={}, checkpoint_every={}",
+                    outbox_dir.display(),
+                    checkpoint_every
+                );
 
-            // Track last emitted height
-            let mut last_emitted: u64 = 0;
-            let mut ticker = tokio::time::interval(Duration::from_secs(5));
+                // Track last emitted height
+                let mut last_emitted: u64 = 0;
+                let mut ticker = tokio::time::interval(Duration::from_secs(5));
 
-            loop {
-                ticker.tick().await;
-
-                // Discover current tip by probing headers (robust, no special API needed)
-                let mut tip = last_emitted;
                 loop {
-                    let next = tip.saturating_add(1);
-                    #[cfg(feature = "persistence")]
-					match state_clone.db.get_header(next) {
-                        Ok(_) => tip = next,
-                        Err(_) => break,
+                    ticker.tick().await;
+
+                    // Discover current tip by probing headers (robust, no special API needed)
+                    let mut tip = last_emitted;
+                    loop {
+                        let next = tip.saturating_add(1);
+                        match state_clone.db.get_header(next) {
+                            Ok(_) => tip = next,
+                            Err(_) => break,
+                        }
                     }
-                }
 
-                if checkpoint_every == 0 || tip == 0 {
-                    // Nothing to do yet
-                    continue;
-                }
+                    if checkpoint_every == 0 || tip == 0 {
+                        // Nothing to do yet
+                        continue;
+                    }
 
-                // Emit for each multiple crossed since last tick
-                let mut h = ((last_emitted / checkpoint_every) + 1) * checkpoint_every;
-                while h <= tip {
-                    // Gather data
-					#[cfg(feature = "persistence")]
-                    let hdr = match state_clone.db.get_header(h) {
-                        Ok(h) => h,
-                        Err(e) => { log::warn!("bridge: header {} missing: {e}", h); break; }
-                    };
-					#[cfg(feature = "persistence")]
-                    let state_root = match state_clone.db.get_state_root_v2(h) {
-                        Ok(r) => r,
-                        Err(e) => { log::warn!("bridge: state_root {} missing: {e}", h); break; }
-                    };
-					#[cfg(feature = "persistence")]
-                    let tx_root = match state_clone.db.get_tx_root_v2(h) {
-                        Ok(r) => r,
-                        Err(e) => { log::warn!("bridge: tx_root {} missing: {e}", h); break; }
-                    };
-					#[cfg(feature = "persistence")]
-                    let ts_secs = match state_clone.db.get_header_timestamp_secs(h) {
-                        Ok(t) => t,
-                        Err(e) => { log::warn!("bridge: timestamp {} missing: {e}", h); break; }
-                    };
+                    // Emit for each multiple crossed since last tick
+                    let mut h = ((last_emitted / checkpoint_every) + 1) * checkpoint_every;
+                    while h <= tip {
+                        // Gather data
+                        let hdr = match state_clone.db.get_header(h) {
+                            Ok(h) => h,
+                            Err(e) => { log::warn!("bridge: header {} missing: {e}", h); break; }
+                        };
+                        let state_root = match state_clone.db.get_state_root_v2(h) {
+                            Ok(r) => r,
+                            Err(e) => { log::warn!("bridge: state_root {} missing: {e}", h); break; }
+                        };
+                        let tx_root = match state_clone.db.get_tx_root_v2(h) {
+                            Ok(r) => r,
+                            Err(e) => { log::warn!("bridge: tx_root {} missing: {e}", h); break; }
+                        };
+                        let ts_secs = match state_clone.db.get_header_timestamp_secs(h) {
+                            Ok(t) => t,
+                            Err(e) => { log::warn!("bridge: timestamp {} missing: {e}", h); break; }
+                        };
 
-                    // Rotation policy: prefer explicit env override (T41.7/T41.8),
-                    // fall back to AppState rotation view if env is not set.
-                    let policy = eezo_ledger::checkpoints::rotation_policy_from_env()
-                        .unwrap_or_else(|| eezo_ledger::rotation::RotationPolicy {
-                            active: eezo_crypto::suite::CryptoSuite::try_from(
-                                state_clone.active_suite_id,
-                            )
-                            .unwrap_or(eezo_crypto::suite::CryptoSuite::MlDsa44),
-                            next: state_clone.next_suite_id.and_then(|id| {
-                                eezo_crypto::suite::CryptoSuite::try_from(id).ok()
-                            }),
-                            dual_accept_until: state_clone.dual_accept_until,
-                            activated_at_height: None,
-                        });
+                        // Rotation policy: prefer explicit env override (T41.7/T41.8),
+                        // fall back to AppState rotation view if env is not set.
+                        let policy = eezo_ledger::checkpoints::rotation_policy_from_env()
+                            .unwrap_or_else(|| eezo_ledger::rotation::RotationPolicy {
+                                active: eezo_crypto::suite::CryptoSuite::try_from(
+                                    state_clone.active_suite_id,
+                                )
+                                .unwrap_or(eezo_crypto::suite::CryptoSuite::MlDsa44),
+                                next: state_clone.next_suite_id.and_then(|id| {
+                                    eezo_crypto::suite::CryptoSuite::try_from(id).ok()
+                                }),
+                                dual_accept_until: state_clone.dual_accept_until,
+                                activated_at_height: None,
+                            });
 
-                    let header_hash = eezo_ledger::block::header_hash(&hdr);
-                    let finality_depth = 2u64;
+                        let header_hash = eezo_ledger::block::header_hash(&hdr);
+                        let finality_depth = 2u64;
 
-                    match eezo_ledger::checkpoints::emit_bridge_checkpoint_with_path(
-                        &outbox_dir,
-                        &policy,
-                        h,
-                        header_hash,
-                        state_root,
-                        tx_root,
-                        ts_secs,
-                        finality_depth,
-                    ) {
-                        Ok(paths) => {
-                            log::info!(
-                                "✅ bridge: wrote {} checkpoint file(s) at height {} (e.g. {})",
-                                paths.len(),
-                                h,
-                                paths.get(0).map(|p| p.display().to_string()).unwrap_or_default()
-                            );
-                            #[cfg(feature = "metrics")]
-                            {
-                                // EEZO_BRIDGE_OUTBOX_TOTAL is an IntCounter (no labels)
-                                crate::metrics::EEZO_BRIDGE_OUTBOX_TOTAL.inc_by(paths.len() as u64);
-                                crate::metrics::bridge_latest_height_set(h);
+                        match eezo_ledger::checkpoints::emit_bridge_checkpoint_with_path(
+                            &outbox_dir,
+                            &policy,
+                            h,
+                            header_hash,
+                            state_root,
+                            tx_root,
+                            ts_secs,
+                            finality_depth,
+                        ) {
+                            Ok(paths) => {
+                                log::info!(
+                                    "✅ bridge: wrote {} checkpoint file(s) at height {} (e.g. {})",
+                                    paths.len(),
+                                    h,
+                                    paths.get(0).map(|p| p.display().to_string()).unwrap_or_default()
+                                );
+                                #[cfg(feature = "metrics")]
+                                {
+                                    // EEZO_BRIDGE_OUTBOX_TOTAL is an IntCounter (no labels)
+                                    crate::metrics::EEZO_BRIDGE_OUTBOX_TOTAL.inc_by(paths.len() as u64);
+                                    crate::metrics::bridge_latest_height_set(h);
+                                }
+                                last_emitted = h;
+                                h += checkpoint_every;
                             }
-                            last_emitted = h;
-                            h += checkpoint_every;
-                        }
-                        Err(e) => {
-                            log::error!("❌ bridge: emit failed at h={}: {}", h, e);
-                            // Don't advance last_emitted so we retry next tick
-                            break;
+                            Err(e) => {
+                                log::error!("❌ bridge: emit failed at h={}: {}", h, e);
+                                // Don't advance last_emitted so we retry next tick
+                                break;
+                            }
                         }
                     }
                 }
-            }
-        });
-        log::info!("✅ Bridge checkpoint emitter task started (EEZO_BRIDGE_OUTBOX_ENABLED=1)");
-    } else {
-        log::info!("🔶 Bridge checkpoint emitter disabled (set EEZO_BRIDGE_OUTBOX_ENABLED=1 to enable)");
+            });
+            log::info!("✅ bridge checkpoint emitter task started (EEZO_BRIDGE_OUTBOX_ENABLED=1)");
+        } else {
+            log::info!("🔶 bridge checkpoint emitter disabled (set EEZO_BRIDGE_OUTBOX_ENABLED=1 to enable)");
+        }
     }
-    
+
+    #[cfg(not(feature = "persistence"))]
+    {
+        log::info!("🔶 bridge checkpoint emitter disabled: node built without `persistence` feature");
+    }
 
     let app = Router::new()
         .route("/health", get(health_handler))
@@ -3052,7 +3101,6 @@ async fn main() -> anyhow::Result<()> {
                         timestamp_ms: now_ms(),
                         tx_count: block_hashes.len() as u32,
 
-            
                         #[cfg(feature = "checkpoints")]
                         qc_hash: [0u8; 32],
                     };
@@ -3060,67 +3108,63 @@ async fn main() -> anyhow::Result<()> {
                     // advances and receipts flip to "included".
                     // (You can add real tx bodies later.)
                     let block = Block { header, txs: Vec::new() };
-                    // --- Load the last supply to keep snapshot shape consistent ---
-                    // (Genesis wrote height=0 snapshot, so this should succeed; otherwise default.)
-                    let prev_supply = match db.get_latest_snapshot_at_or_below(prev_h) {
-                        Ok(Some(s)) => s.supply.clone(),
 
-        
-                        _ => Supply { native_mint_total: 0, bridge_mint_total: 0, burn_total: 0 },
-                    };
-                    // Stub the state root for now.
-                    let state_root = [0u8; 32];
-                    // --- Persist header+block and state snapshot, then bump tip ---
-                    if let Err(e) = db.put_header_and_block(next_h, &block.header, &block) {
-                        eprintln!("❌ persist header+block failed at h={}: {}", next_h, e);
-                        // We already mutated accounts in-memory; in devnet this is acceptable.
-                        // If you want: add rollback or mark batch rejected on error.
-                    } else {
-                        let snap = StateSnapshot {
-                            height: next_h,
-                            // Use a default `Accounts` for the snapshot, as the in-memory
+                    // --- optional persistence: write header + snapshot + tip ---
+                    #[cfg(feature = "persistence")]
+                    {
+                        let prev_supply = match db.get_latest_snapshot_at_or_below(prev_h) {
+                            Ok(Some(s)) => s.supply.clone(),
+                            _ => Supply {
+                                native_mint_total: 0,
+                                bridge_mint_total: 0,
+                                burn_total: 0,
+                            },
+                        };
+                        let state_root = [0u8; 32];
 
-   
-                             // one is just a dev helper and not the real ledger state.
-                            accounts: eezo_ledger::Accounts::default(),
-                            supply: prev_supply,
-                            state_root,
-							bridge: Some(eezo_ledger::bridge::BridgeState::default()),
-                            #[cfg(feature = "eth-ssz")]
-           
-                             codec_version: 2,
-                            #[cfg(feature = "eth-ssz")]
-                            state_root_v2: state_root,
-
-                       
-                         };
-                        if let Err(e) = db.put_state_snapshot(&snap) {
-                            eprintln!("❌ persist snapshot failed at h={}: {}", next_h, e);
-                        }
-                        if let Err(e) = db.set_tip(next_h) {
-                            eprintln!("❌ set_tip({}) failed: {}", next_h, e);
-                        }
-
-                        // Only now publish height to the in-proc gauge & metrics
-                        state_clone.block_height.store(next_h, Ordering::SeqCst);
-                        #[cfg(feature = "metrics")]
-                        {
-                            crate::metrics::EEZO_BLOCK_HEIGHT.set(next_h as i64);
-                            crate::metrics::EEZO_MEMPOOL_LEN.set(state_clone.mempool.len().await as i64);
-                        }
-
-                        // Keep your in-memory index for /block/:height
-                        let mut rb = state_clone.recent_blocks.write().await;
-                        rb.by_height.insert(next_h, block_hashes.clone());
-                        rb.order.push_back(next_h);
-                        while rb.order.len() > rb.cap {
-                            if let Some(old_h) = rb.order.pop_front() {
-                                rb.by_height.remove(&old_h);
+                        if let Err(e) = db.put_header_and_block(next_h, &block.header, &block) {
+                            eprintln!("❌ persist header+block failed at h={}: {}", next_h, e);
+                        } else {
+                            let snap = StateSnapshot {
+                                height: next_h,
+                                accounts: eezo_ledger::Accounts::default(),
+                                supply: prev_supply,
+                                state_root,
+                                bridge: Some(eezo_ledger::bridge::BridgeState::default()),
+                                #[cfg(feature = "eth-ssz")]
+                                codec_version: 2,
+                                #[cfg(feature = "eth-ssz")]
+                                state_root_v2: state_root,
+                            };
+                            if let Err(e) = db.put_state_snapshot(&snap) {
+                                eprintln!("❌ persist snapshot failed at h={}: {}", next_h, e);
+                            }
+                            if let Err(e) = db.set_tip(next_h) {
+                                eprintln!("❌ set_tip({}) failed: {}", next_h, e);
                             }
                         }
-
-                        log::info!("✅ committed block h={} ({} txs)", next_h, block_hashes.len());
                     }
+
+                    // publish height + metrics in all builds (persistence or not)
+                    state_clone.block_height.store(next_h, Ordering::SeqCst);
+                    #[cfg(feature = "metrics")]
+                    {
+                        crate::metrics::EEZO_BLOCK_HEIGHT.set(next_h as i64);
+                        crate::metrics::EEZO_MEMPOOL_LEN
+                            .set(state_clone.mempool.len().await as i64);
+                    }
+
+                    // keep the in-memory index for /block/:height
+                    let mut rb = state_clone.recent_blocks.write().await;
+                    rb.by_height.insert(next_h, block_hashes.clone());
+                    rb.order.push_back(next_h);
+                    while rb.order.len() > rb.cap {
+                        if let Some(old_h) = rb.order.pop_front() {
+                            rb.by_height.remove(&old_h);
+                        }
+                    }
+
+                    log::info!("✅ committed block h={} ({} txs)", next_h, block_hashes.len());
                 }
 
             }

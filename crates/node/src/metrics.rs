@@ -268,6 +268,131 @@ pub static STATE_SYNC_HTTP_ERR_5XX: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+// ───────────────────────────── T42.3: State-sync progress metrics ───────────
+// These live under `metrics` so operators can always see high-level state-sync
+// progress, even if detailed `state-sync`-specific metrics are disabled.
+#[cfg(feature = "metrics")]
+pub static EEZO_STATE_SYNC_LATEST_HEIGHT: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_state_sync_latest_height",
+        "Gauge of the highest state-sync height applied by this node"
+    )
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "warning: failed to register eezo_state_sync_latest_height: {} (using unregistered fallback gauge)",
+            e
+        );
+        IntGauge::new(
+            "eezo_state_sync_latest_height_fallback",
+            "unregistered fallback gauge for state-sync latest height"
+        )
+        .expect("fallback gauge constructed")
+    })
+});
+
+
+#[cfg(feature = "metrics")]
+pub static EEZO_STATE_SYNC_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_state_sync_total",
+        "Total successful state-sync applications (snapshot + delta)"
+    )
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "warning: failed to register eezo_state_sync_total: {} (using unregistered fallback counter)",
+            e
+        );
+        IntCounter::new(
+            "eezo_state_sync_total_fallback",
+            "unregistered fallback counter for state-sync total"
+        )
+        .expect("fallback counter constructed")
+    })
+});
+
+
+#[cfg(feature = "metrics")]
+pub static EEZO_STATE_SYNC_RETRY_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_state_sync_retry_total",
+        "Total state-sync retries (any HTTP/transport-level retry)"
+    )
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "warning: failed to register eezo_state_sync_retry_total: {} (using unregistered fallback counter)",
+            e
+        );
+        IntCounter::new(
+            "eezo_state_sync_retry_total_fallback",
+            "unregistered fallback counter for state-sync retries"
+        )
+        .expect("fallback counter constructed")
+    })
+});
+
+
+#[cfg(feature = "metrics")]
+pub static EEZO_STATE_SYNC_ERRORS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_state_sync_errors_total",
+        "Total state-sync apply failures (after retries exhausted)"
+    )
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "warning: failed to register eezo_state_sync_errors_total: {} (using unregistered fallback counter)",
+            e
+        );
+        IntCounter::new(
+            "eezo_state_sync_errors_total_fallback",
+            "unregistered fallback counter for state-sync errors"
+        )
+        .expect("fallback counter constructed")
+    })
+});
+
+
+/// Helper: set latest state-sync height *monotonically* (never move backwards).
+#[inline]
+pub fn state_sync_latest_height_set(h: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        let cur = EEZO_STATE_SYNC_LATEST_HEIGHT.get();
+        let next = (h as i64).saturating_abs();
+        if next > cur {
+            EEZO_STATE_SYNC_LATEST_HEIGHT.set(next);
+        }
+    }
+    #[cfg(not(feature = "metrics"))]
+    { let _ = h; }
+}
+
+/// Helper: increment total successful state-sync applications.
+#[inline]
+pub fn state_sync_total_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STATE_SYNC_TOTAL.inc();
+    }
+}
+
+/// Helper: increment retry counter for state-sync operations.
+#[inline]
+pub fn state_sync_retry_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STATE_SYNC_RETRY_TOTAL.inc();
+    }
+}
+
+/// Helper: increment error counter for failed state-sync operations.
+#[inline]
+pub fn state_sync_error_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STATE_SYNC_ERRORS_TOTAL.inc();
+    }
+}
+
 // --- T29.8: State-sync client hardening metrics ---
 #[cfg(feature = "metrics")]
 pub static SS_RETRIES_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::Lazy::new(|| {

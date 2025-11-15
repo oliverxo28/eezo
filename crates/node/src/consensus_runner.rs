@@ -122,11 +122,20 @@ impl CoreRunnerHandle {
                     break;
                 }
                 ticker.tick().await;
+                #[cfg(feature = "metrics")]
+                let slot_start = std::time::Instant::now();
                 // run exactly one slot - assuming run_one_slot is sync based on teacher feedback
                 let outcome = {
                     let mut guard = node_c.lock().await;
                     run_one_slot(&mut *guard, rollback_on_error)
                 };
+                #[cfg(feature = "metrics")]
+                if let Ok(SlotOutcome::Committed { .. }) = outcome {
+                    let sec = slot_start.elapsed().as_secs_f64();
+                    crate::metrics::EEZO_BLOCK_E2E_LATENCY_SECONDS
+                        .with_label_values(&["commit"])
+                        .observe(sec);
+                }
                 // optional: structured logs (kept minimal in T36.0)
                 match outcome {
                     // Assuming SlotOutcome::Committed { height } as per teacher's plan to NOT change API
@@ -507,6 +516,8 @@ impl CoreRunnerHandle {
                 // Use Relaxed ordering
                 if stop_c.load(Ordering::Relaxed) { break; }
                 ticker.tick().await;
+                #[cfg(feature = "metrics")]
+                let slot_start = std::time::Instant::now();				
 
 
                 // Assuming run_one_slot is sync
@@ -514,6 +525,13 @@ impl CoreRunnerHandle {
                     let mut guard = node_c.lock().await;
                     run_one_slot(&mut *guard, rollback_on_error)
                 };
+                #[cfg(feature = "metrics")]
+                if let Ok(SlotOutcome::Committed { .. }) = outcome {
+                    let sec = slot_start.elapsed().as_secs_f64();
+                    crate::metrics::EEZO_BLOCK_E2E_LATENCY_SECONDS
+                        .with_label_values(&["commit"])
+                        .observe(sec);
+                }				
                 match outcome {
                      // Assuming SlotOutcome::Committed { height }
                     Ok(SlotOutcome::Committed { height }) => {

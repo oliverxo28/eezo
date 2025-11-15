@@ -484,7 +484,11 @@ struct RelayMetrics {
     // [0,1,2,4,8,16,32,64,128,+Inf]
     sc_lag_buckets: [AtomicU64; 10],
     sc_lag_sum: AtomicU64,
-    sc_lag_count: AtomicU64,	
+    sc_lag_count: AtomicU64,
+    // T42.3: state-sync / backfill refinements
+    submit_failed_total: AtomicU64,   // -> eezo_relay_submit_failed_total
+    gap_detected_total: AtomicU64,    // -> eezo_relay_gap_detected_total
+    target_height: AtomicU64,         // -> eezo_relay_target_height	
 }
 
 impl Default for RelayMetrics {
@@ -513,6 +517,9 @@ impl Default for RelayMetrics {
             sc_lag_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
             sc_lag_sum: Default::default(),
             sc_lag_count: Default::default(),
+            submit_failed_total: Default::default(),
+            gap_detected_total: Default::default(),
+            target_height: Default::default(),
         }
     }
 }
@@ -523,6 +530,9 @@ impl RelayMetrics {
     fn set_onchain(&self, h: u64) { self.onchain_height.store(h, Ordering::Relaxed); }
     fn set_node_latest(&self, h: u64) { self.node_latest.store(h, Ordering::Relaxed); }
     fn set_backoff(&self, s: u64) { self.backoff_secs.store(s, Ordering::Relaxed); }
+    fn set_target(&self, h: u64) { self.target_height.store(h, Ordering::Relaxed); }
+    fn inc_submit_failed(&self) { self.submit_failed_total.fetch_add(1, Ordering::Relaxed); }
+    fn inc_gap_detected(&self) { self.gap_detected_total.fetch_add(1, Ordering::Relaxed); }	
     fn render(&self) -> String {
         let strict_skips = self.strict_skips_total.load(Ordering::Relaxed);
         let strict_mism  = self.strict_mismatches_total.load(Ordering::Relaxed);		
@@ -537,6 +547,9 @@ impl RelayMetrics {
              eezo_relay_node_latest_height {}\n\
              eezo_relay_backoff_seconds {}\n\
              eezo_relay_backfill_inflight {}\n\
+             eezo_relay_target_height {}\n\
+             eezo_relay_submit_failed_total {}\n\
+             eezo_relay_gap_detected_total {}\n\
              eezo_bridge_pi_cv_mismatch_total {}\n\
              eezo_bridge_submit_revert_total {}\n\
              eezo_bridge_suite_mismatch_total {}\n\
@@ -570,6 +583,9 @@ impl RelayMetrics {
             self.node_latest.load(Ordering::Relaxed),
             self.backoff_secs.load(Ordering::Relaxed),
             inflight,
+            self.target_height.load(Ordering::Relaxed),
+            self.submit_failed_total.load(Ordering::Relaxed),
+            self.gap_detected_total.load(Ordering::Relaxed),			
             self.pi_cv_mismatch_total.load(Ordering::Relaxed),
             self.submit_revert_total.load(Ordering::Relaxed),
             self.suite_mismatch_total.load(Ordering::Relaxed),
@@ -898,6 +914,7 @@ async fn main() -> Result<()> {
     };
     info!("starting relay from target height {} (onchain_latest={}, step={})",
           target, onchain_latest, cfg.checkpoint_every);
+	metrics.set_target(target);	  
 
     let poll = Duration::from_secs(cfg.poll_secs);
     let mut backoff = Duration::from_secs(1);
@@ -946,6 +963,7 @@ async fn main() -> Result<()> {
                     info!("on-chain height {} >= current target; advanced target to {}", onchain, target);
                     backoff = Duration::from_secs(1);
                     metrics.set_backoff(backoff.as_secs());
+					metrics.set_target(target);
                     tokio::time::sleep(jittered(poll.as_millis() as u64)).await;
                     continue;
                 }
@@ -954,6 +972,14 @@ async fn main() -> Result<()> {
                     Ok(sum) => {
                         debug!("onchain={}, node_latest={}", onchain, sum.latest_height);
                         metrics.set_node_latest(sum.latest_height);
+                        // T42.3: detect pathological drift where LC is ahead of node summary
+                        if onchain > sum.latest_height {
+                            metrics.inc_gap_detected();
+                            warn!(
+                                "relay gap detected: onchain_latest={} > node_latest={}",
+                                onchain, sum.latest_height
+                            );
+                        }						
                         if sum.latest_height < target {
                             debug!("node latest {} < target {}; sleeping {}s", sum.latest_height, target, cfg.poll_secs);
                             tokio::time::sleep(jittered(poll.as_millis() as u64)).await;
@@ -968,12 +994,18 @@ async fn main() -> Result<()> {
                             match http_header_exists(&http, &cfg.eezo, target).await {
                                 Ok(true) => { /* proceed */ }
                                 Ok(false) => {
-                                    warn!("node summary indicated >= h{}, but header endpoint 404'd; skipping to next +{}", target, cfg.checkpoint_every);
+                                    warn!(
+                                        "node summary indicated >= h{}, but header endpoint 404'd; skipping to next +{}",
+                                        target,
+                                        cfg.checkpoint_every
+                                    );
                                     target = target.saturating_add(cfg.checkpoint_every);
+                                    metrics.set_target(target);
                                     tokio::time::sleep(jittered(poll.as_millis() as u64)).await;
                                     continue;
                                 }
                                 Err(e) => {
+
                                     warn!("http presence check failed for h={}: {}", target, e);
                                     backoff = std::cmp::min(backoff * 2, backoff_cap);
                                     metrics.set_backoff(backoff.as_secs());
@@ -1299,6 +1331,7 @@ async fn main() -> Result<()> {
                                         // + PATCH END: IMPROVED IDEMPOTENT REVERT HANDLING
                                             error!("store failed at h={}: {}", target, e);
 											metrics.submit_revert_total.fetch_add(1, Ordering::Relaxed);
+											metrics.inc_submit_failed();
                                             backoff = std::cmp::min(backoff * 2, backoff_cap);
                                             metrics.set_backoff(backoff.as_secs());
                                             tokio::time::sleep(jittered(backoff.as_millis() as u64)).await;
@@ -1317,9 +1350,12 @@ async fn main() -> Result<()> {
                                     info!("relay GC: removed {}", gc_dir.display());
                                 }
                             }
-                            
+
+                            // T42.3: always advance and export next target height
                             target = target.saturating_add(cfg.checkpoint_every);
+                            metrics.set_target(target);
                         }
+
                     }
                     Err(e) => {
                         warn!("summary fetch failed: {}", e);

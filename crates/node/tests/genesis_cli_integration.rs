@@ -1,3 +1,4 @@
+#![cfg(feature = "persistence")]
 mod common;
 
 use std::path::PathBuf;

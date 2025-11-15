@@ -14,9 +14,10 @@ fn node_header_sign_and_verify_roundtrip_mldsa() {
         height: 1,
         prev_hash: [0u8; 32],
         tx_root: [0u8; 32],
-        fee_total: 0,
-        tx_count: 0,
-        timestamp_ms: 0,
+        tx_root_v2: [0u8; 32], // new v2 root for the same dummy header
+		fee_total: 0,
+		tx_count: 0,
+        timestamp_ms: 12345,
         qc_hash: [0u8; 32],
     };
 

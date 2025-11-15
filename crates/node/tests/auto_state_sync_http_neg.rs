@@ -1,6 +1,10 @@
+#![cfg(all(feature = "state-sync", feature = "state-sync-http"))]
+
 // Negative tests for state-sync HTTP validation and JSON errors.
 // Run with features:
-// cargo test -p eezo-node --features "pq44-runtime,metrics,checkpoints,state-sync,state-sync-http" --test auto_state_sync_http_neg -j1 -- --nocapture
+//   cargo test -p eezo-node \
+//     --features "pq44-runtime,metrics,checkpoints,state-sync,state-sync-http" \
+//     --test auto_state_sync_http_neg -j1 -- --nocapture
 
 mod common;
 

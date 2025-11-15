@@ -373,9 +373,10 @@ mod tests {
 
         // wait ~1.1s to refill
         tokio::time::sleep(Duration::from_millis(1100)).await;
-        mp.submit(ip, h(2), vec![0u8; 80]).await.unwrap();
+        // second submit fits under the byte cap: 64 + 48 = 112 <= 128
+        mp.submit(ip, h(2), vec![0u8; 48]).await.unwrap();
 
-        // bytes cap reached now (64 + 80 > 128) on a third submit
+        // bytes cap reached now (64 + 48 + 64 > 128) on a third submit
         tokio::time::sleep(Duration::from_millis(1100)).await;
         let e = mp.submit(ip, h(3), vec![0u8; 64]).await.err().unwrap();
         assert!(matches!(e, SubmitError::BytesCapReached));

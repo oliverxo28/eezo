@@ -1,5 +1,11 @@
 // Allow dead_code only outside tests while the client is stubbed.
 use serde::{Deserialize, Serialize};
+use crate::metrics::{
+    state_sync_latest_height_set,
+    state_sync_retry_inc,
+    state_sync_total_inc,
+};
+
 #[cfg_attr(not(test), allow(dead_code))]
 
 #[cfg(feature = "state-sync")]
@@ -1167,16 +1173,16 @@ fn backoff_dur_ms(base: u64, cap: u64, attempt: usize) -> u64 {
 }
 
 #[cfg(feature = "state-sync")]
-fn retry_blocking<F, T>(
+pub fn retry_with_backoff<F, T>(
     mut f: F,
-    max_retries: usize,
     base_ms: u64,
     cap_ms: u64,
+    max_retries: u32,
 ) -> Result<T, SyncError>
 where
     F: FnMut() -> Result<T, SyncError>,
 {
-    let mut attempt = 0usize;
+    let mut attempt: u32 = 0;
     loop {
         match f() {
             Ok(v) => return Ok(v),
@@ -1185,6 +1191,8 @@ where
                 match e {
                     SyncError::NotFound | SyncError::InvalidArg(_) => return Err(e),
                     _ => {
+                        // Retry metrics for each attempt
+                        state_sync_retry_inc();
                         if attempt >= max_retries {
                             #[cfg(feature = "metrics")]
                             SS_FAILURES_TOTAL.inc();
@@ -1192,7 +1200,8 @@ where
                         }
                         #[cfg(feature = "metrics")]
                         SS_RETRIES_TOTAL.inc();
-                        let sleep_ms = backoff_dur_ms(base_ms, cap_ms, attempt);
+                        // Safely cast attempt to usize for backoff_dur_ms
+                        let sleep_ms = backoff_dur_ms(base_ms, cap_ms, attempt as usize);
                         log::warn!(
                             "state-sync: transient error (attempt {}), backing off {} ms: {}",
                             attempt + 1,
@@ -1207,6 +1216,7 @@ where
         }
     }
 }
+
 
 #[cfg(feature = "state-sync")]
 fn network_error_handler<E: std::fmt::Debug>(e: E) -> SyncError {
@@ -1282,17 +1292,22 @@ pub fn fetch_delta(
     let url = format!("{}/state/delta", base_url.trim_end_matches('/'));
     let resp = http_client()?
         .get(url)
-        .query(&[("from", from), ("to", to), ("limit", limit as u64)])
+        .query(&[
+            ("from", from),
+            ("to", to),
+            ("limit", limit as u64),
+        ])
         .send()
         .map_err(network_error_handler)?;
-    if resp.status().as_u16() == 404 {
-        Err(SyncError::NotFound)
-    } else if !resp.status().is_success() {
-        Err(SyncError::NetworkFailed)
-    } else {
-        resp.json::<DeltaBatch>()
-            .map_err(|_| SyncError::DecodeFailed)
+    let code = resp.status();
+    if code.as_u16() == 404 {
+        return Err(SyncError::NotFound);
     }
+    if !code.is_success() {
+        return Err(SyncError::NetworkFailed);
+    }
+    resp.json::<DeltaBatch>()
+        .map_err(|_| SyncError::DecodeFailed)
 }
 
 #[cfg(feature = "state-sync")]
@@ -1329,6 +1344,8 @@ pub fn apply_snapshot_page(db: &Persistence, page: &SnapshotPage) -> Result<(), 
             .map_err(|_| SyncError::DecodeFailed)?;
         db.kv_put_sync(&key, &val)?;
     }
+    // Increment the total number of state-sync applications
+    state_sync_total_inc();	
     // T32: record duration and increment page counter
     #[cfg(all(feature = "state-sync", feature = "eth-ssz"))]
     t32_page_apply_finish(_t32);
@@ -1571,11 +1588,12 @@ pub fn bootstrap(db: &Persistence, cfg: &BootstrapCfg) -> Result<(), SyncError> 
         cfg.base_url, cfg.page_limit, cfg.delta_span, cfg.max_retries, cfg.backoff_ms, cfg.backoff_cap_ms
     );
 
-    let anchor = retry_blocking(
+    // NOTE: arguments are ordered to match retry_with_backoff(base_ms, cap_ms, max_retries).
+    let anchor = retry_with_backoff(
         || fetch_anchor(cfg.base_url),
-        cfg.max_retries,
         cfg.backoff_ms,
         cfg.backoff_cap_ms,
+        cfg.max_retries as u32,
     )?;
 
     verify_anchor_basic(&anchor)?;
@@ -1648,11 +1666,11 @@ pub fn bootstrap(db: &Persistence, cfg: &BootstrapCfg) -> Result<(), SyncError> 
 
     let mut snapshot_pages = 0usize;
     loop {
-        let page = retry_blocking(
+        let page = retry_with_backoff(
             || fetch_snapshot_page(cfg.base_url, cursor.as_deref(), cfg.page_limit),
-            cfg.max_retries,
             cfg.backoff_ms,
             cfg.backoff_cap_ms,
+            cfg.max_retries as u32,
         )?;
         if page.items.is_empty() && page.cursor.is_none() {
             break;
@@ -1693,11 +1711,11 @@ pub fn bootstrap(db: &Persistence, cfg: &BootstrapCfg) -> Result<(), SyncError> 
     while from <= anchor.height {
         let to = (from.saturating_add(cfg.delta_span)).min(anchor.height);
         log::info!("bootstrap: fetching delta batch from={} to={}", from, to);
-        let batch = retry_blocking(
+        let batch = retry_with_backoff(
             || fetch_delta(cfg.base_url, from, to, cfg.page_limit),
-            cfg.max_retries,
             cfg.backoff_ms,
             cfg.backoff_cap_ms,
+            cfg.max_retries as u32,
         )?;
         log::info!(
             "bootstrap: applying delta batch with {} entries",
@@ -1753,10 +1771,14 @@ pub fn bootstrap(db: &Persistence, cfg: &BootstrapCfg) -> Result<(), SyncError> 
     }
     log::info!("bootstrap: clearing sync progress keys");
     clear_progress(db)?;
-    log::info!(
+        log::info!(
         "bootstrap: process finished successfully in {:?}",
         t0.elapsed()
     );
+
+    // Update monotonic state-sync height gauge to the final anchor height.
+    state_sync_latest_height_set(anchor.height);
+
     // T32: record total bootstrap seconds
     #[cfg(all(feature = "state-sync", feature = "eth-ssz"))]
     t32_bootstrap_finish(_t_boot);

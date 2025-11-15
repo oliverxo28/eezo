@@ -1,3 +1,4 @@
+#![cfg(feature = "state-sync")]
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::blocking::Client;
 use std::time::Duration;

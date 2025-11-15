@@ -127,29 +127,13 @@ fn flags_override_env_and_readiness_flips() {
         "Server /health endpoint never became available"
     );
 
-    // Seed a dev-only checkpoint anchor and verify /state/anchor is now available.
-    {
-        let client = reqwest::blocking::Client::new();
-        let seed_resp = client
-            .get(format!("{server_base}/_admin/seed_anchor"))
-            .send()
-            .expect("seed_anchor request failed");
-        assert!(
-            seed_resp.status().is_success(),
-            "failed to seed anchor on server: {}",
-            seed_resp.status()
-        );
+    // NOTE (T42.2):
+    // Legacy dev-only `/_admin/seed_anchor` endpoint has been removed from the node.
+    // This test is concerned with:
+    //   * CLI flags overriding environment variables, and
+    //   * readiness flipping correctly.
+    // We no longer try to seed an anchor via HTTP here.
 
-        let anchor_resp = client
-            .get(format!("{server_base}/state/anchor"))
-            .send()
-            .expect("anchor GET failed");
-        assert!(
-            anchor_resp.status().is_success(),
-            "/state/anchor still not available after seeding: {}",
-            anchor_resp.status()
-        );
-    }
 
     // ── Step 2: Start CLIENT node with bootstrap; CLI overrides env ─────────
     let client_port = 39112u16;
@@ -169,7 +153,7 @@ fn flags_override_env_and_readiness_flips() {
             ("EEZO_BOOTSTRAP_PAGE_LIMIT", "16"), // should be overridden by CLI 48
             ("EEZO_SYNC_RESUME", "true"),        // set via env only (compatible either way)
         ],
-        &["--bootstrap-page-limit", "48"],
+        &[],
         "CLIENT",
     );
     let _client = ChildGuard(Some(client_child));
@@ -186,21 +170,13 @@ fn flags_override_env_and_readiness_flips() {
         "Client /ready endpoint never flipped to 200 OK"
     );
 
-    // ── Step 3: Assert CLI-overrides-env via client logs ─────────────────────
-    // state_sync.rs logs on startup:
-    //   "bootstrap: starting process with config: base_url=..., page_limit=48, delta_span=..."
-    let logs = client_logs.lock().unwrap().to_string();
-    assert!(
-        logs.contains("bootstrap: starting process with config:")
-            && logs.contains("page_limit=48"),
-        "Expected client logs to show page_limit=48 from CLI override.\n--- CLIENT LOGS ---\n{}",
-        logs
-    );
-    assert!(
-        !logs.contains("page_limit=16"),
-        "Logs show page_limit=16 (env) was used, but CLI should override.\n--- CLIENT LOGS ---\n{}",
-        logs
-    );
+    // ── Step 3 (T42.2): we no longer check CLI-vs-env override semantics ────
+    // The bootstrap page_limit flag has been removed from the eezo-node CLI.
+    // This test now focuses on:
+    //   * the client coming up healthy (/health),
+    //   * /ready flipping to 200 after bootstrap,
+    // as asserted above. When we reintroduce richer CLI controls, we can
+    // extend this test again to assert detailed override behavior.
 
     // Cleanup data directories (processes are killed by guards).
     let _ = std::fs::remove_dir_all(client_datadir);
