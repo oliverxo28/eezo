@@ -32,7 +32,7 @@ impl MLDsaCorpus {
     }
 
     /// Convenience: load from a &str.
-    pub fn from_str(s: &str) -> serde_json::Result<Self> {
+    pub fn from_json_str(s: &str) -> serde_json::Result<Self> {
         serde_json::from_str(s)
     }
 }
@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn loads_sample_corpus() {
-        let c = MLDsaCorpus::from_str(SAMPLE).expect("parse ok");
+        let c = MLDsaCorpus::from_json_str(SAMPLE).expect("parse ok");
         assert_eq!(c.level, 44);
         assert_eq!(c.vectors.len(), 2);
         assert!(c.vectors.iter().any(|v| v.should_verify));

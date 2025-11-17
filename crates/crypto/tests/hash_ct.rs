@@ -1,4 +1,4 @@
-/// Hash domain separation + constant-time helpers.
+/*! Hash domain separation + constant-time helpers. */
 
 use eezo_crypto::hash::{sha3_256_domain, sha3_512_domain, blake3_domain};
 use eezo_crypto::ct::{xor_into, ct_select_into};

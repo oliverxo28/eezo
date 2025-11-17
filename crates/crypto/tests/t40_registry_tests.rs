@@ -87,6 +87,6 @@ fn t403_verify_rotating_no_rotation_active_only() {
     // with no rotation scheduled, only active algo id is ever considered
     let ok_active = verify_rotating(&st, 100, AlgoId::MlDsa44, &pk, &msg, &sig);
     let ok_next   = verify_rotating(&st, 100, AlgoId::SlhDsa128f, &pk, &msg, &sig);
-    assert_eq!(ok_active, false, "dummy bytes keep crypto false but path must compile");
-    assert_eq!(ok_next,   false, "next not scheduled → router rejects outright");
+    assert!(!ok_active, "dummy bytes keep crypto false but path must compile");
+    assert!(!ok_next, "next not scheduled → router rejects outright");
 }

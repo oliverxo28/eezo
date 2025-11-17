@@ -131,7 +131,7 @@ pub fn verify_single(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<()> {
             Ok(())
         } else {
             // avoid pulling in `bail!` so builds without the runtime feature don’t warn
-            return Err(anyhow::anyhow!("verify failed"));
+            Err(anyhow::anyhow!("verify failed"))
         }
     }
 
@@ -186,13 +186,13 @@ mod kats {
           ]
         }"#;
 
-        let corpus = MLDsaCorpus::from_str(json).expect("load");
+        let corpus = MLDsaCorpus::from_json_str(json).expect("load");
         for v in corpus.vectors {
             let pk = hex_to_bytes(&v.pk_hex).unwrap_or_default();
             let msg = hex_to_bytes(&v.msg_hex).unwrap_or_default();
             let sig = hex_to_bytes(&v.sig_hex).unwrap_or_default();
             let res = verify_single(&pk, &msg, &sig);
-            assert_eq!(res.is_ok(), v.should_verify, "{}", v.name);
+            assert_eq!(res.is_ok(), v.should_verify, "KAT failed: {}", v.name);
         }
     }
 }
