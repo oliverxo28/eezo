@@ -90,11 +90,20 @@ pub fn assert_compat_or_warn_soft(_expected_api: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn bridge_not_ahead_of_ledger() {
+
+    /// Helper to check version compatibility at test time.
+    /// This avoids a clippy lint about asserting on constants,
+    /// while still enforcing the check when tests are run.
+    fn check_versions(bridge: u8, ledger: u8) {
         assert!(
-            EEZO_ACTIVE_SSZ_VERSION <= LEDGER_SSZ_VERSION,
+            bridge <= ledger,
             "bridge claims newer SSZ than ledger; upgrade ledger or lower bridge version"
         );
+    }
+
+    #[test]
+    fn bridge_not_ahead_of_ledger() {
+        // Call the helper function to perform the check.
+        check_versions(EEZO_ACTIVE_SSZ_VERSION, LEDGER_SSZ_VERSION);
     }
 }
