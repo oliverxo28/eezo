@@ -140,7 +140,7 @@ fn stub_verifier_irrelevant_fields_and_heights() {
             tx_root_v2: [0u8; 32],
             fee_total: (h as u128) * 10u128,
             tx_count: h as u32,
-            timestamp_ms: 123456 + h as u64,
+            timestamp_ms: 123456 + h,
             #[cfg(feature = "checkpoints")]
             qc_hash: if h % 2 == 0 { [0u8; 32] } else { [1u8; 32] },
         };

@@ -63,7 +63,7 @@ proptest! {
         let sigs = sigs_from_bytes(&raw);
         let w = TxWitness { payload_hash: [0u8; 32], sigs };
 
-        let mut cache = NoopCache::default();
+        let mut cache = NoopCache;
         let res = validate_witness(&[0u8; 32], &w, &mut cache);
         prop_assert!(matches!(res, Err(MempoolError::WitnessTooLarge(_))));
     }

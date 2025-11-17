@@ -73,7 +73,7 @@ proptest! {
             n.mempool.enqueue_tx(tx);
         }
         let (blk, _sum) = n.run_one_slot(false).expect("slot runs");
-        let fees_committed: u128 = blk.txs.iter().map(|t| t.core.fee as u128).sum();
+        let fees_committed: u128 = blk.txs.iter().map(|t| t.core.fee).sum();
 
         // Assert: total supply unchanged by pure transfers; no fee leak
         let supply_after = supply_total(&n);

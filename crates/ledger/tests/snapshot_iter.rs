@@ -67,7 +67,7 @@ fn snapshot_iter_cursor_is_exclusive() {
     let db = Persistence::open_default(tmp.path()).expect("open");
     let pfx = b"k:";
     // keys: k:a, k:b, k:c, k:d
-    for &b in &[b'a', b'b', b'c', b'd'] {
+    for &b in b"abcd" {
         let mut k = pfx.to_vec();
         k.push(b);
         db.dev_put_raw(&k, &[b]).expect("put");
@@ -82,7 +82,7 @@ fn snapshot_iter_cursor_is_exclusive() {
     let page2 = db.snapshot_iter(pfx, Some(&c1), 10).expect("page2");
     let keys2: Vec<Vec<u8>> = page2.iter().map(|(k, _)| k.clone()).collect();
     assert!(
-        !keys2.iter().any(|k| *k == c1),
+        !keys2.contains(&c1),
         "cursor must be exclusive of last-seen key"
     );
     // total coverage: 4 keys

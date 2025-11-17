@@ -27,8 +27,8 @@ fn qc_soft_pass_ignores_threshold_and_chain() {
     assert!(verify_quorum_cert_with_env(&base_qc, [0x00; 20], 7u64).is_ok());
     assert!(verify_quorum_cert_with_env(&base_qc, [0xFF; 20], 7u64).is_ok());
     let mut chain = [0u8; 20];
-    for i in 0..20 {
-        chain[i] = i as u8;
+    for (i, item) in chain.iter_mut().enumerate() {
+        *item = i as u8;
     }
     assert!(verify_quorum_cert_with_env(&base_qc, chain, 7u64).is_ok());
 }

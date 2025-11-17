@@ -13,6 +13,6 @@ mod tmpdb {
         (p, dir)
     }
 }
-
+#[allow(unused_imports)] // This will silence the clippy warning
 #[cfg(feature = "persistence")]
 pub use tmpdb::temp_persistence;

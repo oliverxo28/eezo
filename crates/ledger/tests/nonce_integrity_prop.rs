@@ -64,7 +64,7 @@ proptest! {
         for i in 0..s {
             let m = spans[i];
             // generous bag length
-            let bag_len = (m + 0) + (m % 3 + 3); // in [m+3 .. m+5] mildly variable
+            let bag_len = m + (m % 3 + 3); // in [m+3 .. m+5] mildly variable
             // ensure pools big enough
             let need_pool = bag_len.max(1);
             amounts_pool[i].resize(need_pool, 1u128);

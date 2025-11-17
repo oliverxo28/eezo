@@ -19,7 +19,7 @@ impl ValidatedPk {
     pub fn from_pq(pk: &PublicKey) -> Self {
         // PublicKey is cheap to clone; keep the canonical type
         ValidatedPk {
-            pk: pk.clone(),
+            pk: *pk,
             valid_until: u64::MAX,
             revoked: false,
         }

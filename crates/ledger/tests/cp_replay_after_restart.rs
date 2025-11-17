@@ -17,7 +17,6 @@ fn cfg() -> SingleNodeCfg {
         header_cache_cap: 1024,
         #[cfg(feature = "checkpoints")]
         checkpoint_interval: eezo_ledger::consensus::DEFAULT_CHECKPOINT_INTERVAL,
-        ..Default::default()
     }
 }
 
@@ -34,7 +33,7 @@ fn replay_is_rejected_after_restart() {
     use pqcrypto_mldsa::mldsa44::keypair;
 
     let (pk, sk) = keypair();
-    let mut n = SingleNode::new(cfg(), sk.clone(), pk.clone());
+    let mut n = SingleNode::new(cfg(), sk, pk);
 
     let to = Address([0xAB; 20]);
 

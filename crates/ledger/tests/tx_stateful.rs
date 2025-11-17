@@ -30,7 +30,7 @@ fn apply_updates_balances_and_nonce_and_burns_fee() {
 #[test]
 fn rejects_insufficient_funds_and_keeps_state_unchanged() {
     let mut accts = Accounts::default();
-    let mut supply = Supply::default();
+    let _supply = Supply::default();
     let sender = Address::from_bytes([9u8; 20]);
     let to     = Address::from_bytes([8u8; 20]);
 

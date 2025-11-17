@@ -8,8 +8,10 @@ use tempfile::tempdir;
 #[test]
 fn tip_and_headers_survive_reopen_consistently() {
     let dir = tempdir().unwrap();
-    let mut cfg = PersistenceCfg::default();
-    cfg.db_path = dir.path().join("db");
+    let cfg = PersistenceCfg {
+        db_path: dir.path().join("db"),
+        ..Default::default()
+    };
 
     let db: Persistence = open_db(&cfg).expect("open");
     db.set_genesis(0).unwrap();

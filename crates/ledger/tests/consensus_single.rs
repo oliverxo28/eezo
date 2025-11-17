@@ -131,9 +131,9 @@ fn single_node_qc_emerges_and_stays_periodic() {
     for i in 0..MAX_SCAN {
         let (block, _) = node
             .propose_block()
-            .expect(&format!("propose h={}", i + 1));
+            .unwrap_or_else(|_| panic!("propose h={}", i + 1));
         node.validate_and_apply(&block)
-            .expect(&format!("apply h={}", i + 1));
+            .unwrap_or_else(|_| panic!("apply h={}", i + 1));
         headers.push(block.header);
     }
 
@@ -175,9 +175,9 @@ fn single_node_qc_first_height_is_respected() {
     for i in 0..MAX_SCAN {
         let (block, _) = node
             .propose_block()
-            .expect(&format!("propose h={}", i + 1));
+            .unwrap_or_else(|_| panic!("propose h={}", i + 1));
         node.validate_and_apply(&block)
-            .expect(&format!("apply h={}", i + 1));
+            .unwrap_or_else(|_| panic!("apply h={}", i + 1));
         headers.push(block.header);
     }
     let first_qc = headers

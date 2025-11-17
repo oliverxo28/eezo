@@ -14,10 +14,13 @@ fn fresh_node_with_budget(budget: usize) -> SingleNode {
     #[cfg(feature = "persistence")]
     let (_persistence, _tmp) = temp_persistence();
 
-    let mut cfg = SingleNodeCfg::default();
-    cfg.chain_id = [0xE0; 20];
-    cfg.block_byte_budget = budget;
-    cfg.header_cache_cap = 1024;
+    // PATCH 1: Use struct update syntax instead of field reassignment
+    let cfg = SingleNodeCfg {
+        chain_id: [0xE0; 20],
+        block_byte_budget: budget,
+        header_cache_cap: 1024,
+        ..Default::default()
+    };
 
     let (pk, sk) = keypair();
     SingleNode::new(cfg, sk, pk)

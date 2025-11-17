@@ -3,7 +3,6 @@
 use eezo_ledger::{SingleNode, SingleNodeCfg};
 use eezo_ledger::block::header_domain_bytes;
 use pqcrypto_mldsa::mldsa44::{keypair, detached_sign, verify_detached_signature, PublicKey, SecretKey};
-use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
 
 /// Build a node and also return its keypair for direct signature checks.
 fn node_with_keys() -> (SingleNode, SecretKey, PublicKey) {
@@ -14,7 +13,7 @@ fn node_with_keys() -> (SingleNode, SecretKey, PublicKey) {
         ..Default::default()
     };
     let (pk, sk) = keypair();
-    let node = SingleNode::new(cfg, sk.clone(), pk.clone());
+    let node = SingleNode::new(cfg, sk, pk);
     (node, sk, pk)
 }
 

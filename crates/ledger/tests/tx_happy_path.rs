@@ -46,7 +46,7 @@ fn single_transfer_happy_path() {
     // Block should include exactly one tx; header fields reflect it
     assert_eq!(blk.txs.len(), 1);
     assert_eq!(blk.header.tx_count, 1);
-    assert_eq!(blk.header.fee_total as u128, fee);
+    assert_eq!(blk.header.fee_total, fee);
 
     // Account state updated: sender nonce advanced; balances moved
     let s_acct = n.accounts.get(&sender);

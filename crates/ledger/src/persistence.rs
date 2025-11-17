@@ -715,7 +715,7 @@ pub fn load_state_snapshot(&self, height: u64) -> Result<Option<StateSnapshot>> 
         None => return Ok(None), // align with Option return
     };
     let key = height.to_be_bytes();
-    match self.db.get_cf(cf_handle, &key) {
+    match self.db.get_cf(cf_handle, key) {
         Ok(Some(bytes)) => {
             let snap: StateSnapshot = bincode::deserialize(&bytes)?;
             Ok(Some(snap))
@@ -793,19 +793,19 @@ pub fn load_state_snapshot(&self, height: u64) -> Result<Option<StateSnapshot>> 
         let cf_headers = self
             .db
             .cf_handle(CF_HEADERS)
-            .ok_or_else(|| PersistError::NotFound)?;
+            .ok_or(PersistError::NotFound)?;
         let cf_blocks = self
             .db
             .cf_handle(CF_BLOCKS)
-            .ok_or_else(|| PersistError::NotFound)?;
+            .ok_or(PersistError::NotFound)?;
         let cf_tx_index = self
             .db
             .cf_handle(CF_TX_INDEX)
-            .ok_or_else(|| PersistError::NotFound)?;
+            .ok_or(PersistError::NotFound)?;
         // Atomic batch for header + block (+ tx index entries + continuity meta)
         let mut batch = rocksdb::WriteBatch::default();
-        batch.put_cf(cf_headers, &key, &hdr_bytes);
-        batch.put_cf(cf_blocks, &key, &blk_bytes);
+        batch.put_cf(cf_headers, key, &hdr_bytes);
+        batch.put_cf(cf_blocks, key, &blk_bytes);
 
         // Build/refresh the tx index for this block (hash = sha3-256(bincode(tx)))
         let mut hasher = sha3::Sha3_256::new();
@@ -813,15 +813,15 @@ pub fn load_state_snapshot(&self, height: u64) -> Result<Option<StateSnapshot>> 
             let tx_bytes = bincode::serialize(tx)?;
             hasher.update(&tx_bytes);
             let tx_hash: [u8; 32] = hasher.finalize_reset().into();
-            batch.put_cf(cf_tx_index, &tx_hash, &key);
+            batch.put_cf(cf_tx_index, tx_hash, key);
         }
 
         // T32.1: also stamp continuity "last header" (CF_METADATA) in the same batch
         let cf_meta = self
             .db
             .cf_handle(CF_METADATA)
-            .ok_or_else(|| PersistError::NotFound)?;
-        batch.put_cf(cf_meta, META_LAST_HEADER, &key);
+            .ok_or(PersistError::NotFound)?;
+        batch.put_cf(cf_meta, META_LAST_HEADER, key);
 
         // Commit
         self.db.write(batch)?;
@@ -1280,7 +1280,7 @@ pub mod export_api {
             return Err(ExportPersistError::NotFound);
         };
         let key = height.to_be_bytes();
-        match db.db.get_cf(cf_handle, &key) {
+        match db.db.get_cf(cf_handle, key) {
             Ok(Some(bytes)) => Ok(bytes),
             Ok(None) => Err(ExportPersistError::NotFound),
             Err(e) => Err(ExportPersistError::Internal(e.to_string())),
@@ -1568,7 +1568,7 @@ pub use export_api::prewrite_snapshot_ssz_blob_v2;
 mod tests {
     use super::*;
     use crate::checkpoints::{AnchorSig, CheckpointAnchor};
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use base64::{engine::general_purpose::STANDARD as B64};
     // helpers to build deterministic anchors
     fn dummy_anchor(height: u64) -> CheckpointAnchor {
         let mut block_id = [0u8; 32];

@@ -26,9 +26,13 @@ impl CertLookupT4 for DummyCerts {
     }
 }
 
+// PATCH 1: Add type alias for the complex tuple
+type RawTx = ([u8; 20], [u8; 20], u128, u128, u64, Vec<u8>);
+
 // --- helper to build a mempool and a randomized tx vector in arrival order ---
 fn make_tx_batch(
-    raw: Vec<([u8; 20], [u8; 20], u128, u128, u64, Vec<u8>)>,
+    // PATCH 1: Use the type alias
+    raw: Vec<RawTx>,
 ) -> (Mempool, Vec<SignedTx>) {
     let txs: Vec<SignedTx> = raw
         .into_iter()
@@ -76,7 +80,8 @@ proptest! {
         let (mut mp, txs) = make_tx_batch(raw);
 
         // Budget fits all
-        let budget: usize = HEADER_BUDGET_BYTES + txs.iter().map(|t| tx_size_bytes(t)).sum::<usize>();
+        // PATCH 2: Remove redundant closure
+        let budget: usize = HEADER_BUDGET_BYTES + txs.iter().map(tx_size_bytes).sum::<usize>();
 
         let drained = mp.drain_for_block(budget);
 
@@ -89,8 +94,10 @@ proptest! {
         });
 
         // Byte budget respected
-        let used: usize = HEADER_BUDGET_BYTES + drained.iter().map(|t| tx_size_bytes(t)).sum::<usize>();
-        let sum_sizes: usize = drained.iter().map(|t| tx_size_bytes(t)).sum();
+        // PATCH 3: Remove redundant closure
+        let used: usize = HEADER_BUDGET_BYTES + drained.iter().map(tx_size_bytes).sum::<usize>();
+        // PATCH 4: Remove redundant closure
+        let sum_sizes: usize = drained.iter().map(tx_size_bytes).sum();
 		prop_assert_eq!(used, HEADER_BUDGET_BYTES + sum_sizes);
 
         // All drained and order matches
@@ -125,7 +132,8 @@ proptest! {
         });
 
         // Pre-compute sizes and prefix sums (without header).
-        let sizes: Vec<usize> = sorted.iter().map(|t| tx_size_bytes(t)).collect();
+        // PATCH 5: Remove redundant closure
+        let sizes: Vec<usize> = sorted.iter().map(tx_size_bytes).collect();
         let mut prefix_sum = Vec::with_capacity(sizes.len());
         let mut acc = 0usize;
         for s in &sizes {
@@ -145,8 +153,10 @@ proptest! {
         let expected_prefix = &sorted[..k];
 
         // 1) Byte budget respected
-        let used: usize = HEADER_BUDGET_BYTES + drained.iter().map(|t| tx_size_bytes(t)).sum::<usize>();
-        let sum_sizes: usize = drained.iter().map(|t| tx_size_bytes(t)).sum();
+        // PATCH 6: Remove redundant closure
+        let used: usize = HEADER_BUDGET_BYTES + drained.iter().map(tx_size_bytes).sum::<usize>();
+        // PATCH 7: Remove redundant closure
+        let sum_sizes: usize = drained.iter().map(tx_size_bytes).sum();
 		prop_assert_eq!(used, HEADER_BUDGET_BYTES + sum_sizes);
 
         // 2) The next transaction would overflow the budget

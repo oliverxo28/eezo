@@ -9,28 +9,34 @@ use eezo_ledger::eth_ssz::txs_root_v2;
 use pqcrypto_mldsa::mldsa44::{detached_sign, keypair};
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
 
-fn mk_header(
+// PATCH 1: Define the args struct for mk_header
+struct MkHeaderArgs {
     height: u64,
     prev_hash: [u8; 32],
     tx_root: [u8; 32],
-    #[cfg(feature = "eth-ssz")] tx_root_v2: [u8; 32],
+    #[cfg(feature = "eth-ssz")]
+    tx_root_v2: [u8; 32],
     fee_total: u128,
     tx_count: u32,
     timestamp_ms: u64,
-    #[cfg(feature = "checkpoints")] qc_hash: [u8; 32],
-) -> eezo_ledger::BlockHeader {
+    #[cfg(feature = "checkpoints")]
+    qc_hash: [u8; 32],
+}
+
+// PATCH 1: Update function signature and body
+fn mk_header(args: MkHeaderArgs) -> eezo_ledger::BlockHeader {
     eezo_ledger::BlockHeader {
-        height,
-        prev_hash,
-        tx_root,
+        height: args.height,
+        prev_hash: args.prev_hash,
+        tx_root: args.tx_root,
         // fill v2 root when eth-ssz is enabled
         #[cfg(feature = "eth-ssz")]
-        tx_root_v2,
-        fee_total,
-        tx_count,
-        timestamp_ms,
+        tx_root_v2: args.tx_root_v2,
+        fee_total: args.fee_total,
+        tx_count: args.tx_count,
+        timestamp_ms: args.timestamp_ms,
         #[cfg(feature = "checkpoints")]
-        qc_hash,
+        qc_hash: args.qc_hash,
     }
 }
 
@@ -91,18 +97,19 @@ fn block_validate_and_apply_happy_path() {
     let tx_count = txs.len() as u32;
     let tx_root = eezo_ledger::block::txs_root(&txs);
 
-    let header = mk_header(
-        1,
-        [0u8; 32],
+    // PATCH 1: Update mk_header call site
+    let header = mk_header(MkHeaderArgs {
+        height: 1,
+        prev_hash: [0u8; 32],
         tx_root,
         #[cfg(feature = "eth-ssz")]
-        txs_root_v2(&txs),
+        tx_root_v2: txs_root_v2(&txs),
         fee_total,
         tx_count,
-        12345,
+        timestamp_ms: 12345,
         #[cfg(feature = "checkpoints")]
-        [0u8; 32],
-    );
+        qc_hash: [0u8; 32],
+    });
     let blk = Block { header, txs };
 
     // The call to apply_block will validate the block internally.
@@ -147,18 +154,19 @@ fn block_rejects_bad_sig() {
     tx.sig[0] ^= 0xFF;
 
     let txs = vec![tx];
-    let header = mk_header(
-        1,
-        [0u8; 32],
-        eezo_ledger::block::txs_root(&txs),
+    // PATCH 1: Update mk_header call site
+    let header = mk_header(MkHeaderArgs {
+        height: 1,
+        prev_hash: [0u8; 32],
+        tx_root: eezo_ledger::block::txs_root(&txs),
         #[cfg(feature = "eth-ssz")]
-        txs_root_v2(&txs),
-        3,
-        1,
-        1,
+        tx_root_v2: txs_root_v2(&txs),
+        fee_total: 3,
+        tx_count: 1,
+        timestamp_ms: 1,
         #[cfg(feature = "checkpoints")]
-        [0u8; 32],
-    );
+        qc_hash: [0u8; 32],
+    });
     let blk = Block { header, txs };
 
     let err = validate_block(&accounts, &Supply::default(), chain_id, &blk).unwrap_err();
@@ -172,18 +180,19 @@ fn block_validate_accepts_empty_block() {
     let supply = Supply::default();
 
     let blk = Block {
-        header: mk_header(
-            1,
-            [0u8; 32],
-            [0u8; 32],
+        // PATCH 1: Update mk_header call site
+        header: mk_header(MkHeaderArgs {
+            height: 1,
+            prev_hash: [0u8; 32],
+            tx_root: [0u8; 32],
             #[cfg(feature = "eth-ssz")]
-            txs_root_v2(&[]),
-            0,
-            0,
-            0,
+            tx_root_v2: txs_root_v2(&[]),
+            fee_total: 0,
+            tx_count: 0,
+            timestamp_ms: 0,
             #[cfg(feature = "checkpoints")]
-            [0u8; 32],
-        ),
+            qc_hash: [0u8; 32],
+        }),
         txs: vec![],
     };
 
@@ -197,18 +206,19 @@ fn block_validate_rejects_tx_root_mismatch() {
     let supply = Supply::default();
 
     let mut blk = Block {
-        header: mk_header(
-            1,
-            [0u8; 32],
-            [1u8; 32], // deliberately wrong
+        // PATCH 1: Update mk_header call site
+        header: mk_header(MkHeaderArgs {
+            height: 1,
+            prev_hash: [0u8; 32],
+            tx_root: [1u8; 32], // deliberately wrong
             #[cfg(feature = "eth-ssz")]
-            txs_root_v2(&[]),
-            0,
-            0,
-            0,
+            tx_root_v2: txs_root_v2(&[]),
+            fee_total: 0,
+            tx_count: 0,
+            timestamp_ms: 0,
             #[cfg(feature = "checkpoints")]
-            [0u8; 32],
-        ),
+            qc_hash: [0u8; 32],
+        }),
         txs: vec![],
     };
 
@@ -234,18 +244,21 @@ fn block_validate_rejects_fee_total_mismatch() {
     accounts.put(sender, Account { balance: 100, nonce: 0 });
 
     let blk = Block {
-        header: mk_header(
-            1,
-            [0u8; 32],
-            eezo_ledger::block::txs_root(&[tx.clone()]),
+        // PATCH 1: Update mk_header call site
+        header: mk_header(MkHeaderArgs {
+            height: 1,
+            prev_hash: [0u8; 32],
+            // PATCH 2: Use std::slice::from_ref
+            tx_root: eezo_ledger::block::txs_root(std::slice::from_ref(&tx)),
             #[cfg(feature = "eth-ssz")]
-            txs_root_v2(&[tx.clone()]),
-            99, // deliberately wrong
-            1,
-            0,
+            // PATCH 3: Use std::slice::from_ref
+            tx_root_v2: txs_root_v2(std::slice::from_ref(&tx)),
+            fee_total: 99, // deliberately wrong
+            tx_count: 1,
+            timestamp_ms: 0,
             #[cfg(feature = "checkpoints")]
-            [0u8; 32],
-        ),
+            qc_hash: [0u8; 32],
+        }),
         txs: vec![tx],
     };
 
@@ -263,18 +276,19 @@ fn block_validate_rejects_tx_count_mismatch() {
     let supply = Supply::default();
 
     let blk = Block {
-        header: mk_header(
-            1,
-            [0u8; 32],
-            [0u8; 32],
+        // PATCH 1: Update mk_header call site
+        header: mk_header(MkHeaderArgs {
+            height: 1,
+            prev_hash: [0u8; 32],
+            tx_root: [0u8; 32],
             #[cfg(feature = "eth-ssz")]
-            txs_root_v2(&[]),
-            0,
-            1, // mismatch: no txs in vec
-            0,
+            tx_root_v2: txs_root_v2(&[]),
+            fee_total: 0,
+            tx_count: 1, // mismatch: no txs in vec
+            timestamp_ms: 0,
             #[cfg(feature = "checkpoints")]
-            [0u8; 32],
-        ),
+            qc_hash: [0u8; 32],
+        }),
         txs: vec![],
     };
 
@@ -298,18 +312,21 @@ fn block_apply_rejects_replay_nonce() {
     accounts.put(sender, Account { balance: 50, nonce: 0 });
 
     let blk1 = Block {
-        header: mk_header(
-            1,
-            [0u8; 32],
-            eezo_ledger::block::txs_root(&[tx.clone()]),
+        // PATCH 1: Update mk_header call site
+        header: mk_header(MkHeaderArgs {
+            height: 1,
+            prev_hash: [0u8; 32],
+            // PATCH 4: Use std::slice::from_ref
+            tx_root: eezo_ledger::block::txs_root(std::slice::from_ref(&tx)),
             #[cfg(feature = "eth-ssz")]
-            txs_root_v2(&[tx.clone()]),
-            0,
-            1,
-            0,
+            // PATCH 5: Use std::slice::from_ref
+            tx_root_v2: txs_root_v2(std::slice::from_ref(&tx)),
+            fee_total: 0,
+            tx_count: 1,
+            timestamp_ms: 0,
             #[cfg(feature = "checkpoints")]
-            [0u8; 32],
-        ),
+            qc_hash: [0u8; 32],
+        }),
         txs: vec![tx.clone()],
     };
 

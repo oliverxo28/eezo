@@ -63,12 +63,12 @@ fn genesis_build_and_persist() {
         .config
         .initial_accounts
         .iter()
-        .map(|(_, bal)| *bal as u128)
+        .map(|(_, bal)| *bal)
         .sum::<u128>()
         + g.config
             .initial_validators
             .iter()
-            .map(|v| v.stake as u128)
+            .map(|v| v.stake)
             .sum::<u128>();
 
     // Genesis supply should at least cover initial accounts + validator stakes

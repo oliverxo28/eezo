@@ -8,6 +8,11 @@ use sha3::{Digest, Sha3_256};
 /// Hard upper bound on branch depth (covers up to 2^64 leaves; far above any realistic block).
 const MAX_BRANCH_DEPTH: usize = 64;
 
+// PATCH: Define the MerkleProof type alias based on the function's return value.
+/// A Merkle proof consists of the leaf, the branch, and the root.
+/// (leaf_bytes, branch_siblings, root_hash)
+type MerkleProof = (Vec<u8>, Vec<[u8; 32]>, [u8; 32]);
+
 /// Hash two 32-byte nodes (left||right) -> 32-byte node.
 #[inline(always)]
 fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
@@ -61,7 +66,7 @@ fn build_branch(leaves: &[[u8; 32]], index: usize) -> (Vec<[u8; 32]>, [u8; 32]) 
         let sib = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
         branch.push(level[sib]);
         // compress level to parents
-        let mut next = Vec::with_capacity((w + 1) / 2);
+        let mut next = Vec::with_capacity(w.div_ceil(2));
         for i in (0..w).step_by(2) {
             next.push(hash_pair(&level[i], &level[i + 1]));
         }
@@ -83,7 +88,8 @@ fn build_branch(leaves: &[[u8; 32]], index: usize) -> (Vec<[u8; 32]>, [u8; 32]) 
 pub fn tx_inclusion_proof(
     block_txs: &[SignedTx],
     tx_index: usize,
-) -> Option<(Vec<u8>, Vec<[u8; 32]>, [u8; 32])> {
+// PATCH: Removed duplicated line: pub fn tx_inclusion_proof(
+) -> Option<MerkleProof> {
     if block_txs.is_empty() || tx_index >= block_txs.len() {
         return None;
     }
@@ -114,7 +120,7 @@ pub fn mint_inclusion_proof(
     mints: &[BridgeMintVoucher],
     mint_index: usize,
     chain_id: [u8; 20],
-) -> Option<(Vec<u8>, Vec<[u8; 32]>, [u8; 32])> {
+) -> Option<MerkleProof> {
     if mints.is_empty() || mint_index >= mints.len() {
         return None;
     }

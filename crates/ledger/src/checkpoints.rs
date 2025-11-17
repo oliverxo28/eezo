@@ -705,6 +705,20 @@ pub fn write_checkpoint_json_default(hdr: &BridgeHeader) -> std::io::Result<Path
 }
 
 // ------------------ T36.5: emission helper (rotation-aware, default dir) ------------------
+
+// PATCH 1: Define the argument struct here, before it's first used.
+/// Arguments for creating checkpoint headers.
+#[derive(Clone, Copy, Debug)]
+pub struct CheckpointArgs<'a> {
+    policy: &'a RotationPolicy,
+    height: u64,
+    header_hash: [u8; 32],
+    state_root_v2: [u8; 32],
+    tx_root_v2: [u8; 32],
+    timestamp: u64,
+    finality_depth: u64,
+}
+
 /// Emit one or two rotation-aware `BridgeHeader` JSON files for `height` into the default
 /// `proof/checkpoints/` directory. Callers pass the already-known values (typically fetched
 /// from persistence in the runner), so this helper stays free of DB assumptions and is
@@ -712,42 +726,28 @@ pub fn write_checkpoint_json_default(hdr: &BridgeHeader) -> std::io::Result<Path
 ///
 /// Returns the list of file paths written (one or two), matching `write_rotation_headers`.
 #[inline]
+// PATCH 1: Update function signature for emit_bridge_checkpoint_default
 pub fn emit_bridge_checkpoint_default(
-    policy: &RotationPolicy,
-    height: u64,
-    header_hash: [u8; 32],
-    state_root_v2: [u8; 32],
-    tx_root_v2: [u8; 32],
-    timestamp: u64,
-    finality_depth: u64,
+    args: &CheckpointArgs,
 ) -> std::io::Result<Vec<PathBuf>> {
+    // PATCH 1: Update call to write_rotation_headers to pass the struct
     write_rotation_headers(
-        Path::new(CHECKPOINTS_DIR), policy, height, header_hash, state_root_v2, tx_root_v2, timestamp, finality_depth,
+        Path::new(CHECKPOINTS_DIR), args,
     )
 }
 
 /// Emit one or two rotation-aware `BridgeHeader` JSON files into the provided `dir`.
 /// Path-aware variant used by the node so checkpoints land under the configured datadir.
 #[inline]
+// PATCH 1: Update function signature for emit_bridge_checkpoint_with_path
 pub fn emit_bridge_checkpoint_with_path(
     base_dir: &std::path::Path,
-    policy: &RotationPolicy,
-    height: u64,
-    header_hash: [u8; 32],
-    state_root_v2: [u8; 32],
-    tx_root_v2: [u8; 32],
-    timestamp: u64,
-    finality_depth: u64,
+    args: &CheckpointArgs,
 ) -> std::io::Result<Vec<PathBuf>> {
+    // PATCH 1: Update call to write_rotation_headers to pass the struct
     write_rotation_headers(
         base_dir,
-        policy,
-        height,
-        header_hash,
-        state_root_v2,
-        tx_root_v2,
-        timestamp,
-        finality_depth,
+        args,
     )
 }
 
@@ -822,24 +822,20 @@ pub fn build_rotation_headers(
 
 /// Convenience that both **builds and writes** rotation-aware headers into `dir/`.
 /// Returns the list of file paths written (one or two).
+// PATCH 2: Update function signature for write_rotation_headers
 pub fn write_rotation_headers(
     dir: &Path,
-    policy: &RotationPolicy,
-    height: u64,
-    header_hash: [u8; 32],
-    state_root_v2: [u8; 32],
-    tx_root_v2: [u8; 32],
-    timestamp: u64,
-    finality_depth: u64,
+    args: &CheckpointArgs,
 ) -> std::io::Result<Vec<PathBuf>> {
+    // PATCH 2: Update call to build_rotation_headers to use args fields
     let headers = build_rotation_headers(
-        policy,
-        height,
-        header_hash,
-        state_root_v2,
-        tx_root_v2,
-        timestamp,
-        finality_depth,
+        args.policy,
+        args.height,
+        args.header_hash,
+        args.state_root_v2,
+        args.tx_root_v2,
+        args.timestamp,
+        args.finality_depth,
     );
     // ── T41.5: runtime+feature enforcement before writing (active/next)
     // This path enforces even when the compile-time feature is off.
@@ -850,7 +846,8 @@ pub fn write_rotation_headers(
         .unwrap_or(false);
     let enforce = cfg!(feature = "qc-sidecar-v2-enforce") || enforce_runtime;
     let force = sidecar_force_from_env();
-    if enforce && (force || should_emit_qc_sidecar_v2(height, policy)) {
+    // PATCH 2: Update if-condition to use args fields
+    if enforce && (force || should_emit_qc_sidecar_v2(args.height, args.policy)) {
         // validate presence + basic shape for each header we’re about to write
         // --- PATCH 3 START ---
         let check_one = |tag: &str, h: &BridgeHeader| -> std::io::Result<()> {

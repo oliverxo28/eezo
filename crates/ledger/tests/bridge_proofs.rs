@@ -39,7 +39,7 @@ fn bridge_mint_leaf_and_inclusion_proof_roundtrip() {
     };
 
     // Leaf must be sha3_256(canonical_mint_msg(...))
-    let msg_v2 = canonical_mint_msg(chain_id, &v2);
+    let _msg_v2 = canonical_mint_msg(chain_id, &v2);
     let leaf_v2 = mint_leaf(chain_id, &v2);
     // Redundant call ensures stability: leaf == sha3(msg)
     let again_leaf_v2 = mint_leaf(chain_id, &v2);

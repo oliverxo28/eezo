@@ -145,8 +145,10 @@ pub fn verify_block_and_tx(
 ///   - codec_version == 2
 ///   - snapshot.height == manifest.height
 ///   - snapshot.state_root_v2 == manifest.state_root_v2
-/// Once full ETH-SSZ snapshot encoding lands, also recompute the root from
-/// (accounts, supply) and compare.
+// PATCH 1: Indent doc comment
+///     Once full ETH-SSZ snapshot encoding lands, also recompute the root from
+// PATCH 2: Indent doc comment
+///     (accounts, supply) and compare.
 pub fn verify_snapshot_and_apply(
     manifest: &SnapshotManifestV2,
     snapshot_bytes: &[u8],
@@ -181,7 +183,8 @@ pub fn verify_snapshot_and_apply(
 pub fn t32_page_apply_start() -> Option<Instant> {
     #[cfg(feature = "metrics")]
     {
-        return Some(Instant::now());
+        // PATCH 3: Remove unneeded return
+        Some(Instant::now())
     }
     #[cfg(not(feature = "metrics"))]
     {
@@ -204,7 +207,8 @@ pub fn t32_page_apply_finish(t0: Option<Instant>) {
 pub fn t32_bootstrap_start() -> Option<Instant> {
     #[cfg(feature = "metrics")]
     {
-        return Some(Instant::now());
+        // PATCH 4: Remove unneeded return
+        Some(Instant::now())
     }
     #[cfg(not(feature = "metrics"))]
     {

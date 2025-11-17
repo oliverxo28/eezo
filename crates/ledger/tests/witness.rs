@@ -53,7 +53,7 @@ fn validate_witness_happy_path_with_cache() {
     let sig = SigBytes([1u8; SIG_LEN]);
     let w = TxWitness { payload_hash, sigs: vec![sig] };
 
-    let mut cache = NoopCache::default();
+    let mut cache = NoopCache;
     let res = validate_witness(&payload_hash, &w, &mut cache);
     assert!(res.is_ok(), "expected witness to validate");
 }
@@ -77,7 +77,7 @@ fn oversized_witness_is_rejected() {
             true
         }
     }
-    let mut cache = NoopCache::default();
+    let mut cache = NoopCache;
 
     let res = validate_witness(&[0u8; 32], &w, &mut cache);
     assert!(matches!(res, Err(MempoolError::WitnessTooLarge(_))));

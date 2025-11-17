@@ -2,7 +2,6 @@
 
 use eezo_ledger::persistence::StateSnapshot;
 use eezo_ledger::{Accounts, Supply};
-use serde_json;
 
 // We added codec_version to StateSnapshot (not a separate manifest type).
 // This smoke test simply roundtrips a snapshot; with eth-ssz the field exists,

@@ -20,14 +20,13 @@ fn cfg() -> SingleNodeCfg {
         header_cache_cap: 1024,
         #[cfg(feature = "checkpoints")]
         checkpoint_interval: eezo_ledger::consensus::DEFAULT_CHECKPOINT_INTERVAL,
-        ..Default::default()
     }
 }
 
 #[test]
 fn fee_grouping_and_nonce_ordering_are_respected() {
     let (pk, sk) = keypair();
-    let node = SingleNode::new(cfg(), sk.clone(), pk.clone());
+    let node = SingleNode::new(cfg(), sk, pk);
 
     // Same recipient, single sender; fees vary, nonces must be contiguous
     let to = Address([0x33; 20]);

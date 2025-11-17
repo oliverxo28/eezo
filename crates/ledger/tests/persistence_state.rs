@@ -11,8 +11,10 @@ use tempfile::tempdir;
 fn snapshot_and_recover_roundtrip() {
     // temp RocksDB path
     let dir = tempdir().unwrap();
-    let mut cfg = PersistenceCfg::default();
-    cfg.db_path = dir.path().join("db");
+    let cfg = PersistenceCfg {
+        db_path: dir.path().join("db"),
+        ..Default::default()
+    };
 
     // open store
     let store: Persistence = open_db(&cfg).expect("open");

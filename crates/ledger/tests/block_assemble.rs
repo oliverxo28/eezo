@@ -186,7 +186,7 @@ fn block_respects_byte_budget() {
     // Budget accounting is: header_base_bytes() + N * tx_budget_bytes(sample_tx)
     let hdr_bytes = eezo_ledger::block::header_base_bytes() as usize;
     // Use any tx from the picked set (they all have the same budget shape in this test)
-    let sample = blk.txs.get(0).expect("at least one tx picked");
+    let sample = blk.txs.first().expect("at least one tx picked");
     let per_tx = eezo_ledger::block::tx_budget_bytes(sample) as usize;
     // max_bytes is whatever this test configured earlier; if it's a local var, substitute that.
     let allowed = (max_bytes - hdr_bytes) / per_tx;

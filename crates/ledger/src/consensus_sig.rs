@@ -250,7 +250,7 @@ pub fn sign_core(
 
     let pk_bytes_vec = pk.as_bytes();
     let mut pkb = PkBytes([0u8; crate::consensus::PK_LEN]);
-    pkb.0.copy_from_slice(&pk_bytes_vec);
+    pkb.0.copy_from_slice(pk_bytes_vec);
 
     let signer_id = signer_id_from_pk(&pkb);
     (pkb, sig, signer_id)

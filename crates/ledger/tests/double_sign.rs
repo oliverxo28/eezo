@@ -28,7 +28,7 @@ fn make_signed_msg(
         proposer: signer_id,
         justify: None,
     };
-    let msg = hs_msg::ConsensusMsg::Proposal(proposal);
+    let msg = hs_msg::ConsensusMsg::Proposal(Box::new(proposal));
     // Fake signature: just serialize the msg
     let bytes = bincode::serialize(&msg).unwrap();
     let sig = bytes.clone(); // placeholder sig = msg bytes

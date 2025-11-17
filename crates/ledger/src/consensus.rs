@@ -144,8 +144,9 @@ impl<'de> Deserialize<'de> for PkBytes {
             }
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
                 let mut a = [0u8; PK_LEN];
-                for i in 0..PK_LEN {
-                    a[i] = seq
+                // PATCH 1: Use iter_mut().enumerate() instead of range loop
+                for (i, item) in a.iter_mut().enumerate() {
+                    *item = seq
                         .next_element()?
                         .ok_or_else(|| de::Error::invalid_length(i, &self))?;
                 }
@@ -180,8 +181,9 @@ impl<'de> Deserialize<'de> for SigBytes {
             }
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
                 let mut a = [0u8; SIG_LEN];
-                for i in 0..SIG_LEN {
-                    a[i] = seq
+                // PATCH 2: Use iter_mut().enumerate() instead of range loop
+                for (i, item) in a.iter_mut().enumerate() {
+                    *item = seq
                         .next_element()?
                         .ok_or_else(|| de::Error::invalid_length(i, &self))?;
                 }
@@ -218,7 +220,8 @@ pub fn height_round_of(core: &ConsensusMsgCore) -> (u64, u32) {
 
 /// signer_id = first 20 bytes of SHA3-256(pk)
 pub fn signer_id_from_pk(pk: &PkBytes) -> SignerId {
-    let h = Sha3_256::digest(&pk.0);
+    // PATCH 3: Remove needless borrow
+    let h = Sha3_256::digest(pk.0);
     let mut id = [0u8; 20];
     id.copy_from_slice(&h[..20]);
     id
@@ -338,21 +341,20 @@ pub fn validate_consensus_batch(
 
     let verify_flags: BitVec = if to_verify_msgs.is_empty() {
         BitVec::new()
+    // PATCH 4: Collapse else-if
+    } else if cfg.parallel {
+        consensus_sig::verify_many(&to_verify_msgs[..], chain_id, certs)
     } else {
-        if cfg.parallel {
-            consensus_sig::verify_many(&to_verify_msgs[..], chain_id, certs)
-        } else {
-            BitVec::from_iter(
-                to_verify_msgs
-                    .iter()
-                    .map(|m| consensus_sig::verify_core(m, &chain_id, certs).is_ok()),
-            )
-        }
+        BitVec::from_iter(
+            to_verify_msgs
+                .iter()
+                .map(|m| consensus_sig::verify_core(m, &chain_id, certs).is_ok()),
+        )
     };
 
     if !to_verify_idx.is_empty() {
-        let mut j = 0usize;
-        for &i in &to_verify_idx {
+        // PATCH 5: Use .enumerate() and remove manual counter `j`
+        for (j, &i) in to_verify_idx.iter().enumerate() {
             let ok = verify_flags[j];
             flags.set(i, ok);
 
@@ -364,7 +366,6 @@ pub fn validate_consensus_batch(
                 let key = cache_key_sha3(&msg_bytes, pk_bytes, sig_bytes);
                 vc.put(key.to_vec(), ok);
             }
-            j += 1;
         }
     }
 
@@ -922,11 +923,16 @@ pub trait ConsensusNetwork: Send + Sync + 'static {
     }
 }
 
+// PATCH 6: Add type aliases for complex HashMap types
+type BucketKey = (hs_msg::Phase, hs_msg::View, BlockId);
+type BucketValue = (BitVec, Vec<Vec<u8>>);
+
 /// Tracks votes per (phase, view, block_id) and emits a QC when the threshold is hit.
 #[derive(Default)]
 struct VoteBook {
     // key: (phase, view, block_id)
-    buckets: HashMap<(hs_msg::Phase, hs_msg::View, BlockId), (BitVec, Vec<Vec<u8>>)>,
+    // PATCH 6: Use type aliases
+    buckets: HashMap<BucketKey, BucketValue>,
 }
 
 impl VoteBook {
@@ -1016,7 +1022,7 @@ impl<C: CertLookupT4, N: ConsensusNetwork> HotStuff<C, N> {
             proposer,
             justify,
         };
-        let msg = hs_msg::ConsensusMsg::Proposal(proposal);
+        let msg = hs_msg::ConsensusMsg::Proposal(Box::new(proposal));
         let signed = self.sign_local(msg, proposer);
         #[cfg(feature = "metrics")]
         crate::metrics::CONSENSUS_PROPOSALS_TOTAL.inc();

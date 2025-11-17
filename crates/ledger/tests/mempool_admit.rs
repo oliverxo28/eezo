@@ -53,7 +53,7 @@ pub fn admit_signed_tx(
     Ok(AdmissionOk {
         sender,
         core: stx.core.clone(),
-        tx_hash: txs_root(&[stx.clone()]),
+        tx_hash: txs_root(std::slice::from_ref(stx)),
         size_bytes: tx_size_bytes(stx),
     })
 }

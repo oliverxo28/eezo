@@ -68,7 +68,7 @@ pub struct Vote {
 /// Logical (unsigned) messages
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ConsensusMsg {
-    Proposal(Proposal),
+    Proposal(Box<Proposal>),
     Vote(Vote),
 }
 

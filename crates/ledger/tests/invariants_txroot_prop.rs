@@ -133,9 +133,9 @@ proptest! {
         prop_assert_eq!(&blk_a.txs, &blk_b.txs);
 
         // Budget sanity (header counted once in this check only)
-        let used_a = HEADER_BUDGET_BYTES as u64 + blk_a.txs.iter().map(|t| tx_budget_bytes(t)).sum::<u64>();
+        let used_a = HEADER_BUDGET_BYTES as u64 + blk_a.txs.iter().map(tx_budget_bytes).sum::<u64>();
         prop_assert!(used_a <= max_bytes as u64);
-        let sum_sizes_a: u64 = blk_a.txs.iter().map(|t| tx_budget_bytes(t)).sum();
+        let sum_sizes_a: u64 = blk_a.txs.iter().map(tx_budget_bytes).sum();
         prop_assert_eq!(used_a, HEADER_BUDGET_BYTES as u64 + sum_sizes_a);
 
         // V2 root determinism (feature-gated)
@@ -187,7 +187,7 @@ proptest! {
         prop_assume!(canon_block.txs.len() >= 2);
 
         // Precompute tx sizes and total **tx bytes**.
-        let sizes: Vec<u64> = canon_block.txs.iter().map(|t| tx_budget_bytes(t)).collect();
+        let sizes: Vec<u64> = canon_block.txs.iter().map(tx_budget_bytes).collect();
         let total_tx_bytes: u64 = sizes.iter().sum();
 
         // ----- Find a tight budget that excludes at least one tx (and keeps at least one) -----
@@ -220,7 +220,7 @@ proptest! {
         let tight_budget_with_header = HEADER_BUDGET_BYTES + tight_budget_tx_only as usize;
 
         // Sanity: recompute used tx-bytes for expected
-        let used_expected: u64 = greedy_expected.iter().map(|t| tx_budget_bytes(t)).sum();
+        let used_expected: u64 = greedy_expected.iter().map(tx_budget_bytes).sum();
         prop_assert!(used_expected <= tight_budget_tx_only);
 
         // Two different shuffles of the same set
@@ -255,7 +255,7 @@ proptest! {
         prop_assert_eq!(blk_b.header.fee_total, expected_fee_total);
 
         // Byte budget respected as **tx bytes only**
-        let used_a_txbytes: u64 = blk_a.txs.iter().map(|t| tx_budget_bytes(t)).sum();
+        let used_a_txbytes: u64 = blk_a.txs.iter().map(tx_budget_bytes).sum();
         prop_assert!(used_a_txbytes <= tight_budget_tx_only);
 
         // Guardrail against accidental header double-counting in these tests.

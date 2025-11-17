@@ -18,7 +18,6 @@ fn cfg() -> SingleNodeCfg {
         header_cache_cap: 1024,
         #[cfg(feature = "checkpoints")]
         checkpoint_interval: eezo_ledger::consensus::DEFAULT_CHECKPOINT_INTERVAL,
-        ..Default::default()
     }
 }
 
@@ -35,8 +34,8 @@ fn two_nodes_assemble_identical_blocks() {
     // Two clean nodes with identical configs (different node keys is fine)
     let (pk1, sk1) = keypair();
     let (pk2, sk2) = keypair();
-    let a = SingleNode::new(cfg(), sk1, pk1.clone());
-    let b = SingleNode::new(cfg(), sk2, pk2.clone());
+    let a = SingleNode::new(cfg(), sk1, pk1);
+    let b = SingleNode::new(cfg(), sk2, pk2);
 
     // Same candidate set (all signed by pk1/sk1; both nodes will verify identically)
     let to = Address([0x11; 20]);
