@@ -19,6 +19,7 @@ fn bootstrap_happy_path_mocked() {
         tx_root_v2: [1; 32],
         #[cfg(feature="checkpoints")]
         qc_root: [2; 32],
+        suite_id: 1,
         timestamp_ms: 1_000,
     };
     let parent_htr: [u8; 32] = parent.hash_tree_root();
@@ -32,6 +33,7 @@ fn bootstrap_happy_path_mocked() {
         tx_root_v2: child_tx_root,
         #[cfg(feature="checkpoints")]
         qc_root: [4; 32],
+        suite_id: 1,
         timestamp_ms: 1_200,
     };
 
@@ -57,6 +59,7 @@ fn bootstrap_happy_path_mocked() {
         state_root_v2: [0u8; 32],
         accounts: Accounts::default(),
         supply: Supply::default(),
+        bridge: Default::default(),
     }).unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -75,6 +78,7 @@ fn bootstrap_rejects_root_mismatch() {
         tx_root_v2: [1; 32],
         #[cfg(feature="checkpoints")]
         qc_root: [2; 32],
+        suite_id: 1,
         timestamp_ms: 1_000,
     };
     let parent_htr = parent.hash_tree_root();
@@ -85,6 +89,7 @@ fn bootstrap_rejects_root_mismatch() {
         tx_root_v2: child_tx_root,
         #[cfg(feature="checkpoints")]
         qc_root: [4; 32],
+        suite_id: 1,
         timestamp_ms: 1_200,
     };
     // Light proof must pass, so leaf == child's tx_root_v2 and branch empty.
@@ -105,6 +110,7 @@ fn bootstrap_rejects_root_mismatch() {
         state_root_v2: [8u8; 32],
         accounts: Accounts::default(),
         supply: Supply::default(),
+        bridge: Default::default(),
     }).unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();

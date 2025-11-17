@@ -1,4 +1,3 @@
-#![cfg(feature = "pq44-runtime")]
 // crates/ledger/src/consensus_api.rs
 
 #[cfg(feature = "metrics")]

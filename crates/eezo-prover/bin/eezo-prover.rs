@@ -108,7 +108,11 @@ fn main() -> Result<()> {
     let _ = env_logger::try_init();
     // advertise SSZ surface and check version compatibility (bridge ↔ ledger)
     log_ssz_versions("prover");
-    assert_compat_or_warn();	
+    assert_compat_or_warn();
+
+    // T43.4: log which hash backend is compiled in (CPU vs GPU).
+    log_hash_backend_banner();
+
     let cmd = Cmd::parse();
 
     match cmd {
@@ -280,6 +284,18 @@ fn run_auto(args: Auto) -> Result<()> {
         }		
         run_prover_loop(cfg).await
     })
+}
+
+fn log_hash_backend_banner() {
+    #[cfg(feature = "gpu-hash")]
+    {
+        log::info!("eezo-prover: hash backend = gpu (feature gpu-hash=on, currently CPU fallback)");
+    }
+
+    #[cfg(not(feature = "gpu-hash"))]
+    {
+        log::info!("eezo-prover: hash backend = cpu (feature gpu-hash=off)");
+    }
 }
 
 fn parse_hex_20(s: &str) -> Result<[u8; 20]> {

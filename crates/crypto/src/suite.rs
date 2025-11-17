@@ -8,16 +8,14 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
 pub enum CryptoSuite {
+    #[default]
     MlDsa44   = 1,
     SphincsPq = 2, // wired in T34.2
 }
 
-impl Default for CryptoSuite {
-    fn default() -> Self { CryptoSuite::MlDsa44 }
-}
 
 #[derive(Debug, Error)]
 pub enum SuiteError {

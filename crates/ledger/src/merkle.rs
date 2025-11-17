@@ -1,5 +1,4 @@
 // crates/ledger/src/merkle.rs
-#![cfg(feature = "eth-ssz")]
 
 use crate::bridge::{mint_leaf, BridgeMintVoucher};
 use crate::SignedTx;

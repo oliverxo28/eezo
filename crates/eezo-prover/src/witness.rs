@@ -3,6 +3,13 @@
 // T38.2 — mock trace builder (no real hashing yet).
 // Builds rows in the exact absorption order from the AIR spec,
 // but uses a stub sponge (we'll replace in T38.3).
+//
+// T43.1 — GPU hashing lanes (v1 hookup).
+// The *witness* values for state_root_v2 and txs_root_v2 are obtained
+// via `prove_state_root_digest` and `prove_txs_root_digest`, which now
+// internally use the BLAKE3 lanes abstraction (CPU-only today, GPU-ready
+// in later T43.x tasks). The trace layout stays unchanged; only the
+// hashing backend becomes lane-aware.
 
 use crate::air_spec::{AirPiV2, Boundary, Col, Step};
 use crate::hash_b3::prove_state_root_digest;
@@ -58,6 +65,11 @@ pub fn build_trace(
     // ------------------------------------------------------------------
     // T38.3: state_root_v2 BLAKE3 gadget (phase-0)
     // Build the exact byte stream: len:u32 LE (=2), A[32], B[32]
+    //
+    // T43.1 note:
+    //   `prove_state_root_digest` now routes through the BLAKE3 lanes
+    //   abstraction (CPU-backed today, GPU-backed later), but the
+    //   witness interface and trace layout remain identical.
     // ------------------------------------------------------------------
     let (accounts_root, supply_root) = state_pair;
 
@@ -74,6 +86,11 @@ pub fn build_trace(
     // T38.4 step-1: txs_root_v2 (variable-length SSZ vector) — software witness
     // digest = BLAKE3(len:u32 LE || leaf_0[32] || ... || leaf_n[32])
     // We'll place this digest into B3_0..3 at Finalize.
+    //
+    // T43.1 note:
+    //   `prove_txs_root_digest` remains the single entrypoint for the
+    //   tx-vector digest; in later T43.x we will refactor its internal
+    //   hashing to also use the lanes abstraction for large batches.
     // ------------------------------------------------------------------
     let txs_witness = prove_txs_root_digest(sorted_tx_roots);
 

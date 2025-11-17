@@ -1,9 +1,5 @@
 //! Thin, feature-gated facade over pqcrypto_mldsa for consensus QC signatures.
 //! T34.0: make verification suite-aware (default remains ML-DSA-44 until rotation lands).
-
-#![cfg(feature = "pq44-runtime")]
-#![allow(dead_code)]
-
 // --- Imports ---
 use crate::cert_store::CertLookupT4;
 use crate::consensus::SignedConsensusMsg as LegacyMsg;

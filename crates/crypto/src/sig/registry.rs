@@ -140,7 +140,7 @@ pub const SUITE_ID_SPHINCS: u8 = 2;
 /// - `active_suite`: the suite that must be accepted after the window closes
 /// - `next_suite`:   optionally the upcoming suite during rotation
 /// - `dual_accept_until`: inclusive EEZO block height up to which *both*
-///    `active_suite` and `next_suite` are accepted.
+///   `active_suite` and `next_suite` are accepted.
 #[derive(Clone, Copy, Debug)]
 pub struct RotationState {
     pub active_suite: AlgoId,
@@ -267,7 +267,7 @@ pub fn verify_rotating(
                 if algo == active && shadow.active_ok {
                     sig_cutover_reject_old_inc();
                 }
-                return false;
+                false
             } else {
                 // pre-window: ONLY active is valid
                 if algo == active {
@@ -277,7 +277,7 @@ pub fn verify_rotating(
                 if algo == next && shadow.next_ok {
                     sig_cutover_reject_new_inc();
                 }
-                return false;
+                false
             }
         }
         // no rotation scheduled → only active allowed anywhere

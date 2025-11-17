@@ -1,5 +1,3 @@
-#![cfg(feature = "eth-ssz")]
-
 use eezo_serde::eth::{Decode, Encode, HashTreeRoot, Result as EthResult};
 use crate::block::BlockHeader;
 use crate::{Address, SignedTx, TxCore};

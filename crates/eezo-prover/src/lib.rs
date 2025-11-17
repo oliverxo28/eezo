@@ -51,6 +51,8 @@ pub mod proof_encoding;
 pub mod pi_canonical;
 #[cfg(feature = "stark-air")]
 pub mod stark_snark_prep;
+#[cfg(feature = "gpu-hash")]
+pub mod gpu_hash;
 
 
 

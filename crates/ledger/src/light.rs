@@ -1,5 +1,4 @@
 // crates/ledger/src/light.rs
-#![cfg(feature = "eth-ssz")]
 
 use eezo_serde::eth::{Decode, Encode, HashTreeRoot, SerdeError};
 
@@ -140,7 +139,7 @@ pub fn light_verify(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eezo_serde::eth::{Encode as _, Decode as _};
+    
 
     #[test]
     fn ssz_roundtrip_with_suite_u32() {

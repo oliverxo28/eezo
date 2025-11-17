@@ -140,13 +140,18 @@ impl CoreRunnerHandle {
                 match outcome {
                     // Assuming SlotOutcome::Committed { height } as per teacher's plan to NOT change API
                     Ok(SlotOutcome::Committed { height }) => {
+                        // update committed height gauge
+                        #[cfg(feature = "metrics")]
+                        {
+                            crate::metrics::EEZO_BLOCK_HEIGHT.set(height as i64);
+                        }
+
                         // capture the committed header hash once, reuse later for checkpoint
                         let mut last_commit_hash_opt: Option<[u8;32]> = None;
                         // log every Nth commit to avoid console spam
                         if log_every == 0 || height % log_every == 0 {
                             log::info!("consensus: committed height={}", height);
                         }
-
                         // --- FIX: Persist FULL BLOCK (if persistence enabled) ---
                         // NOTE: This block is inside a function #[cfg(not(feature = "persistence"))]
                         //       so the inner #[cfg(feature = "persistence")] guard will never be true.
@@ -535,12 +540,17 @@ impl CoreRunnerHandle {
                 match outcome {
                      // Assuming SlotOutcome::Committed { height }
                     Ok(SlotOutcome::Committed { height }) => {
+                        // update committed height gauge
+                        #[cfg(feature = "metrics")]
+                        {
+                            crate::metrics::EEZO_BLOCK_HEIGHT.set(height as i64);
+                        }
+
                         // capture the committed header hash once, reuse later for checkpoint
                         let mut last_commit_hash_opt: Option<[u8;32]> = None;
                         if log_every == 0 || height % log_every == 0 {
                             log::info!("consensus: committed height={}", height);
                         }
-
                         // --- FIX: Persist FULL BLOCK ---
                         #[cfg(feature = "persistence")] // Already guarded by function cfg
                         if let Some(ref db_handle) = db_c {

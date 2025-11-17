@@ -10,7 +10,7 @@
 // This version is deterministic and lightweight.
 // Later we will add parallel hashing and zero-copy slices.
 
-use blake3::{hash, Hasher};
+use crate::hash_b3::Blake3Lanes;
 
 /// A single Merkle proof node (sibling hash + position)
 #[derive(Clone, Debug)]
@@ -36,18 +36,40 @@ pub fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
 
     while layer.len() > 1 {
         let mut next = Vec::with_capacity((layer.len() + 1) / 2);
+
+        // First collect all pair inputs for this layer into a temporary buffer.
+        let mut pair_bytes: Vec<[u8; 64]> = Vec::with_capacity(layer.len() / 2);
         for i in (0..layer.len()).step_by(2) {
             if i + 1 < layer.len() {
-                let mut hasher = Hasher::new();
-                hasher.update(&layer[i]);
-                hasher.update(&layer[i + 1]);
-                let digest = hasher.finalize();
-                next.push(*digest.as_bytes());
+                let mut buf = [0u8; 64];
+                buf[..32].copy_from_slice(&layer[i]);
+                buf[32..].copy_from_slice(&layer[i + 1]);
+                pair_bytes.push(buf);
+            }
+        }
+
+        // Hash all pairs in one shot using the lanes abstraction.
+        let parent_hashes = if pair_bytes.is_empty() {
+            Vec::new()
+        } else {
+            Blake3Lanes::hash_many(pair_bytes.iter().map(|b| b.as_slice()))
+        };
+
+        // Now rebuild the next layer in the same order as the original implementation:
+        // parents in sequence, with odd nodes promoted in-place.
+        let mut parent_iter = parent_hashes.into_iter();
+        for i in (0..layer.len()).step_by(2) {
+            if i + 1 < layer.len() {
+                let h = parent_iter
+                    .next()
+                    .expect("parent_hashes length must match number of pairs");
+                next.push(h);
             } else {
                 // odd leaf promoted
                 next.push(layer[i]);
             }
         }
+
         layer = next;
     }
 
@@ -68,11 +90,11 @@ pub fn merkle_proof(leaves: &[[u8; 32]], index: usize) -> Option<MerkleProof> {
         let mut next = Vec::with_capacity((layer.len() + 1) / 2);
         for i in (0..layer.len()).step_by(2) {
             if i + 1 < layer.len() {
-                let mut hasher = Hasher::new();
-                hasher.update(&layer[i]);
-                hasher.update(&layer[i + 1]);
-                let digest = hasher.finalize();
-                next.push(*digest.as_bytes());
+                let mut buf = [0u8; 64];
+                buf[..32].copy_from_slice(&layer[i]);
+                buf[32..].copy_from_slice(&layer[i + 1]);
+                let digest = Blake3Lanes::hash_one(&buf);
+                next.push(digest);
 
                 if i == idx || i + 1 == idx {
                     let is_left = i == idx;
@@ -100,15 +122,15 @@ pub fn verify_proof(proof: &MerkleProof) -> bool {
     let mut current = proof.leaf;
 
     for node in &proof.path {
-        let mut hasher = Hasher::new();
+        let mut buf = [0u8; 64];
         if node.is_left {
-            hasher.update(&current);
-            hasher.update(&node.sibling);
+            buf[..32].copy_from_slice(&current);
+            buf[32..].copy_from_slice(&node.sibling);
         } else {
-            hasher.update(&node.sibling);
-            hasher.update(&current);
+            buf[..32].copy_from_slice(&node.sibling);
+            buf[32..].copy_from_slice(&current);
         }
-        current = *hasher.finalize().as_bytes();
+        current = Blake3Lanes::hash_one(&buf);
     }
 
     current == proof.root

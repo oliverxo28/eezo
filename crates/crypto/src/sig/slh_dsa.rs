@@ -31,10 +31,6 @@ mod backend {
         keypair, detached_sign, verify_detached_signature,
         PublicKey, SecretKey, DetachedSignature,
     };
-    // ADD THE TRAIT IMPORTS RIGHT HERE (after the backend selection):
-    pub use pqcrypto_traits::sign::{
-        PublicKey as _, SecretKey as _, DetachedSignature as _,
-    };
     
 // Sizes are the same for the 128f simple variants.
     pub const PK_LEN: usize = 32;

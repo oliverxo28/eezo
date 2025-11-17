@@ -1,5 +1,3 @@
-#![cfg(feature = "checkpoints")]
-
 // ------------------ LIGHT PATH: always available with `checkpoints` ------------------
 // (only changes below are in serde_hex32 + an allow(dead_code) on hex_byte)
 
@@ -83,15 +81,17 @@ mod serde_hex32 {
                 A: SeqAccess<'de>,
             {
                 let mut out = [0u8; 32];
-                for i in 0..32 {
+                // --- PATCH 1 START ---
+                for (i, slot) in out.iter_mut().enumerate() {
                     // accept u8/u16/u32/u64 numbers
                     let v: Option<u64> = seq.next_element()?;
                     let n = v.ok_or_else(|| de::Error::invalid_length(i, &self))?;
                     if n > 255 {
                         return Err(de::Error::custom("byte out of range"));
                     }
-                    out[i] = n as u8;
+                    *slot = n as u8;
                 }
+                // --- PATCH 1 END ---
                 Ok(out)
             }
         }
@@ -526,8 +526,9 @@ pub fn validate_sidecar_v2_for_header(h: &BridgeHeader) -> Result<(), &'static s
 /// - EEZO_ROTATION_CUTOFF:    u64 (dual_accept_until) (optional)
 /// - EEZO_ROTATION_ACTIVATED_AT: u64 (optional)
 pub fn rotation_policy_from_env() -> Option<RotationPolicy> {
-    use std::str::FromStr;
+    // --- PATCH 2 START ---
     use eezo_crypto::suite::CryptoSuite;
+    // --- PATCH 2 END ---
 
     // active id (default 1 = ml-dsa-44 in your mapping)
     let active_id: u8 = std::env::var("EEZO_ROTATION_ACTIVE_ID")
@@ -851,7 +852,9 @@ pub fn write_rotation_headers(
     let force = sidecar_force_from_env();
     if enforce && (force || should_emit_qc_sidecar_v2(height, policy)) {
         // validate presence + basic shape for each header we’re about to write
-        let mut check_one = |tag: &str, h: &BridgeHeader| -> std::io::Result<()> {
+        // --- PATCH 3 START ---
+        let check_one = |tag: &str, h: &BridgeHeader| -> std::io::Result<()> {
+        // --- PATCH 3 END ---
             if h.qc_sidecar_v2.is_none() {
                 #[cfg(feature = "metrics")]
                 {
@@ -961,19 +964,19 @@ pub fn list_checkpoint_files_in(dir: &Path) -> std::io::Result<Vec<CheckpointFil
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out), // no folder yet
         Err(e) => return Err(e),
     };
-    for ent in rd {
-        if let Ok(ent) = ent {
-            let path = ent.path();
-            let name = match path.file_name().and_then(|s| s.to_str()) {
-                Some(s) => s,
-                None => continue,
-            };
-            if let Some((height, tag)) = parse_height_and_tag(name) {
-                let modified = ent.metadata().ok().and_then(|m| m.modified().ok());
-                out.push(CheckpointFile { height, path, modified, tag });
-            }
+    // --- PATCH 4 START ---
+    for ent in rd.flatten() {
+        let path = ent.path();
+        let name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        if let Some((height, tag)) = parse_height_and_tag(name) {
+            let modified = ent.metadata().ok().and_then(|m| m.modified().ok());
+            out.push(CheckpointFile { height, path, modified, tag });
         }
     }
+    // --- PATCH 4 END ---
     // sort: height desc, then tag so that untagged < "active" < "next"
     out.sort_by(|a, b| {
         use std::cmp::Ordering::*;
@@ -1113,7 +1116,9 @@ pub fn verify_quorum_cert_with_env(
     }
 
     // Build a plan; may be empty if no sigset yet (current behavior).
-    let verifier = RealQcVerifier::default();
+    // --- PATCH 5 START ---
+    let verifier = RealQcVerifier;
+    // --- PATCH 5 END ---
     let (need, plan) = verifier.plan(chain_id, qc)?;
 
     // T17.5-5: enforce ONLY the threshold when a sigset exists.
@@ -1418,4 +1423,3 @@ mod tests {
         assert!(hs.iter().all(|h| h.qc_sidecar_v2.is_none()));
     }	
 }
-

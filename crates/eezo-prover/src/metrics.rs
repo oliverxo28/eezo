@@ -61,12 +61,48 @@ lazy_static! {
         "Total number of proof directories removed by the prover GC"
     ).expect("metric can be created");
 
-    /// Current configured number of rotations kept on disk.
+        /// Current configured number of rotations kept on disk.
     pub static ref RETAIN_ROTATIONS: IntGauge = IntGauge::new(
         "eezo_prover_retain_rotations",
         "Configured number of checkpoint rotations retained by the prover"
     ).expect("metric can be created");
+
+    // ── T43.3: hash backend observability ─────────────────────────────────────
+    /// Flag for the active hash backend (CPU). 1 if active, 0 otherwise.
+    pub static ref HASH_BACKEND_CPU: IntGauge = IntGauge::new(
+        "eezo_prover_hash_backend_cpu",
+        "1 if CPU hash backend is active, 0 otherwise"
+    ).expect("metric can be created");
+
+    /// Flag for the active hash backend (GPU). 1 if active, 0 otherwise.
+    pub static ref HASH_BACKEND_GPU: IntGauge = IntGauge::new(
+        "eezo_prover_hash_backend_gpu",
+        "1 if GPU hash backend is active, 0 otherwise"
+    ).expect("metric can be created");
+
+    /// Total number of CPU+GPU compare operations performed by the prover.
+    pub static ref GPU_HASH_COMPARE_TOTAL: IntCounter = IntCounter::new(
+        "eezo_prover_gpu_hash_compare_total",
+        "Total number of CPU+GPU hash compare operations (GPU path exercised)"
+    ).expect("metric can be created");
 	
+    /// Total number of GPU batch hash attempts (including CPU fallback).
+    pub static ref GPU_HASH_ATTEMPTS_TOTAL: IntCounter = IntCounter::new(
+        "eezo_prover_gpu_hash_attempts_total",
+        "Total number of GPU batch hash attempts (including CPU fallback)"
+    ).expect("metric can be created");
+
+    /// Total number of times GPU hashing fell back to CPU.
+    pub static ref GPU_HASH_FALLBACKS_TOTAL: IntCounter = IntCounter::new(
+        "eezo_prover_gpu_hash_fallbacks_total",
+        "Total number of times GPU hashing fell back to CPU"
+    ).expect("metric can be created");	
+
+    /// Total number of digest mismatches observed in compare mode.
+    pub static ref GPU_HASH_MISMATCH_TOTAL: IntCounter = IntCounter::new(
+        "eezo_prover_gpu_hash_mismatch_total",
+        "Total number of mismatches between CPU and GPU hash digests in compare mode"
+    ).expect("metric can be created");
 }
 
 /// Register all metrics with the global registry.
@@ -94,14 +130,34 @@ pub fn init_metrics() {
         .register(Box::new(GAPS_HEALED_TOTAL.clone()))
         .expect("register gaps healed total");
     // T37.8
-    REGISTRY
+        REGISTRY
         .register(Box::new(GC_REMOVED_TOTAL.clone()))
         .expect("register gc removed total");
     REGISTRY
         .register(Box::new(RETAIN_ROTATIONS.clone()))
-        .expect("register retain rotations");		
-}
+        .expect("register retain rotations");
+    // T43.3: hash backend flags
+    REGISTRY
+        .register(Box::new(HASH_BACKEND_CPU.clone()))
+        .expect("register hash backend cpu");
+    REGISTRY
+        .register(Box::new(HASH_BACKEND_GPU.clone()))
+        .expect("register hash backend gpu");
 
+    // T44.5 / T45.3: GPU hash attempts / fallbacks / compare / mismatch counters
+    REGISTRY
+        .register(Box::new(GPU_HASH_ATTEMPTS_TOTAL.clone()))
+        .expect("register gpu hash attempts total");
+    REGISTRY
+        .register(Box::new(GPU_HASH_FALLBACKS_TOTAL.clone()))
+        .expect("register gpu hash fallbacks total");
+    REGISTRY
+        .register(Box::new(GPU_HASH_COMPARE_TOTAL.clone()))
+        .expect("register gpu hash compare total");
+    REGISTRY
+        .register(Box::new(GPU_HASH_MISMATCH_TOTAL.clone()))
+        .expect("register gpu hash mismatch total");
+}
 /// Start the Prometheus HTTP server (default 127.0.0.1:9099, overridable via EEZO_PROVER_METRICS_BIND).
 ///
 /// Exports `/metrics`, compatible with Prometheus.
@@ -114,6 +170,8 @@ pub async fn spawn_metrics_server() -> Result<()> {
             RETAIN_ROTATIONS.set(n);
         }
     }
+    // T43.3: expose which hash backend is compiled in (CPU vs GPU).
+    record_hash_backend();
 
     let app = Router::new().route(
         "/metrics",
@@ -156,5 +214,23 @@ impl JobTimer {
     pub fn finish(self) {
         let secs = self.start.elapsed().as_secs_f64();
         LAST_DURATION_SECONDS.set(secs as i64);
+    }
+}
+/// Record which hash backend is active (CPU vs GPU).
+///
+/// This uses compile-time feature flags to set two gauges:
+///   * eezo_prover_hash_backend_cpu = 1, gpu = 0  (default)
+///   * eezo_prover_hash_backend_cpu = 0, gpu = 1  (when `gpu-hash` is enabled)
+pub fn record_hash_backend() {
+    #[cfg(feature = "gpu-hash")]
+    {
+        HASH_BACKEND_CPU.set(0);
+        HASH_BACKEND_GPU.set(1);
+    }
+
+    #[cfg(not(feature = "gpu-hash"))]
+    {
+        HASH_BACKEND_CPU.set(1);
+        HASH_BACKEND_GPU.set(0);
     }
 }

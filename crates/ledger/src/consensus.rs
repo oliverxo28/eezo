@@ -1,5 +1,3 @@
-#![cfg(feature = "pq44-runtime")]
-
 use crate::{
     accounts::Accounts,
     block::{
@@ -41,11 +39,6 @@ use std::sync::Arc;
 
 // Import T27 message types with a module alias to avoid name collisions
 use crate::consensus_msg as hs_msg;
-
-// ── NEW: optional helpers for snapshot cadence and SSZ v2 roots ──────────────
-#[cfg(feature = "eth-ssz")]
-use crate::eth_ssz;
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[inline]
 fn now_ms() -> u64 {

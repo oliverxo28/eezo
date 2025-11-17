@@ -62,12 +62,13 @@ pub use registry::verify_anchor_mldsa_44;
 
 /// Verify a signature over the exact message bytes (no re-hash).
 /// Active schemes are controlled by features: `mldsa`, `slh-dsa`, or `skip-sig-verify`.
-
+///
 /// Dev/test bypass: accept all signatures.
 #[cfg(feature = "skip-sig-verify")]
 pub fn verify_sig(_pubkey: &[u8], _msg: &[u8], _sig: &[u8]) -> bool {
     true
 }
+
 
 /// Real verification path (one or both schemes enabled), only when not skipping.
 #[cfg(all(not(feature = "skip-sig-verify"), any(feature = "mldsa", feature = "slh-dsa")))]

@@ -26,6 +26,29 @@ pub(crate) struct ErrorBody<'a> {
     detail: String,
 }
 
+// +++ add: coarse node+bridge state view used by /state +++
+#[cfg(feature = "checkpoints")]
+#[derive(Serialize)]
+pub struct NodeState {
+    /// Whether the node appears "ready" from a bridge perspective
+    /// (we've seen at least one checkpoint).
+    pub ready_flag: bool,
+    /// Node's latest known height (for now: last checkpoint height; we will
+    /// refine this to true block height when we wire metrics in later steps).
+    pub latest_height: u64,
+    /// Latest checkpoint height as seen from the checkpoint JSON files.
+    pub bridge_latest_checkpoint: u64,
+    /// Whether the bridge emitter was enabled via EEZO_BRIDGE_OUTBOX_ENABLED=1.
+    pub bridge_emitter_enabled: bool,
+    /// Highest state-sync height applied by this node (0 if never).
+    pub state_sync_latest_height: u64,
+    /// Total successful state-sync applications (snapshot + delta).
+    pub state_sync_total: u64,
+    /// Total state-sync apply failures (after retries exhausted).
+    pub state_sync_errors_total: u64,
+}
+
+
 // +++ add: small error alias + helpers + route constants + metrics helper +++
 type ApiErr = (StatusCode, Json<ErrorBody<'static>>);
 
@@ -68,6 +91,10 @@ const ROUTE_DELTA: &str = "/state/delta";
 const ROUTE_BRIDGE_LATEST: &str = "/bridge/header/latest";
 #[cfg(feature = "checkpoints")]
 const ROUTE_BRIDGE_BY_HEIGHT: &str = "/bridge/header/{height}";
+
+// +++ add: high-level node state route +++
+#[cfg(feature = "checkpoints")]
+const ROUTE_STATE: &str = "/state";
 
 #[inline]
 fn http_ok(route: &str) {
@@ -130,7 +157,7 @@ fn default_limit() -> usize {
 pub struct SnapshotItem {
     /// Base64-encoded key (opaque).
     pub key_b64: String,
-    /// Base64-encoded value (opaque).
+    /// Base66-encoded value (opaque).
     pub val_b64: String,
 }
 
@@ -347,6 +374,116 @@ pub async fn get_delta(
     }
 }
 
+// ---------- High-level /state view (node + bridge) ----------
+
+#[cfg(feature = "checkpoints")]
+pub async fn get_node_state(
+    State(state): State<crate::AppState>,
+) -> Result<Json<NodeState>, ApiErr> {
+    use std::cmp::Ordering;
+
+    // use datadir-based checkpoints dir
+    let dir = checkpoints_dir(&state);
+    let files = match list_checkpoint_files(&dir) {
+        Ok(v) => v,
+        Err(msg) => {
+            // No checkpoint files yet -> treat as "not ready" but still return 200.
+            log::debug!("state: no checkpoint files yet: {}", msg);
+            let emitter_enabled =
+                std::env::var("EEZO_BRIDGE_OUTBOX_ENABLED").as_deref() == Ok("1");
+
+            // Derive simple state-sync status from global metrics.
+            // If metrics are disabled, we just return zeros.
+            #[cfg(feature = "metrics")]
+            let (ss_latest, ss_total, ss_errors) = {
+                use crate::metrics::{
+                    EEZO_STATE_SYNC_LATEST_HEIGHT,
+                    EEZO_STATE_SYNC_TOTAL,
+                    EEZO_STATE_SYNC_ERRORS_TOTAL,
+                };
+                (
+                    EEZO_STATE_SYNC_LATEST_HEIGHT.get() as u64,
+                    EEZO_STATE_SYNC_TOTAL.get(),
+                    EEZO_STATE_SYNC_ERRORS_TOTAL.get(),
+                )
+            };
+            #[cfg(not(feature = "metrics"))]
+            let (ss_latest, ss_total, ss_errors) = (0u64, 0u64, 0u64);
+
+            http_ok(ROUTE_STATE);
+            return Ok(Json(NodeState {
+                ready_flag: false,
+                latest_height: 0,
+                bridge_latest_checkpoint: 0,
+                bridge_emitter_enabled: emitter_enabled,
+                state_sync_latest_height: ss_latest,
+                state_sync_total: ss_total,
+                state_sync_errors_total: ss_errors,
+            }));
+        }
+    };
+
+    // Choose the header with the greatest (height, timestamp),
+    // same rule as get_bridge_header_latest.
+    let mut best_height: u64 = 0;
+    let mut best_ts: u64 = 0;
+
+    for p in files {
+        match read_bridge_header(&p) {
+            Ok(h) => {
+                match h.height.cmp(&best_height) {
+                    Ordering::Greater => {
+                        best_height = h.height;
+                        best_ts = h.timestamp;
+                    }
+                    Ordering::Equal if h.timestamp > best_ts => {
+                        best_height = h.height;
+                        best_ts = h.timestamp;
+                    }
+                    Ordering::Less | Ordering::Equal => {}
+                }
+            }
+            Err(e) => {
+                log::debug!("state: skip bad checkpoint {:?}: {}", p, e);
+            }
+        }
+    }
+
+        let emitter_enabled =
+        std::env::var("EEZO_BRIDGE_OUTBOX_ENABLED").as_deref() == Ok("1");
+    let ready = best_height > 0;
+
+    // Derive simple state-sync status from global metrics.
+    // If metrics are disabled, we just return zeros.
+    #[cfg(feature = "metrics")]
+    let (ss_latest, ss_total, ss_errors) = {
+        use crate::metrics::{
+            EEZO_STATE_SYNC_LATEST_HEIGHT,
+            EEZO_STATE_SYNC_TOTAL,
+            EEZO_STATE_SYNC_ERRORS_TOTAL,
+        };
+        (
+            EEZO_STATE_SYNC_LATEST_HEIGHT.get() as u64,
+            EEZO_STATE_SYNC_TOTAL.get(),
+            EEZO_STATE_SYNC_ERRORS_TOTAL.get(),
+        )
+    };
+    #[cfg(not(feature = "metrics"))]
+    let (ss_latest, ss_total, ss_errors) = (0u64, 0u64, 0u64);
+
+    http_ok(ROUTE_STATE);
+    Ok(Json(NodeState {
+        ready_flag: ready,
+        // For now we set latest_height == bridge_latest_checkpoint; later we can
+        // wire true block height via node metrics.
+        latest_height: best_height,
+        bridge_latest_checkpoint: best_height,
+        bridge_emitter_enabled: emitter_enabled,
+        state_sync_latest_height: ss_latest,
+        state_sync_total: ss_total,
+        state_sync_errors_total: ss_errors,
+    }))
+}
 
 // ---------- Bridge: read-only checkpoint headers ----------
 // Exposes the newest (by height) checkpoint header, and a specific height.
@@ -355,9 +492,11 @@ pub async fn get_delta(
 // greatest timestamp is returned.
 
 #[cfg(feature = "checkpoints")]
-fn checkpoints_dir() -> std::path::PathBuf {
-    // mirror the default used by write_checkpoint_json_default()
-    std::path::PathBuf::from("proof").join("checkpoints")
+fn checkpoints_dir(state: &crate::AppState) -> std::path::PathBuf {
+    // mirror the outbox dir used by the bridge emitter:
+    // <datadir>/proof/checkpoints
+    let base = std::path::PathBuf::from(&state.runtime_config.node.datadir);
+    base.join("proof").join("checkpoints")
 }
 
 #[cfg(feature = "checkpoints")]
@@ -389,11 +528,11 @@ fn list_checkpoint_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf
 /// GET /bridge/header/latest
 #[cfg(feature = "checkpoints")]
 pub async fn get_bridge_header_latest(
-    _state: State<crate::AppState>,
+    State(state): State<crate::AppState>,
 ) -> Result<Json<BridgeHeader>, ApiErr> {
     use std::cmp::Ordering;
 
-    let dir = checkpoints_dir();
+    let dir = checkpoints_dir(&state);
     let files = match list_checkpoint_files(&dir) {
         Ok(v) => v,
         Err(msg) => {
@@ -433,7 +572,7 @@ pub async fn get_bridge_header_latest(
         http_ok(ROUTE_BRIDGE_LATEST);
         Ok(Json(hdr))
     } else {
-        #[cfg(feature = "metrics")]
+        #[cfg(feature ="metrics")]
         #[cfg(feature = "state-sync")]
         crate::metrics::STATE_SYNC_HTTP_ERR_4XX.inc();
         http_4xx(ROUTE_BRIDGE_LATEST, StatusCode::NOT_FOUND);
@@ -445,9 +584,9 @@ pub async fn get_bridge_header_latest(
 #[cfg(feature = "checkpoints")]
 pub async fn get_bridge_header_by_height(
     Path(height): Path<u64>,
-    _state: State<crate::AppState>,
+    State(state): State<crate::AppState>,
 ) -> Result<Json<BridgeHeader>, ApiErr> {
-    let dir = checkpoints_dir();
+    let dir = checkpoints_dir(&state);
     let files = match list_checkpoint_files(&dir) {
         Ok(v) => v,
         Err(msg) => {
@@ -523,4 +662,3 @@ pub async fn dev_put(
     }
     (axum::http::StatusCode::OK, "ok").into_response()
 }
-

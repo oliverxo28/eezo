@@ -18,6 +18,8 @@ fn snapshot_roundtrip_smoke() {
         codec_version: 2,
         #[cfg(feature = "eth-ssz")]
         state_root_v2: [0u8; 32],
+        // new bridge state field – default is fine for this smoke test
+        bridge: Default::default(),
     };
     let json = serde_json::to_vec(&snap).unwrap();
     let s2: StateSnapshot = serde_json::from_slice(&json).unwrap();

@@ -104,29 +104,29 @@ impl ConsensusMsg {
         const D_VOTE: &[u8] = b"EEZO:consensus:vote:v1";
 
         let mut h = Sha3_256::new();
-        h.update(&chain_id);
+        h.update(chain_id);
 
         match self {
             ConsensusMsg::Proposal(p) => {
                 h.update(D_PROPOSAL);
                 // Header must already be canonical-hashed inside ledger
-                h.update(&p.header.hash());
-                h.update(&p.view.to_le_bytes());
-                h.update(&p.proposer.0.to_le_bytes());
+                h.update(p.header.hash());
+                h.update(p.view.to_le_bytes());
+                h.update(p.proposer.0.to_le_bytes());
                 if let Some(qc) = &p.justify {
-                    h.update(&qc.view.to_le_bytes());
-                    h.update(&qc.block_id.0);
-                    h.update(&[qc.phase as u8]);
+                    h.update(qc.view.to_le_bytes());
+                    h.update(qc.block_id.0);
+                    h.update([qc.phase as u8]);
                 } else {
-                    h.update(&[0u8]);
+                    h.update([0u8]);
                 }
             }
             ConsensusMsg::Vote(v) => {
                 h.update(D_VOTE);
-                h.update(&v.view.to_le_bytes());
-                h.update(&[v.phase as u8]);
-                h.update(&v.block_id.0);
-                h.update(&v.voter.0.to_le_bytes());
+                h.update(v.view.to_le_bytes());
+                h.update([v.phase as u8]);
+                h.update(v.block_id.0);
+                h.update(v.voter.0.to_le_bytes());
             }
         }
 

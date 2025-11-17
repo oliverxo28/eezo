@@ -1,4 +1,3 @@
-#![cfg(feature = "pq44-runtime")]
 //! T4: Validator Cert lookup with epoch-based cache facade.
 
 use pqcrypto_mldsa::mldsa44::PublicKey;

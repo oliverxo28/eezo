@@ -2,9 +2,10 @@ use eezo_crypto::suite::CryptoSuite;
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "serde")]
+use serde::de::Error as DeError;
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RotationPolicy {
     pub active: CryptoSuite,
     pub next: Option<CryptoSuite>,
@@ -109,6 +110,54 @@ impl RotationPolicy {
     #[inline]
     pub fn enforce_suite(&self, height: u64, suite: CryptoSuite) -> Result<(), &'static str> {
         if self.accept(height, suite) { Ok(()) } else { Err("suite not accepted at height") }
+    }
+}
+
+#[cfg(feature = "serde")]
+#[derive(Serialize, Deserialize)]
+struct RotationPolicyRepr {
+    active: u8,
+    next: Option<u8>,
+    dual_accept_until: Option<u64>,
+    activated_at_height: Option<u64>,
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for RotationPolicy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let repr = RotationPolicyRepr {
+            active: self.active.as_id(),
+            next: self.next.map(|s| s.as_id()),
+            dual_accept_until: self.dual_accept_until,
+            activated_at_height: self.activated_at_height,
+        };
+        repr.serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for RotationPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let repr = RotationPolicyRepr::deserialize(deserializer)?;
+
+        let active = CryptoSuite::try_from(repr.active).map_err(DeError::custom)?;
+        let next = match repr.next {
+            Some(id) => Some(CryptoSuite::try_from(id).map_err(DeError::custom)?),
+            None => None,
+        };
+
+        Ok(RotationPolicy {
+            active,
+            next,
+            dual_accept_until: repr.dual_accept_until,
+            activated_at_height: repr.activated_at_height,
+        })
     }
 }
 

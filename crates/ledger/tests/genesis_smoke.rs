@@ -19,11 +19,16 @@ fn genesis_build_and_persist() {
             bridge_mint_total: 0,
             burn_total: 0,
         },
+        // new rotation-related fields (no rotation scheduled in this smoke test)
+        active_suite_id: Some(1),
+        next_suite_id: None,
+        dual_accept_until: None,
         consensus_params: ConsensusParams {
             max_txs_per_block: 1000,
             block_bytes_budget: 100_000,
         },
     };
+
 
     let g = build_genesis_block(cfg);
     // Print the new state_root for inspection

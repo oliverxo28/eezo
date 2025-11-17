@@ -2,7 +2,7 @@
 use once_cell::sync::Lazy;
 use prometheus::{
     register_histogram_vec, register_int_counter, register_int_counter_vec,
-    register_int_gauge, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_int_gauge, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
 };
 // only needed when `state-sync` metrics are compiled
 #[cfg(feature = "state-sync")]
@@ -111,12 +111,24 @@ pub static EEZO_MEMPOOL_BYTES: Lazy<IntGauge> = Lazy::new(|| {
 
 // T32 schema anchors (lower-case names)
 pub static EEZO_BLOCK_E2E_LATENCY_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    // Use a tolerant registration pattern: if registration fails (e.g., already registered),
+    // create an unregistered fallback HistogramVec and emit a warning instead of panicking.
     register_histogram_vec!(
         "eezo_block_e2e_latency_seconds",
         "End-to-end block latency segmented by stage",
         &["stage"] // e.g., "assemble" | "validate" | "commit"
     )
-    .unwrap()
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "warning: failed to register eezo_block_e2e_latency_seconds: {} (using unregistered fallback histogram)",
+            e
+        );
+        let opts = HistogramOpts::new(
+            "eezo_block_e2e_latency_seconds_fallback",
+            "unregistered fallback histogram for block e2e latency",
+        );
+        HistogramVec::new(opts, &["stage"]).expect("fallback histogram constructed")
+    })
 });
 
 pub static EEZO_TX_REJECTED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -191,7 +203,7 @@ pub static EEZO_NODE_PEER_PING_FAIL_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 // --- State sync metrics ---
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────[...]
 #[cfg(feature = "state-sync")]
 pub static STATE_SYNC_SNAPSHOT_BYTES_TOTAL: Lazy<prometheus::IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -269,8 +281,8 @@ pub static STATE_SYNC_HTTP_ERR_5XX: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 // ───────────────────────────── T42.3: State-sync progress metrics ───────────
-// These live under `metrics` so operators can always see high-level state-sync
-// progress, even if detailed `state-sync`-specific metrics are disabled.
+ // These live under `metrics` so operators can always see high-level state-sync
+ // progress, even if detailed `state-sync`-specific metrics are disabled.
 #[cfg(feature = "metrics")]
 pub static EEZO_STATE_SYNC_LATEST_HEIGHT: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(
@@ -453,7 +465,7 @@ pub static EEZO_BRIDGE_OUTBOX_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 
-// Eagerly register ledger consensus metrics so they appear in /metrics even before use.
+ // Eagerly register ledger consensus metrics so they appear in /metrics even before use.
 #[cfg(all(feature = "metrics", feature = "pq44-runtime"))]
 pub fn register_ledger_consensus_metrics() {
     // Deref'ing Lazy<T> forces initialization & registration.
@@ -467,13 +479,13 @@ pub fn register_ledger_consensus_metrics() {
 	// T32 metrics (ensure presence on /metrics even before first observation)
 	eezo_ledger::metrics::register_t32_metrics();
 }
-// Eagerly register T33 Bridge metrics so they appear on /metrics immediately.
+ // Eagerly register T33 Bridge metrics so they appear on /metrics immediately.
 #[cfg(feature = "metrics")]
 pub fn register_t33_bridge_metrics() {
     let _ = &*EEZO_BRIDGE_MINT_TOTAL;
     let _ = &*EEZO_BRIDGE_OUTBOX_TOTAL;
 }
-// ───────────────────────────── T36.6: Bridge index & serve metrics ──────────
+ // ───────────────────────────── T36.6: Bridge index & serve metrics ──────────
 #[cfg(feature = "metrics")]
 pub static EEZO_BRIDGE_CHECKPOINTS_EMITTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -581,24 +593,23 @@ pub fn register_t37_kemtls_metrics() {
     // delegate to eezo-net's registrar (idempotent)
     register_kemtls_net_metrics();
 }
-// ─────────────────────────── T40.1: Shadow sig metrics registrar ───────────
-/// Eagerly register the crypto crate's shadow-verify counters so they are
-/// visible on `/metrics` even before the first shadow verification attempt.
+ // ─────────────────────────── T40.1: Shadow sig metrics registrar ───────────
+ /// Eagerly register the crypto crate's shadow-verify counters so they are
+ /// visible on `/metrics` even before the first shadow verification attempt.
 #[cfg(feature = "metrics")]
 pub fn register_t40_shadow_sig_metrics() {
     // idempotent touch of Lazy statics in eezo-crypto
     eezo_crypto::metrics::register_t40_shadow_metrics();
 }
-
-// ─────────────────────────── T40.2: Cutover metrics registrar ───────────
-/// Eagerly register the cutover-enforcement counters so they appear on
-/// `/metrics` at boot. Delegates to the same crypto helper, which also
-/// materializes the T40.2 counters.
+ // ─────────────────────────── T40.2: Cutover metrics registrar ───────────
+ /// Eagerly register the cutover-enforcement counters so they appear on
+ /// `/metrics` at boot. Delegates to the same crypto helper, which also
+ /// materializes the T40.2 counters.
 #[cfg(feature = "metrics")]
 pub fn register_t40_cutover_metrics() {
     eezo_crypto::metrics::register_t40_shadow_metrics();
 }
-// ─────────────────────────── T41.3: QC sidecar v2 metrics ───────────
+ // ─────────────────────────── T41.3: QC sidecar v2 metrics ───────────
 #[cfg(feature = "metrics")]
 pub static EEZO_QC_SIDECAR_V2_EMITTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -625,7 +636,7 @@ pub static EEZO_QC_SIDECAR_V2_VERIFY_ERR_TOTAL: Lazy<IntCounter> = Lazy::new(|| 
     )
     .expect("metric registered")
 });
-// ── T41.4: strict mode outcomes ─────────────────────────────────────────────
+ // ── T41.4: strict mode outcomes ─────────────────────────────────────────────
 #[cfg(feature = "metrics")]
 pub static EEZO_QC_SIDECAR_V2_ENFORCE_OK_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -643,8 +654,7 @@ pub static EEZO_QC_SIDECAR_V2_ENFORCE_FAIL_TOTAL: Lazy<IntCounter> = Lazy::new(|
     )
     .expect("metric registered")
 });
-
-/// Eagerly register T41.3 QC sidecar metrics so they show on /metrics immediately.
+ /// Eagerly register T41.3 QC sidecar metrics so they show on /metrics immediately.
 #[cfg(feature = "metrics")]
 pub fn register_t41_qc_sidecar_metrics() {
     let _ = &*EEZO_QC_SIDECAR_V2_EMITTED_TOTAL;
@@ -844,4 +854,3 @@ pub fn suite_rotation_inc() {
         EEZO_SUITE_ROTATION_TOTAL.inc();
     }
 }
-

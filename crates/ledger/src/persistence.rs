@@ -1677,6 +1677,7 @@ mod light_anchor_tests {
         // minimal LightHeader (fields must match your light.rs)
         let hdr = LightHeader {
             height: 10,
+			suite_id: 1, // ml-dsa-44 suite id for this test
             parent_root: [1u8; 32],
             tx_root_v2: [2u8; 32],
             #[cfg(feature = "checkpoints")]
@@ -1699,3 +1700,4 @@ mod light_anchor_tests {
         assert_eq!(r.header.timestamp_ms, 1234);
     }
 }
+

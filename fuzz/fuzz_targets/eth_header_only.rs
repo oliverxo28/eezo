@@ -9,7 +9,7 @@ fuzz_target!(|data: &[u8]| {
         // roundtrip
         let enc = h.ssz_bytes();
         if let Ok((h2, used2)) = BlockHeader::ssz_read(&enc) {
-            assert_eq!(used, used, "consume check");
+            assert!(used > 0, "consume check");
             assert_eq!(used2, enc.len(), "full decode");
             assert_eq!(h, h2, "header roundtrip mismatch");
         }

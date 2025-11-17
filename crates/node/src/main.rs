@@ -2713,16 +2713,19 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(all(feature = "state-sync", feature = "state-sync-http"))]
     let app = {
         // Handlers live under http::state
-		use crate::http::state as ss;
+        use crate::http::state as ss;
         use axum::routing::get;
         app
-		   .route("/state/anchor",   get(ss::get_anchor))
-		   .route("/state/snapshot", get(ss::get_snapshot))
-		   .route("/state/delta",    get(ss::get_delta))
-		   // ---- add v2 ETH-SSZ endpoints (new) ----
-		   .route("/state/snapshot/manifest", get(ss::get_snapshot_manifest_v2))
-		   .route("/state/snapshot/blob",     get(ss::get_snapshot_blob))
-		   .route("/state/delta/manifest",    get(ss::get_delta_manifest_v2))
+           // high-level node+bridge view
+           .route("/state",          get(ss::get_node_state))
+           // existing state-sync endpoints
+           .route("/state/anchor",   get(ss::get_anchor))
+           .route("/state/snapshot", get(ss::get_snapshot))
+           .route("/state/delta",    get(ss::get_delta))
+           // ---- v2 ETH-SSZ endpoints (new) ----
+           .route("/state/snapshot/manifest", get(ss::get_snapshot_manifest_v2))
+           .route("/state/snapshot/blob",     get(ss::get_snapshot_blob))
+           .route("/state/delta/manifest",    get(ss::get_delta_manifest_v2))
     };
     // Mount the DEV write route ONLY in debug or when dev-tools is enabled
     #[cfg(all(

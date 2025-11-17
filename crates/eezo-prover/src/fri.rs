@@ -11,11 +11,12 @@
 // It is the structural pipeline needed for T38.5 tests.
 // Real field folding & FFT integration come in T38.6–T38.7.
 
-use crate::merkle::{merkle_root};
+use crate::merkle::merkle_root;
 use crate::poly::Polynomial;
 use crate::domain::Domain;
+use crate::hash_b3::Blake3Lanes;
 
-use blake3::{hash, Hasher};
+use blake3::Hasher;
 
 /// One layer of the FRI proof:
 /// - committed evaluations
@@ -95,7 +96,12 @@ pub fn fri_prove(
     let mut challenges = Vec::new();
 
     // Layer 0: the initial evaluations.
-    let root0 = merkle_root(&evals.iter().map(|x| hash(&x.to_le_bytes()).into()).collect::<Vec<[u8; 32]>>());
+    // Hash all evals in one shot via the BLAKE3 lanes helper (each u64 → 8 LE bytes).
+    let eval_bytes: Vec<[u8; 8]> = evals.iter().map(|x| x.to_le_bytes()).collect();
+    let leaves: Vec<[u8; 32]> = Blake3Lanes::hash_many(
+        eval_bytes.iter().map(|b| b.as_slice()),
+    );
+    let root0 = merkle_root(&leaves);
     layers.push(FriLayer { evals: evals.clone(), root: root0 });
 
     // absorb the first root
@@ -111,11 +117,11 @@ pub fn fri_prove(
         // fold
         cur = fold_layer(&cur, alpha);
 
-        // commit to layer
-        let leaves: Vec<[u8; 32]> = cur
-            .iter()
-            .map(|x| hash(&x.to_le_bytes()).into())
-            .collect();
+        // commit to layer: hash all folded evals via lanes helper
+        let eval_bytes: Vec<[u8; 8]> = cur.iter().map(|x| x.to_le_bytes()).collect();
+        let leaves: Vec<[u8; 32]> = Blake3Lanes::hash_many(
+            eval_bytes.iter().map(|b| b.as_slice()),
+        );
 
         let root = merkle_root(&leaves);
         layers.push(FriLayer { evals: cur.clone(), root });

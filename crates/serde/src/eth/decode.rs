@@ -31,13 +31,13 @@ pub trait Decode: Sized {
 
 impl Decode for bool {
     fn ssz_read(input: &[u8]) -> Result<(Self, usize)> {
-        let b = *input.get(0).ok_or(SerdeError::InvalidLength)?;
+        let b = *input.first().ok_or(SerdeError::InvalidLength)?;
         Ok((b != 0, 1))
     }
 }
 impl Decode for u8 {
     fn ssz_read(input: &[u8]) -> Result<(Self, usize)> {
-        Ok((*input.get(0).ok_or(SerdeError::InvalidLength)?, 1))
+        Ok((*input.first().ok_or(SerdeError::InvalidLength)?, 1))
     }
 }
 impl Decode for u16 {

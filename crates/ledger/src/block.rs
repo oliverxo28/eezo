@@ -239,14 +239,16 @@ pub fn header_base_bytes() -> u64 {
     {
         base += 32;
     }
+    // --- PATCH (a) START ---
     #[cfg(feature = "checkpoints")]
     {
-        return base + 32; // qc_hash
+        base + 32 // qc_hash
     }
     #[cfg(not(feature = "checkpoints"))]
     {
-        return base;
+        base
     }
+    // --- PATCH (a) END ---
 }
 
 // count only the core tx fields (no pubkey/sig) for budget purposes
@@ -283,7 +285,9 @@ fn canonical_tx_order(candidates: Vec<SignedTx>) -> Vec<SignedTx> {
 
         // Rank groups by total_fee / total_bytes without floats: store (total_fee, total_bytes, txs)
         let total_fee: u128 = txs.iter().map(|tx| tx.core.fee).sum();
-        let total_bytes: u64 = txs.iter().map(|tx| tx_budget_bytes(tx)).sum();
+        // --- PATCH (b) START ---
+        let total_bytes: u64 = txs.iter().map(tx_budget_bytes).sum();
+        // --- PATCH (b) END ---
         fee_groups.push((total_fee, total_bytes, txs));
     }
 
@@ -296,8 +300,10 @@ fn canonical_tx_order(candidates: Vec<SignedTx>) -> Vec<SignedTx> {
         rhs.cmp(&lhs) // DESC
             // Secondary: sender (first 20 bytes of pubkey) of the first tx in each group
             .then_with(|| {
-                let sa = atxs.first().and_then(|t| sender_from_pubkey_first20(t));
-                let sb = btxs.first().and_then(|t| sender_from_pubkey_first20(t));
+                // --- PATCH (b) START ---
+                let sa = atxs.first().and_then(sender_from_pubkey_first20);
+                let sb = btxs.first().and_then(sender_from_pubkey_first20);
+                // --- PATCH (b) END ---
                 sa.cmp(&sb)
             })
             // Tertiary: first tx nonce (ASC)
@@ -422,8 +428,10 @@ pub fn assemble_block(
         let tx_used = used_u64.saturating_sub(hdr);
         let wasted = (max_bytes as u64).saturating_sub(used_u64);
 
-        crate::metrics::BLOCK_BYTES_USED.inc_by(tx_used as u64);
-        crate::metrics::BLOCK_BYTES_WASTED.inc_by(wasted as u64);
+        // --- PATCH (c) START ---
+        crate::metrics::BLOCK_BYTES_USED.inc_by(tx_used);
+        crate::metrics::BLOCK_BYTES_WASTED.inc_by(wasted);
+        // --- PATCH (c) END ---
     }
 
     Ok(Block {
@@ -564,16 +572,18 @@ pub fn header_domain_bytes(chain_id: [u8; 20], h: &BlockHeader) -> Vec<u8> {
 pub fn header_hash(h: &BlockHeader) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
     hasher.update(b"EEZO-HDR\0");
-    hasher.update(&h.height.to_le_bytes());
-    hasher.update(&h.prev_hash);
-    hasher.update(&h.tx_root);
-    hasher.update(&h.fee_total.to_le_bytes());
-    hasher.update(&h.tx_count.to_le_bytes());
-    hasher.update(&h.timestamp_ms.to_le_bytes());
+    // --- PATCH (d) START ---
+    hasher.update(h.height.to_le_bytes());
+    hasher.update(h.prev_hash);
+    hasher.update(h.tx_root);
+    hasher.update(h.fee_total.to_le_bytes());
+    hasher.update(h.tx_count.to_le_bytes());
+    hasher.update(h.timestamp_ms.to_le_bytes());
     #[cfg(feature = "checkpoints")]
     {
-        hasher.update(&h.qc_hash);
+        hasher.update(h.qc_hash);
     }
+    // --- PATCH (d) END ---
     let out = hasher.finalize();
     let mut h32 = [0u8; 32];
     h32.copy_from_slice(&out);
@@ -617,9 +627,11 @@ pub fn validate_header(
             DetachedSignature::from_bytes(signature),
         ) {
             (Ok(pk), Ok(sig)) => {
-                if !verify_detached_signature(&sig, &msg, &pk).is_ok() {
+                // --- PATCH (e) START ---
+                if verify_detached_signature(&sig, &msg, &pk).is_err() {
                     return Err(HeaderErr::BadSig);
                 }
+                // --- PATCH (e) END ---
             }
             _ => return Err(HeaderErr::BadSig),
         }
