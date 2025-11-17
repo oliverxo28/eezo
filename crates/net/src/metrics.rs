@@ -1,4 +1,3 @@
-#![cfg(feature = "metrics")]
 use once_cell::sync::Lazy;
 use prometheus::{
     register_gauge_vec, register_histogram, register_int_counter, register_int_counter_vec,

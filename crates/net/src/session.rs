@@ -148,7 +148,7 @@ impl Session {
                 NonceSeq::new(FLAG_C2S, tk.session_id),
             ),
         };
-        let s = Self {
+        Self {
             k_c2s: tk.k_c2s,
             k_s2c: tk.k_s2c, // <-- FIX: Was k_c2s
             aead_c2s,
@@ -159,8 +159,7 @@ impl Session {
             session_id: tk.session_id,
 			resumed: false,
 			ticket_id: None,
-        };
-        s
+        }
     } // <-- FIX: Added missing brace
 	
     /// resumption constructor (keys already derived from PSK/ticket by handshake)

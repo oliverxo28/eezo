@@ -1,6 +1,6 @@
 #![cfg(feature = "t16-sim")]
 
-use eezo_net::sim::{NetworkSimulator, NodeId};
+use eezo_net::sim::NetworkSimulator;
 use std::time::Duration;
 
 #[test]

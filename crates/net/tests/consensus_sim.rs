@@ -4,50 +4,61 @@ use eezo_net::harness::MultiNodeHarness;
 use eezo_net::sim::NetworkSimulator;
 use std::time::Duration;
 
-use eezo_ledger::cert_store::{CertLookup, ValidatedPk};
-use eezo_ledger::consensus::{
-    kind_of, signer_id_from_pk, ConsensusMsgCore, MsgKind, PkBytes, PreCommit, PreVote, Proposal,
-    SigBytes, SignedConsensusMsg,
+use eezo_ledger::{
+    block::{BlockHeader, BlockId},
+    cert_store::CertLookup,
+    consensus_msg::{ConsensusMsg, Phase, Proposal, SignedConsensusMsg, ValidatorId, Vote},
 };
+use pqcrypto_mldsa::mldsa44::PublicKey;
 
 /// Minimal dummy cert store for T16.4 sims (no real validation).
 struct DummyCerts;
 impl CertLookup for DummyCerts {
-    fn get_pk(&self, _signer_id: &[u8; 20], _at: u64) -> Option<ValidatedPk> {
+    fn public_key(&self, _signer: ValidatorId) -> Option<PublicKey> {
         None
     }
 }
 
+#[derive(Clone, Copy)]
+enum MsgKind {
+    Proposal,
+    PreVote,
+}
+
 /// Build a syntactically valid signed consensus message (dummy PK/sig).
-fn dummy_signed(kind: MsgKind, height: u64, round: u32, block: [u8; 32]) -> SignedConsensusMsg {
-    let core = match kind {
-        MsgKind::Proposal => ConsensusMsgCore::Proposal(Proposal {
-            height,
-            round,
-            block_id: block,
-        }),
-        MsgKind::PreVote => ConsensusMsgCore::PreVote(PreVote {
-            height,
-            round,
-            block_id: block,
-        }),
-        MsgKind::PreCommit => ConsensusMsgCore::PreCommit(PreCommit {
-            height,
-            round,
-            block_id: block,
+fn dummy_signed(kind: MsgKind, height: u64, view: u64, block_id: BlockId) -> SignedConsensusMsg {
+    let msg = match kind {
+        MsgKind::Proposal => ConsensusMsg::Proposal(Box::new(Proposal {
+            header: BlockHeader {
+                height,
+                prev_hash: [0u8; 32],
+                tx_root: [0u8; 32],
+                #[cfg(feature = "eth-ssz")]
+                tx_root_v2: [0u8; 32],
+                fee_total: 0,
+                tx_count: 0,
+                timestamp_ms: 0,
+                #[cfg(feature = "checkpoints")]
+                qc_hash: [0u8; 32],
+            },
+            view,
+            proposer: ValidatorId(0),
+            justify: None,
+        })),
+        MsgKind::PreVote => ConsensusMsg::Vote(Vote {
+            phase: Phase::Prepare,
+            view,
+            block_id,
+            voter: ValidatorId(0),
         }),
     };
-    // ML-DSA-44 sizes that your types expect
-    let pk = PkBytes([3u8; 1312]);
-    let signer_id = signer_id_from_pk(&pk);
-    let sig = SigBytes([0u8; 2420]);
+
     SignedConsensusMsg {
-        core,
-        signer_id,
-        signer_pk: pk,
-        sig,
-        height,
-        round,
+        msg,
+        sig: vec![],
+        signer: ValidatorId(0),
+        #[cfg(feature = "eth-ssz")]
+        codec_version: 2,
     }
 }
 
@@ -57,8 +68,8 @@ fn byzantine_double_prevote() {
     let mut sim = NetworkSimulator::new();
     let h = MultiNodeHarness::new(&mut sim, &[1, 2, 3]);
 
-    let block_a = [1u8; 32];
-    let block_b = [2u8; 32];
+    let block_a = BlockId([1u8; 32]);
+    let block_b = BlockId([2u8; 32]);
 
     // Node 1 equivocates towards node 2
     let pv_a = dummy_signed(MsgKind::PreVote, 1, 0, block_a);
@@ -77,13 +88,13 @@ fn byzantine_double_prevote() {
         .expect("second prevote");
 
     // Both are PreVotes, but with different block_ids (equivocation signal).
-    let bid1 = match m1.core {
-        ConsensusMsgCore::PreVote(p) => p.block_id,
-        _ => panic!("expected PreVote"),
+    let bid1 = match m1.msg {
+        ConsensusMsg::Vote(v) => v.block_id,
+        _ => panic!("expected Vote"),
     };
-    let bid2 = match m2.core {
-        ConsensusMsgCore::PreVote(p) => p.block_id,
-        _ => panic!("expected PreVote"),
+    let bid2 = match m2.msg {
+        ConsensusMsg::Vote(v) => v.block_id,
+        _ => panic!("expected Vote"),
     };
     assert_ne!(
         bid1, bid2,
@@ -98,7 +109,7 @@ fn partition_and_heal() {
     sim.set_latency(Duration::from_millis(5));
     let h = MultiNodeHarness::new(&mut sim, &[1, 2, 3]);
 
-    let block = [9u8; 32];
+    let block = BlockId([9u8; 32]);
     let prop = dummy_signed(MsgKind::Proposal, 1, 0, block);
 
     // Partition {1} | {2,3}
@@ -120,5 +131,5 @@ fn partition_and_heal() {
         .node(2)
         .recv_msg(Duration::from_millis(200))
         .expect("proposal after heal");
-    assert!(matches!(kind_of(&recv.core), MsgKind::Proposal));
+    assert!(matches!(recv.msg, ConsensusMsg::Proposal(_)));
 }

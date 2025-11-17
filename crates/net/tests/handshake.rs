@@ -27,8 +27,8 @@ impl Kem for MockKem {
         ct.extend_from_slice(&r);
         let mut h = Sha3_256::new();
         h.update(b"SS");
-        h.update(&pk.0);
-        h.update(&r);
+        h.update(pk.0);
+        h.update(r);
         Ok((ct, h.finalize().to_vec()))
     }
 

@@ -55,8 +55,12 @@ impl TokenBucket {
     }
 }
 
+// PATCH: Add type alias for the complex LruCache type
+type VerifyCacheInner = LruCache<(Vec<u8>, [u8; 32]), bool>;
+
 /// Global LRU verify cache: key = (pk_bytes, msg_hash) → bool (valid?)
-static VERIFY_CACHE: Lazy<Mutex<LruCache<(Vec<u8>, [u8; 32]), bool>>> =
+// PATCH: Use the new type alias
+static VERIFY_CACHE: Lazy<Mutex<VerifyCacheInner>> =
     Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(4096).unwrap())));
 
 /// Global rate limiter: ~200 verifications/second burst with 200 capacity.

@@ -16,7 +16,7 @@ async fn run_full_then_resume_once() {
     let (mut c, mut s) = duplex(64 * 1024);
 
     // server side
-    let sk1 = sk.clone();
+    let sk1 = sk;
     let srv1 = tokio::spawn(async move {
         // accept and respond; we don't need the returned session on server side for this smoke
         let _srv_sess = server_accept_async::<MlKem768, _>(&sk1, &mut s).await.unwrap();
@@ -35,7 +35,7 @@ async fn run_full_then_resume_once() {
 
     // ========= 2) resume using ticket1 =========
     let (mut c2, mut s2) = duplex(64 * 1024);
-    let sk2 = sk.clone();
+    let sk2 = sk;
     let srv2 = tokio::spawn(async move {
         let _srv_sess = server_accept_async::<MlKem768, _>(&sk2, &mut s2).await.unwrap();
     });
@@ -60,7 +60,7 @@ async fn run_full_then_resume_once() {
     // Using the same ticket again should be rejected by the replay set,
     // causing the server to fall back to a full KEM path (resumed == false).
     let (mut c3, mut s3) = duplex(64 * 1024);
-    let sk3 = sk.clone();
+    let sk3 = sk;
     let srv3 = tokio::spawn(async move {
         let _srv_sess = server_accept_async::<MlKem768, _>(&sk3, &mut s3).await.unwrap();
     });

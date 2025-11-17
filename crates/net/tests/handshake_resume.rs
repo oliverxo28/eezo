@@ -15,7 +15,7 @@ async fn run_full_then_resume_once() {
     let (s_r1, s_w1) = tokio::io::split(s_io1);
 
     // server side
-    let sk1 = sk.clone();
+    let sk1 = sk;
     let srv1 = tokio::spawn(async move {
         // accept and respond; we don't need the returned session on server side for this smoke
         let mut s_join = tokio::io::join(s_r1, s_w1);
@@ -39,7 +39,7 @@ async fn run_full_then_resume_once() {
     let (c_io2, s_io2) = duplex(64 * 1024);
     let (c_r2, c_w2) = tokio::io::split(c_io2);
     let (s_r2, s_w2) = tokio::io::split(s_io2);
-    let sk2 = sk.clone();
+    let sk2 = sk;
     let srv2 = tokio::spawn(async move {
         let mut s_join = tokio::io::join(s_r2, s_w2);
         let _srv_sess = server_accept_async::<MlKem768, _>(&sk2, &mut s_join).await.unwrap();
@@ -71,7 +71,7 @@ async fn run_full_then_resume_once() {
     let (c_r3, c_w3) = tokio::io::split(c_io3);
     let (s_r3, s_w3) = tokio::io::split(s_io3);
 
-    let sk3 = sk.clone();
+    let sk3 = sk;
     let srv3 = tokio::spawn(async move {
         let mut s_join = tokio::io::join(s_r3, s_w3);
         let _srv_sess = server_accept_async::<MlKem768, _>(&sk3, &mut s_join).await.unwrap();

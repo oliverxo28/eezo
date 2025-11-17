@@ -246,9 +246,9 @@ pub fn transcript_hash(chello: &ClientHello, shello: &ServerHello, session_ctx: 
     h.update(b"CTX:");
     h.update(session_ctx);
     h.update(b"|CHELLO:");
-    h.update(&bincode::serialize(&ch).unwrap());
+    h.update(bincode::serialize(&ch).unwrap());
     h.update(b"|SHELLO:");
-    h.update(&bincode::serialize(&sh).unwrap());
+    h.update(bincode::serialize(&sh).unwrap());
 
     // Client auth is bound separately if needed
     h.finalize().into()

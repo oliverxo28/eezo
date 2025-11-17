@@ -15,6 +15,10 @@ mlkem = ["eezo-crypto/mlkem"]
 metrics = ["dep:prometheus"]
 # T37.1: feature gate for resumption (used by node/relay; no extra deps here)
 kemtls-resume = []
+# T42: SSZ feature for consensus
+eth-ssz = ["eezo-ledger/eth-ssz"]
+# T41: Checkpoints feature
+checkpoints = ["eezo-ledger/checkpoints"]
 
 [dependencies]
 eezo-crypto = { path = "../crypto", default-features = false }
