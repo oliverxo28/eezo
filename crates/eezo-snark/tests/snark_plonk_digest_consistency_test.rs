@@ -1,7 +1,6 @@
 #![cfg(feature = "plonk_kzg")]
 
 use eezo_snark::transcript::circuit_public_digest;
-use eezo_snark::public::pack_public;
 use eezo_snark::backend::plonk_kzg::prove_plonk;
 
 use eezo_prover::stark_snark_prep::prepare_for_snark;

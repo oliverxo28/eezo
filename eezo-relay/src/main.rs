@@ -12,7 +12,6 @@ use ethers::types::{H160, H256, U256};
 use hex::FromHex;
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json;
 use std::env;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,7 +29,7 @@ const READY_FILE: &str = "READY";
 #[cfg(feature = "kemtls-resume")]
 use eezo_net::kem_adapter::MlKem768;
 #[cfg(feature = "kemtls-resume")]
-use eezo_net::secure::{client_connect_async, client_connect_resume_async, FramedSession};
+use eezo_net::secure::{client_connect_async, client_connect_resume_async};
 #[cfg(feature = "kemtls-resume")]
 use once_cell::sync::Lazy;
 #[cfg(feature = "kemtls-resume")]
@@ -45,7 +44,7 @@ use tokio::net::TcpStream;
 #[inline]
 fn align_up(n: u64, step: u64) -> u64 {
     if step == 0 { return n; }
-    ((n + step - 1) / step) * step
+    n.div_ceil(step) * step
 }
 
 // T37.6: jitter helper for backoff
@@ -182,7 +181,7 @@ struct Config {
     metrics_bind: String,
     strict_pi: bool,   // T37.7: EEZO_PI_SSZ_STRICT toggle	
     // T39.3: optional on-chain SNARK verification path
-    snark_onchain: bool, // <<< PATCH 2a: Config: add a runtime toggle for SNARK path
+    snark_onchain: bool, // <<< PATCH 2b: Read SNARK config
     // T41.5: enforce sidecar presence at first-eligible height
     qc_enforce: bool,	
     // T37.1 (optional): if provided, the relay will establish a resumable
@@ -663,6 +662,7 @@ async fn serve_metrics(metrics: Arc<RelayMetrics>, bind: String) -> Result<()> {
 static TICKET: Lazy<Mutex<Option<Vec<u8>>>> = Lazy::new(|| Mutex::new(None));
 
 #[cfg(feature = "kemtls-resume")]
+#[allow(clippy::await_holding_lock)]
 async fn kemtls_probe(cfg: &Config) -> Result<()> {
     let addr = match (&cfg.kemtls_addr, &cfg.kemtls_server_pk) {
         (Some(a), Some(pk_hex)) => (a.as_str(), pk_hex.as_str()),
@@ -681,28 +681,26 @@ async fn kemtls_probe(cfg: &Config) -> Result<()> {
         .with_context(|| format!("connect KEMTLS to {}", addr.0))?;
 
     // Try resume if we have a cached ticket; otherwise full handshake
-    let resumed: bool;
-    let mut session: FramedSession;
-    if let Some(t) = TICKET.lock().unwrap().take() {
+    let mut was_resumed: bool = false;
+    let session = if let Some(t) = TICKET.lock().unwrap().take() {
         match client_connect_resume_async::<MlKem768, _>(&server_pk, t, &mut stream).await {
-            Ok(fs) => { resumed = true; session = fs; }
+            Ok(fs) => { was_resumed = true; fs }
             Err(_) => {
                 // fall back to full handshake
-                session = client_connect_async::<MlKem768, _>(&server_pk, &mut stream).await?;
-                resumed = false;
+                client_connect_async::<MlKem768, _>(&server_pk, &mut stream).await?
             }
         }
     } else {
-        session = client_connect_async::<MlKem768, _>(&server_pk, &mut stream).await?;
-        resumed = false;
-    }
+        client_connect_async::<MlKem768, _>(&server_pk, &mut stream).await?
+    };
 
     // Rotate ticket (if any) and drop the session (we only warm up)
     if let Some(newt) = session.new_ticket().map(|b| b.to_vec()) {
         *TICKET.lock().unwrap() = Some(newt);
     }
     let s = session.into_inner();
-    tracing::info!("kemtls probe: resumed={} sid={:?}", s.resumed || resumed, s.session_id);
+    let is_resumed = s.resumed || was_resumed;
+    tracing::info!("kemtls probe: resumed={} sid={:?}", is_resumed, s.session_id);
     Ok(())
 }
 // ─────────────────────────── end KEMTLS resume probe ─────────────────────────
@@ -881,8 +879,7 @@ async fn main() -> Result<()> {
         match lc.expected_chain_id_20().call().await {
             Ok(b20) => {
                 // handle both FixedBytes<20> and [u8;20] via Into
-                let arr: [u8; 20] = b20.into();
-                H160::from(arr)
+                H160::from(b20)
             }
             Err(e) => {
                 warn!("failed to read expectedChainId20(): {} — defaulting to 0x00..00", e);

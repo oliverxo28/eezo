@@ -1,7 +1,7 @@
 #![cfg(feature = "plonk_kzg")]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use crate::backend::plonk_kzg::types::{PlonkPk, PlonkVk};
 
 /// Default key directory for dev. You can change this later or make it configurable.
