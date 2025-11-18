@@ -92,6 +92,7 @@ pub enum SyncError {
     NotFound,
     #[error("persistence error: {0}")]
     Persistence(String),
+	#[allow(dead_code)]
     #[error("anchor not available")]
     AnchorMissing,
     #[error("invalid argument: {0}")]
@@ -484,6 +485,7 @@ pub fn page_snapshot(
 pub type SnapshotChunk = SnapshotPage;
 
 #[cfg(feature = "state-sync")]
+#[allow(dead_code)]
 pub fn handle_get_snapshot(
     db: &Persistence,
     prefix: &[u8],
@@ -589,6 +591,7 @@ fn http_5xx(route: &str) {
 // Minimal SSZ encode helpers local to this module (Phase 2, manifest-only).
 #[cfg(all(feature = "state-sync", feature = "state-sync-http"))]
 mod ssz_min {
+	#[allow(dead_code)]
     pub trait Encode {
         fn ssz_write(&self, out: &mut Vec<u8>);
         fn ssz_bytes(&self) -> Vec<u8> {
@@ -634,6 +637,7 @@ use ssz_min::Encode;
 // Snapshot v2 manifest (minimal) — encoded via ssz_min::Encode
 #[cfg(all(feature = "state-sync", feature = "state-sync-http"))]
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SnapshotManifestV2 {
     height: u64,
     codec_version: u64, // fixed 2
@@ -652,6 +656,7 @@ impl Encode for SnapshotManifestV2 {
 // Delta v2 manifest (skeleton; multiproofs will populate keys/values later).
 #[cfg(all(feature = "state-sync", feature = "state-sync-http"))]
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DeltaManifestV2 {
     base_height: u64,
     new_height: u64,
@@ -673,6 +678,7 @@ impl Encode for DeltaManifestV2 {
 
 // Build a manifest at/for `height`. If `height == u64::MAX`, use latest anchor.
 #[cfg(all(feature = "state-sync", feature = "state-sync-http"))]
+#[allow(dead_code)]
 fn build_snapshot_manifest_v2(
     db: &Persistence,
     height: u64,
@@ -710,6 +716,7 @@ fn build_snapshot_manifest_v2(
 // Build a (skeleton) delta manifest for [from, to] (inclusive).
 // For now, this only returns the target root; proofs arrive in the next step.
 #[cfg(all(feature = "state-sync", feature = "state-sync-http"))]
+#[allow(dead_code)]
 fn build_delta_manifest_v2(
     db: &Persistence,
     from: u64,
@@ -755,6 +762,7 @@ fn build_delta_manifest_v2(
 
 #[cfg(all(feature = "state-sync", feature = "state-sync-http"))]
 #[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
 struct V1SnapQuery {
     prefix: Option<String>,
     cursor: Option<String>,
@@ -772,6 +780,7 @@ pub(crate) struct SnapV2Query {
 
 #[cfg(all(feature = "state-sync", feature = "state-sync-http"))]
 #[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct DeltaV2Query {
     v: Option<u32>,
     from: u64,
@@ -790,6 +799,7 @@ pub struct DeltaManifestV2Query {
 // ----- HTTP Handlers -----
 
 #[cfg(all(feature = "state-sync", feature = "state-sync-http"))]
+#[allow(dead_code)]
 pub async fn get_anchor(State(st): State<AppState>) -> impl IntoResponse {
     match handle_get_anchor(&st.db) {
         Ok(a) => Json(a).into_response(),
@@ -805,6 +815,7 @@ pub async fn get_anchor(State(st): State<AppState>) -> impl IntoResponse {
 /// v1 (default): JSON page (prefix/cursor/limit)
 /// v2: SSZ-encoded SnapshotManifestV2 (use /state/snapshot/blob for the payload)
 #[cfg(all(feature = "state-sync", feature = "state-sync-http"))]
+#[allow(dead_code)]
 pub async fn get_snapshot(
     State(st): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
@@ -875,6 +886,7 @@ pub async fn get_snapshot(
 
 #[derive(Deserialize)]
 pub struct SnapV2ManifestQuery {
+	#[allow(dead_code)]
     pub v: Option<u8>,       // expect 2
     pub height: Option<u64>, // default: latest (we’ll treat None as 0 for now)
 }
@@ -1041,6 +1053,7 @@ pub async fn get_snapshot_blob(
 /// GET /state/delta?v=2&from=<h1>&to=<h2>
 /// Body: SSZ-encoded DeltaManifestV2 (multiproofs in a later patch)
 #[cfg(all(feature = "state-sync", feature = "state-sync-http"))]
+#[allow(dead_code)]
 pub async fn get_delta(
     State(st): State<AppState>,
     Query(q): Query<DeltaV2Query>,

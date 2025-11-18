@@ -203,7 +203,7 @@ pub static EEZO_NODE_PEER_PING_FAIL_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 // --- State sync metrics ---
-// ────────────────────────────────────────────────────────────────[...]
+// ─────────────────────────────────────────────────────────────────────────────
 #[cfg(feature = "state-sync")]
 pub static STATE_SYNC_SNAPSHOT_BYTES_TOTAL: Lazy<prometheus::IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -243,6 +243,7 @@ pub static STATE_SYNC_SNAPSHOTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 #[cfg(feature = "state-sync")]
+#[allow(dead_code)]
 pub static STATE_SYNC_DELTAS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "eezo_state_sync_deltas_total",
@@ -398,6 +399,7 @@ pub fn state_sync_retry_inc() {
 
 /// Helper: increment error counter for failed state-sync operations.
 #[inline]
+#[allow(dead_code)]
 pub fn state_sync_error_inc() {
     #[cfg(feature = "metrics")]
     {
@@ -427,6 +429,7 @@ pub static SS_DELTA_BATCHES_APPLIED_TOTAL: once_cell::sync::Lazy<IntCounter> = o
 });
 
 #[cfg(feature = "metrics")]
+#[allow(dead_code)]
 pub static STATE_SYNC_DELTA_V2_SSZ_SERVE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "eezo_state_sync_delta_v2_ssz_serve_total",
@@ -436,6 +439,7 @@ pub static STATE_SYNC_DELTA_V2_SSZ_SERVE_TOTAL: Lazy<IntCounter> = Lazy::new(|| 
 });
 
 #[cfg(feature = "metrics")]
+#[allow(dead_code)]
 pub static STATE_SYNC_DELTA_V2_SSZ_NOTFOUND_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "eezo_state_sync_delta_v2_ssz_notfound_total",
@@ -656,6 +660,7 @@ pub static EEZO_QC_SIDECAR_V2_ENFORCE_FAIL_TOTAL: Lazy<IntCounter> = Lazy::new(|
 });
  /// Eagerly register T41.3 QC sidecar metrics so they show on /metrics immediately.
 #[cfg(feature = "metrics")]
+#[allow(dead_code)]
 pub fn register_t41_qc_sidecar_metrics() {
     let _ = &*EEZO_QC_SIDECAR_V2_EMITTED_TOTAL;
     let _ = &*EEZO_QC_SIDECAR_V2_VERIFY_OK_TOTAL;
@@ -837,6 +842,7 @@ pub fn register_t34_rotation_metrics() {
 
 /// Helper to set the dual-accept window gauge (0/1).
 #[inline]
+#[allow(dead_code)]
 pub fn suite_window_set(open: bool) {
     #[cfg(feature = "metrics")]
     {
@@ -848,6 +854,7 @@ pub fn suite_window_set(open: bool) {
 
 /// Helper to record a rotation event (policy flip).
 #[inline]
+#[allow(dead_code)]
 pub fn suite_rotation_inc() {
     #[cfg(feature = "metrics")]
     {

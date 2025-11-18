@@ -109,6 +109,7 @@ pub struct MintResponse {
 
 /// Simple rotation status DTO.
 #[derive(Serialize)]
+#[allow(dead_code)]
 pub struct RotationStatus {
     pub active_suite_id: u8,
     pub next_suite_id: Option<u8>,
@@ -320,6 +321,7 @@ pub async fn get_outbox_one(
 }
 
 /// GET /bridge/rotation — surface rotation posture/state for clients
+#[allow(dead_code)]
 pub async fn get_bridge_rotation(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let height_now = state.block_height.load(Ordering::Relaxed);
 let active = state.active_suite_id;
@@ -1022,6 +1024,7 @@ B64.decode(s).ok()
 
 // ── rotation-aware checkpoint reader (T34.2) ────────────────────────────────
 #[cfg(feature = "checkpoints")]
+#[allow(dead_code)]
 fn read_checkpoint_any(height: u64) -> Result<(PathBuf, BridgeHeader), &'static str> {
     // datadir-aware read needed here; using default path for now
     let default_dir = PathBuf::from(CHECKPOINTS_DIR);

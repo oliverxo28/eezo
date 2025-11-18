@@ -88,8 +88,10 @@ const ROUTE_ANCHOR: &str = "/state/anchor";
 const ROUTE_DELTA: &str = "/state/delta";
 // --- bridge view (read-only) ---
 #[cfg(feature = "checkpoints")]
+#[allow(dead_code)]
 const ROUTE_BRIDGE_LATEST: &str = "/bridge/header/latest";
 #[cfg(feature = "checkpoints")]
+#[allow(dead_code)]
 const ROUTE_BRIDGE_BY_HEIGHT: &str = "/bridge/header/{height}";
 
 // +++ add: high-level node state route +++
@@ -527,6 +529,7 @@ fn list_checkpoint_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf
 
 /// GET /bridge/header/latest
 #[cfg(feature = "checkpoints")]
+#[allow(dead_code)]
 pub async fn get_bridge_header_latest(
     State(state): State<crate::AppState>,
 ) -> Result<Json<BridgeHeader>, ApiErr> {
@@ -582,6 +585,7 @@ pub async fn get_bridge_header_latest(
 
 /// GET /bridge/header/{height}
 #[cfg(feature = "checkpoints")]
+#[allow(dead_code)]
 pub async fn get_bridge_header_by_height(
     Path(height): Path<u64>,
     State(state): State<crate::AppState>,
