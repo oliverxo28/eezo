@@ -54,5 +54,5 @@ fn identity_persists_across_restarts() {
     let contents = std::fs::read_to_string(&ident_path).unwrap();
     let _parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
 
-    let _ = child1.kill();
+    child1.kill();
 }

@@ -1,7 +1,5 @@
 mod common;
 
-use std::fs;
-
 /// 1. Port conflict detection
 #[test]
 fn port_conflict_fails_fast() {

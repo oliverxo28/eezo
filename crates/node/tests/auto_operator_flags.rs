@@ -74,7 +74,7 @@ fn spawn_node_with_logs(
         let name = name.to_string();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 println!("{} STDOUT: {}", name, line);
                 let mut s = buf.lock().unwrap();
                 s.push_str(&line);
@@ -89,7 +89,7 @@ fn spawn_node_with_logs(
         let name = name.to_string();
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 eprintln!("{} STDERR: {}", name, line);
                 let mut s = buf.lock().unwrap();
                 s.push_str(&line);

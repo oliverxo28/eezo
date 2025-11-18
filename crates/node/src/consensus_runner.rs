@@ -127,7 +127,8 @@ impl CoreRunnerHandle {
                 // run exactly one slot - assuming run_one_slot is sync based on teacher feedback
                 let outcome = {
                     let mut guard = node_c.lock().await;
-                    run_one_slot(&mut *guard, rollback_on_error)
+                    // FIX: Removed extraneous closing parenthesis ')' here.
+                    run_one_slot(&mut guard, rollback_on_error)
                 };
                 #[cfg(feature = "metrics")]
                 if let Ok(SlotOutcome::Committed { .. }) = outcome {
@@ -175,7 +176,7 @@ impl CoreRunnerHandle {
                                 if hdr.height == height { // Sanity check height
 
                                     // 1. Construct the full block
-                                    let block = Block { header: hdr.clone(), txs: txs };
+                                    let block = Block { header: hdr.clone(), txs };
 
                                     last_commit_hash_opt = Some(block.header.hash());
 
@@ -528,7 +529,8 @@ impl CoreRunnerHandle {
                 // Assuming run_one_slot is sync
                 let outcome = {
                     let mut guard = node_c.lock().await;
-                    run_one_slot(&mut *guard, rollback_on_error)
+                    // FIX: Removed extraneous closing parenthesis ')' here.
+                    run_one_slot(&mut guard, rollback_on_error)
                 };
                 #[cfg(feature = "metrics")]
                 if let Ok(SlotOutcome::Committed { .. }) = outcome {
@@ -570,7 +572,7 @@ impl CoreRunnerHandle {
                                 if hdr.height == height { // Sanity check height
 
                                     // 1. Construct the full block
-                                    let block = Block { header: hdr.clone(), txs: txs };
+                                    let block = Block { header: hdr.clone(), txs };
 
                                     last_commit_hash_opt = Some(block.header.hash());
 
@@ -771,6 +773,23 @@ impl CoreRunnerHandle {
                                         }
                                     }
                                 }
+                                // T41.4: strict mode — require sidecar at cutover+1; reject if missing/bad
+                                if qc_sidecar_enforce_on() {
+                                    if let Some(rot) = rotation_policy_from_env() {
+                                        if should_emit_qc_sidecar_v2(height, &rot) {
+                                            let present = hdr.qc_sidecar_v2.is_some();
+                                            let valid = present && validate_sidecar_v2_for_header(&hdr).is_ok();
+                                            if valid {
+                                                #[cfg(feature = "metrics")] qc_sidecar_enforce_ok_inc();
+                                            } else {
+                                                #[cfg(feature = "metrics")] qc_sidecar_enforce_fail_inc();
+                                                log::error!("qc-sidecar(enforce): missing or invalid at h={} → refusing to write checkpoint", height);
+                                                // Skip writing this checkpoint
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
                                 // --- MODIFIED BLOCK: skip default writer when outbox task is enabled ---
                                 let outbox_enabled = std::env::var("EEZO_BRIDGE_OUTBOX_ENABLED")
                                     .map(|v| { let v = v.to_lowercase(); v == "1" || v == "true" || v == "yes" })
@@ -829,9 +848,8 @@ impl CoreRunnerHandle {
         F: FnOnce(&mut SingleNode) -> R,
     {
         let mut g = self.node.lock().await;
-        f(&mut *g)
+        f(&mut g)
     }
 }
 
 // (T36.5 removed local stub emitter; runner emits directly.)
-

@@ -36,7 +36,7 @@ fn metrics_endpoint_serves_when_feature_enabled() {
 
     // /config reflects metrics
     let cfg: serde_json::Value =
-        reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", listen_port))
+        reqwest::blocking::get(format!("http://127.0.0.1:{}/config", listen_port))
             .unwrap()
             .json()
             .unwrap();
@@ -45,7 +45,7 @@ fn metrics_endpoint_serves_when_feature_enabled() {
 
     // /metrics is actually served (feature = "metrics")
     let resp =
-        reqwest::blocking::get(&format!("http://127.0.0.1:{}/metrics", listen_port)).unwrap();
+        reqwest::blocking::get(format!("http://127.0.0.1:{}/metrics", listen_port)).unwrap();
     assert!(resp.status().is_success());
 
     child.kill();

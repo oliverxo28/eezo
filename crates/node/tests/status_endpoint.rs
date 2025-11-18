@@ -34,22 +34,22 @@ fn status_reports_pid_uptime_ready_and_build_info() {
     assert!(common::wait_until_ready(port, 10_000));
 
     let url = format!("http://127.0.0.1:{}/status", port);
-    let v: serde_json::Value = reqwest::blocking::get(&url).unwrap().json().unwrap();
+    let v: serde_json::Value = reqwest::blocking::get(url).unwrap().json().unwrap();
 
     // basic shape checks
     assert!(v["pid"].as_u64().unwrap() > 0);
     assert!(v["uptime_secs"].as_u64().is_some());
-    assert_eq!(v["ready"].as_bool().unwrap(), true);
+    assert!(v["ready"].as_bool().unwrap());
     assert_eq!(v["listen"], format!("127.0.0.1:{}", port));
     assert_eq!(v["datadir"].as_str().unwrap(), datadir);
-    assert!(v["version"].as_str().unwrap().len() > 0);
+    assert!(!v["version"].as_str().unwrap().is_empty());
     // git_sha is Option<String>, allow null or non-empty string
     if !v["git_sha"].is_null() {
-        assert!(v["git_sha"].as_str().unwrap().len() > 0);
+        assert!(!v["git_sha"].as_str().unwrap().is_empty());
     }
 
     // degrade then verify ready=false in /status
-    let _ = reqwest::blocking::get(&format!(
+    let _ = reqwest::blocking::get(format!(
         "http://127.0.0.1:{}/_admin/degrade?token={}",
         port, "t23token"
     )); // no token set -> 404; set one to exercise, or just skip

@@ -32,12 +32,12 @@ fn metrics_env_off_reflected_in_config() {
 
     // Verify /config reflects metrics_off
     let cfg: serde_json::Value =
-        reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", listen_port))
+        reqwest::blocking::get(format!("http://127.0.0.1:{}/config", listen_port))
             .unwrap()
             .json()
             .unwrap();
 
-    assert_eq!(cfg["metrics_on"].as_bool().unwrap(), false);
+    assert!(!cfg["metrics_on"].as_bool().unwrap());
     // Port still present as an integer; we don't depend on it when off
     assert!(cfg["metrics_port"].is_u64());
 

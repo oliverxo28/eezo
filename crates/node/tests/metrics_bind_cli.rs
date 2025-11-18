@@ -38,7 +38,7 @@ fn metrics_bind_cli_reflected_in_config() {
 
     // Read back the effective config from /config
     let v: serde_json::Value =
-        reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", listen_port))
+        reqwest::blocking::get(format!("http://127.0.0.1:{}/config", listen_port))
             .unwrap()
             .json()
             .unwrap();
@@ -46,7 +46,7 @@ fn metrics_bind_cli_reflected_in_config() {
     assert_eq!(v["node"]["listen"], format!("127.0.0.1:{}", listen_port));
     assert_eq!(v["node"]["datadir"].as_str().unwrap(), datadir);
     // metrics are carried in the top-level runtime section
-    assert_eq!(v["metrics_on"].as_bool().unwrap(), true);
+    assert!(v["metrics_on"].as_bool().unwrap());
     assert_eq!(v["metrics_port"].as_u64().unwrap() as u16, metrics_port);
 
     child.kill();

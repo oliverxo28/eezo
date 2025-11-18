@@ -23,7 +23,7 @@ fn node_starts_with_valid_genesis() {
 
     let ok = common::wait_until_ready(port, 15_000);
     assert!(ok, "node did not become ready with valid --genesis");
-    let _ = child.kill();
+    child.kill();
 }
 
 #[test]

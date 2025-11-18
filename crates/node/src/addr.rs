@@ -1,7 +1,6 @@
 // crates/node/src/addr.rs
 
 use eezo_ledger::address::Address;
-use hex;
 
 /// Parse a user-supplied address into the canonical 20-byte ledger `Address`.
 ///

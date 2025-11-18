@@ -604,7 +604,7 @@ pub async fn get_bridge_header_by_height(
     for p in files {
         match read_bridge_header(&p) {
             Ok(h) if h.height == height => {
-                if cand.as_ref().map_or(true, |c| h.timestamp > c.timestamp) {
+                if cand.as_ref().is_none_or(|c| h.timestamp > c.timestamp) {
                     cand = Some(h);
                 }
             }

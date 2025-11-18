@@ -47,11 +47,11 @@ log_level = "warn"
         let stderr = child.read_stderr();
         println!("Node stdout:\n{}", stdout);
         println!("Node stderr:\n{}", stderr);
-        let _ = child.kill();
+        child.kill();
         panic!("Node did not become ready within timeout");
     }
 
-    let v: serde_json::Value = reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", port))
+    let v: serde_json::Value = reqwest::blocking::get(format!("http://127.0.0.1:{}/config", port))
         .expect("Failed to fetch /config")
         .json()
         .expect("Failed to parse JSON");
@@ -61,7 +61,7 @@ log_level = "warn"
     assert_eq!(v["node"]["log_level"], "debug");
 
     // Clean shutdown
-    let _ = child.kill();
+    child.kill();
     let _ = child.wait();
 }
 
@@ -105,12 +105,12 @@ log_level = "warn"
         let stderr = child.read_stderr();
         println!("Node stdout:\n{}", stdout);
         println!("Node stderr:\n{}", stderr);
-        let _ = child.kill();
+        child.kill();
         panic!("Node did not become ready within timeout");
     }
 
     // Query and assert (while node is alive)
-    let v: serde_json::Value = reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", port))
+    let v: serde_json::Value = reqwest::blocking::get(format!("http://127.0.0.1:{}/config", port))
         .expect("Failed to fetch /config")
         .json()
         .expect("Failed to parse JSON");
@@ -123,7 +123,7 @@ log_level = "warn"
     assert_eq!(v["node"]["log_level"], "error");
 
     // Clean shutdown
-    let _ = child.kill();
+    child.kill();
     let _ = child.wait();
 }
 
@@ -169,7 +169,7 @@ fn config_file_missing_fails_fast() {
     println!("Process did not exit, stdout:\n{}", stdout);
     println!("Process did not exit, stderr:\n{}", stderr);
 
-    let _ = child.kill();
+    child.kill();
     let _ = child.wait();
     panic!("Process did not exit within 5 seconds for missing config file");
 }
@@ -223,7 +223,7 @@ log_level = "warn"
     println!("Process did not exit, stdout:\n{}", stdout);
     println!("Process did not exit, stderr:\n{}", stderr);
 
-    let _ = child.kill();
+    child.kill();
     let _ = child.wait();
     panic!("Process did not exit within 5 seconds for malformed config file");
 }

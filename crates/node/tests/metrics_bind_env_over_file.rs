@@ -59,7 +59,7 @@ log_level = "warn"
 
     // Validate effective config
     let v: serde_json::Value =
-        reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", listen_port))
+        reqwest::blocking::get(format!("http://127.0.0.1:{}/config", listen_port))
             .unwrap()
             .json()
             .unwrap();
@@ -70,7 +70,7 @@ log_level = "warn"
     assert_eq!(v["node"]["datadir"].as_str().unwrap(), datadir);
 
     // ENV metrics reflected
-    assert_eq!(v["metrics_on"].as_bool().unwrap(), true);
+    assert!(v["metrics_on"].as_bool().unwrap());
     assert_eq!(v["metrics_port"].as_u64().unwrap() as u16, metrics_port);
 
     child.kill();

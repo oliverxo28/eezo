@@ -163,10 +163,7 @@ static TX_REJECTED_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::L
 	).expect("metric")
 });
 fn check_admin_token(state: &AppState, token: Option<&str>) -> bool {
-    match (&state.admin_token, token) {
-        (Some(expected), Some(provided)) if expected == provided => true,
-        _ => false,
-    }
+    matches!((&state.admin_token, token), (Some(expected), Some(provided)) if expected == provided)
 }
 
 async fn config_handler(State(state): State<AppState>) -> Json<RuntimeConfigView> {
@@ -1556,7 +1553,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Resolved config path: {:?}", config_path);
     if let Some(ref path) = config_path {
         println!("Attempting to load config from: {}", path);
-        let txt = std::fs::read_to_string(&path)
+        let txt = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file: {}", path))?;
         let from_file: NodeCfg = toml::from_str(&txt)
             .with_context(|| format!("invalid TOML in config file: {}", path))?;
@@ -1621,7 +1618,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut env_peers = parse_peers_from_env();
     if !env_peers.is_empty() {
-        cfg.peers.extend(env_peers.drain(..));
+        cfg.peers.append(&mut env_peers);
     }
     cfg.peers = dedup_preserve_order(cfg.peers);
 
@@ -2287,10 +2284,7 @@ async fn main() -> anyhow::Result<()> {
         env_u64_opt(&["EEZO_ROTATION_DUAL_UNTIL","EEZO_DUAL_ACCEPT_UNTIL"])
             .or(gen_until);
     // A simple boolean for logs (and later, a metric/gauge in metrics.rs)
-    let window_open = match (next_suite_id, dual_accept_until) {
-        (Some(_), Some(h)) if h > 0 => true,
-        _ => false,
-    };
+    let window_open = matches!((next_suite_id, dual_accept_until), (Some(_), Some(h)) if h > 0);
     // PATCH: Set the Prometheus gauge for crypto-suite rotation window
 	#[cfg(feature = "metrics")]
 	{
@@ -2466,8 +2460,7 @@ async fn main() -> anyhow::Result<()> {
         db: persistence.clone(),
         // t36: consensus core runner handle (started in T36.2)
         #[cfg(feature = "pq44-runtime")]
-       
-         core_runner: core_runner,
+        core_runner,
         #[cfg(all(feature = "consensus-core-adapter", feature = "consensus-core-testing", not(feature = "pq44-runtime")))]
         core_runner: core_runner.clone(), // Clashes in name if features overlap
         #[cfg(all(feature = "consensus-core-adapter", feature = "consensus-core-testing", not(feature = "pq44-runtime")))]
@@ -2607,7 +2600,7 @@ async fn main() -> anyhow::Result<()> {
                                     "✅ bridge: wrote {} checkpoint file(s) at height {} (e.g. {})",
                                     paths.len(),
                                     h,
-                                    paths.get(0).map(|p| p.display().to_string()).unwrap_or_default()
+                                    paths.first().map(|p| p.display().to_string()).unwrap_or_default()
                                 );
                                 #[cfg(feature = "metrics")]
                                 {
@@ -2835,10 +2828,14 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(tx_cid) = parse_chain_id_hex(&env.tx.chain_id) {
                         if tx_cid != hex::decode(&state_clone.runtime_config.chain_id_hex)
                             .ok()
-                            .and_then(|v| { if v.len()==20 { let mut a=[0u8;20]; a.copy_from_slice(&v); Some(a) } else
- 
-                               { None }})
-                            .unwrap_or([0u8;20])
+                            .and_then(|v| {
+                                if v.len() == 20 {
+                                    let mut a = [0u8; 20];
+                                    a.copy_from_slice(&v);
+                                    Some(a)
+                                } else { None }
+                            })
+                            .unwrap_or([0u8; 20])
                         {
                    
                          ok = false;

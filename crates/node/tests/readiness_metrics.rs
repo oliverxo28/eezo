@@ -41,7 +41,7 @@ fn readiness_metrics_gauge_and_counters() {
     assert!(body.contains("eezo_node_ready 1"));
 
     // Degrade
-    let _ = reqwest::blocking::get(&format!(
+    let _ = reqwest::blocking::get(format!(
         "http://127.0.0.1:{}/_admin/degrade?token={}",
         port, admin_token
     ))
@@ -55,7 +55,7 @@ fn readiness_metrics_gauge_and_counters() {
     assert!(body.contains("eezo_node_ready_degrade_total"));
 
     // Restore
-    let _ = reqwest::blocking::get(&format!(
+    let _ = reqwest::blocking::get(format!(
         "http://127.0.0.1:{}/_admin/restore?token={}",
         port, admin_token
     ))

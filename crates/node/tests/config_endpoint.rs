@@ -39,7 +39,7 @@ fn config_endpoint_returns_runtime_config() {
         let stderr = child.read_stderr();
         eprintln!("Node stdout:\n{stdout}");
         eprintln!("Node stderr:\n{stderr}");
-        let _ = child.kill();
+        child.kill();
         let _ = child.try_wait();
         panic!("Node did not become ready within timeout");
     }
@@ -70,6 +70,6 @@ fn config_endpoint_returns_runtime_config() {
     assert!(v["first_seen"].as_u64().unwrap() > 0);
 
     // clean shutdown
-    let _ = child.kill();
+    child.kill();
     let _ = child.try_wait();
 }
