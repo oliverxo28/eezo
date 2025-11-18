@@ -69,8 +69,8 @@ fn t29_9_policy_allow_unsigned_anchor_bootstraps() {
     assert!(wait_until_ready(client_port, 7_000), "client should bootstrap with allow-unsigned policy");
 
     // cleanup
-    client.kill();
+    let _ = client.kill();
     let _ = client.wait(); // reap to avoid zombie_processes
-    server.kill();
+    let _ = server.kill();
     let _ = server.wait(); // reap to avoid zombie_processes
 }

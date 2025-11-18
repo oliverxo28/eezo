@@ -7,7 +7,6 @@ use crate::metrics::{
 };
 
 #[cfg_attr(not(test), allow(dead_code))]
-
 #[cfg(feature = "state-sync")]
 use eezo_ledger::{
     checkpoints::{anchor_signing_bytes, AnchorSig, CheckpointAnchor},
@@ -829,10 +828,8 @@ pub async fn get_snapshot(
                 return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
             }
 
-            let prefix_bytes = match prefix_b64.as_ref().and_then(|p| B64.decode(p).ok()) {
-                Some(bytes) => bytes,
-                None => Vec::new(),
-            };
+            let prefix_bytes: Vec<u8> =
+                prefix_b64.as_ref().and_then(|p| B64.decode(p).ok()).unwrap_or_default();
 
             let cursor_bytes = cursor_b64.and_then(|c| B64.decode(c).ok());
 
@@ -940,7 +937,7 @@ pub async fn get_snapshot_manifest_v2(
         }
         Err(eezo_ledger::persistence::ExportPersistError::NotFound) => {
             // Nothing to serve (no anchor/genesis yet) → 204 No Content for pollers.
-            return StatusCode::NO_CONTENT.into_response();
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
             log::warn!("snapshot manifest v2 export error: {e}");
@@ -1028,7 +1025,7 @@ pub async fn get_snapshot_blob(
         }
         Err(eezo_ledger::persistence::ExportPersistError::NotFound) => {
             // Nothing to serve at this height → 204 No Content.
-            return StatusCode::NO_CONTENT.into_response();
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
             http_5xx(ROUTE_SNAP_BLOB);
@@ -1085,7 +1082,7 @@ pub async fn get_delta(
                     #[cfg(feature = "metrics")]
                     STATE_SYNC_DELTA_V2_SSZ_NOTFOUND_TOTAL.inc();
                     // No delta for this (from,to) window yet → 204 No Content.
-                    return StatusCode::NO_CONTENT.into_response();
+                    StatusCode::NO_CONTENT.into_response()
                 }
                 Err(e) => {
                     log::warn!("delta v2 ssz export error: {e}");
@@ -1135,7 +1132,7 @@ pub async fn get_delta_manifest_v2(
         }
         Err(eezo_ledger::persistence::ExportPersistError::NotFound) => {
             // Nothing to serve for this window → 204 No Content.
-            return StatusCode::NO_CONTENT.into_response();
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
             log::warn!("delta v2 ssz export error: {e}");
@@ -1167,7 +1164,7 @@ pub struct BootstrapCfg<'a> {
 fn backoff_dur_ms(base: u64, cap: u64, attempt: usize) -> u64 {
     // exponential with light deterministic “jitter” (no rand dep)
     let exp = base.saturating_mul(1u64 << attempt.min(16));
-    let jitter_pc = ((attempt as u64 * 137) % 21) as u64; // 0..20%
+    let jitter_pc = (attempt as u64 * 137) % 21; // 0..20%
     let with_jitter = exp + (exp * jitter_pc / 100);
     with_jitter.min(cap)
 }
@@ -1445,7 +1442,10 @@ pub fn emit_checkpoint_from_current_anchor(
                             qc_sidecar_enforce_ok_inc();
                         } else {
                             qc_sidecar_enforce_fail_inc();
-                            log::error!("qc-sidecar(state_sync enforce): missing/invalid at h={} → refusing to write", a.height);
+                            log::error!(
+                                "qc-sidecar(state_sync enforce): missing/invalid at h={} → refusing to write",
+                                a.height
+                            );
                             return Ok(None);
                         }
                     }
@@ -1507,17 +1507,15 @@ fn emit_rotation_checkpoints_from_anchor(
         // Write each header to the corresponding suite dir
         for h in headers {
             // T41.4: strict mode for dual-emit flow as well
-            if qc_sidecar_enforce_on() {
-                if should_emit_qc_sidecar_v2(a.height, policy) {
-                    let present = h.qc_sidecar_v2.is_some();
-                    let valid = present && validate_sidecar_v2_for_header(&h).is_ok();
-                    if valid {
-                        qc_sidecar_enforce_ok_inc();
-                    } else {
-                        qc_sidecar_enforce_fail_inc();
-                        log::error!("qc-sidecar(state_sync dual enforce): missing/invalid at h={} → dropping header", a.height);
-                        continue; // drop this header from being written
-                    }
+            if qc_sidecar_enforce_on() && should_emit_qc_sidecar_v2(a.height, policy) {
+                let present = h.qc_sidecar_v2.is_some();
+                let valid = present && validate_sidecar_v2_for_header(&h).is_ok();
+                if valid {
+                    qc_sidecar_enforce_ok_inc();
+                } else {
+                    qc_sidecar_enforce_fail_inc();
+                    log::error!("qc-sidecar(state_sync dual enforce): missing/invalid at h={} → dropping header", a.height);
+                    continue; // drop this header from being written
                 }
             }
             // T41.3: reader-only validate and bump metrics
