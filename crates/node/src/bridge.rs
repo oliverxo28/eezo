@@ -4,7 +4,6 @@ use axum::{
     Json,
 };
 // +++ Added log import +++
-use log;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;

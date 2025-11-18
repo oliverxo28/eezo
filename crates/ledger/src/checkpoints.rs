@@ -718,6 +718,17 @@ pub struct CheckpointArgs<'a> {
     timestamp: u64,
     finality_depth: u64,
 }
+impl<'a> CheckpointArgs<'a> {
+    /// Public constructor that takes all fields.
+    #[inline]
+    pub const fn new(
+        policy: &'a RotationPolicy, height: u64, header_hash: [u8; 32],
+        state_root_v2: [u8; 32], tx_root_v2: [u8; 32], timestamp: u64,
+        finality_depth: u64,
+    ) -> Self {
+        Self { policy, height, header_hash, state_root_v2, tx_root_v2, timestamp, finality_depth }
+    }
+}
 
 /// Emit one or two rotation-aware `BridgeHeader` JSON files for `height` into the default
 /// `proof/checkpoints/` directory. Callers pass the already-known values (typically fetched

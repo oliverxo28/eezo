@@ -41,8 +41,6 @@ use axum::{
 use axum::response::{IntoResponse, Response};
 #[cfg(feature = "dev-tools")]
 use axum::body::Bytes;
-#[cfg(feature = "dev-tools")]
-use blake3; // used by post_tx_raw_admin
 // PathBuf is needed even when only `checkpoints` is enabled (e.g., resolve_outbox_dir).
 use std::path::PathBuf;
 use clap::Parser;
@@ -63,14 +61,12 @@ use eezo_ledger::{ensure_genesis, GenesisConfig};
 use tokio::sync::{RwLock, Mutex as AsyncMutex};
 use eezo_ledger::bridge::{BridgeState, OutboxEvent};
 use std::collections::{HashMap as Map, VecDeque};
-use hex;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
 // (removed duplicate PathBuf import)
-use std::fs;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
@@ -2596,16 +2592,15 @@ async fn main() -> anyhow::Result<()> {
 
                         let header_hash = eezo_ledger::block::header_hash(&hdr);
                         let finality_depth = 2u64;
+						
+                        // Fix: Use the full 7-argument public constructor
+                        let args = eezo_ledger::checkpoints::CheckpointArgs::new(
+                            &policy, h, header_hash, state_root, tx_root, ts_secs, finality_depth
+                        );
 
                         match eezo_ledger::checkpoints::emit_bridge_checkpoint_with_path(
                             &outbox_dir,
-                            &policy,
-                            h,
-                            header_hash,
-                            state_root,
-                            tx_root,
-                            ts_secs,
-                            finality_depth,
+                            &args,
                         ) {
                             Ok(paths) => {
                                 log::info!(
