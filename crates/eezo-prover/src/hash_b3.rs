@@ -280,7 +280,7 @@ fn be_bytes_to_u32(b: [u8;4]) -> u32 { u32::from_be_bytes(b) }
 /// (We pick BE for a canonical limb order; choice is arbitrary as long as tests match.)
 fn rotr_bytes_8_or_16_be(x: u32, k: u32) -> u32 {
     debug_assert!(k == 8 || k == 16);
-    let mut v = u32_to_be_bytes(x);
+    let v = u32_to_be_bytes(x);
     // rotr 8:  [b0,b1,b2,b3] -> [b3,b0,b1,b2]
     // rotr16: [b0,b1,b2,b3] -> [b2,b3,b0,b1]
     let out = match k {

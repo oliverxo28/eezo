@@ -24,9 +24,8 @@ fn u32_le(n: u32) -> [u8; 4] { n.to_le_bytes() }
 #[inline]
 fn split32_to_u64x4(b: &[u8; 32]) -> [u64; 4] {
     let mut lanes = [0u64; 4];
-    for i in 0..4 {
-        let off = i * 8;
-        lanes[i] = u64::from_le_bytes(b[off..off + 8].try_into().unwrap());
+    for (i, item) in lanes.iter_mut().enumerate() { // <-- FIXED: better iteration pattern
+        *item = u64::from_le_bytes(b[i * 8..(i + 1) * 8].try_into().unwrap());
     }
     lanes
 }
@@ -43,9 +42,9 @@ fn set_htr_from_bytes(r: &mut Row, htr: &[u8;32]) {
 /// Fill the invariant columns for a row.
 #[inline]
 fn set_block_constants(r: &mut Row, pi: &AirPiV2) {
-    r.0[idx(Col::Height)] = pi.height as u64;
-    r.0[idx(Col::SuiteId)] = pi.suite_id as u64;
-    r.0[idx(Col::CircuitVer)] = pi.circuit_version as u64;
+    r.0[idx(Col::Height)] = pi.height; // <-- FIXED: remove unnecessary cast
+    r.0[idx(Col::SuiteId)] = pi.suite_id.into(); // <-- FIXED: use into() for conversion
+    r.0[idx(Col::CircuitVer)] = pi.circuit_version.into(); // <-- FIXED: use into() for conversion
 }
 
 /// Build a mock trace per the absorption schedule (no hashing yet).

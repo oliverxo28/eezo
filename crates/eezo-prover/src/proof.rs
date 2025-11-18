@@ -89,11 +89,11 @@ pub fn prove(trace: &Trace, air: &AirSpec) -> StarkProof {
     // ---------------------------------------------------------------------
     let mut row_hashes = Vec::with_capacity(row_count);
     for r in rows {
-        let h = hash(&r.to_le_bytes()).as_bytes().clone();
+        let h = *hash(&r.to_le_bytes()).as_bytes();
         // reduce 32 bytes → u64
         let mut v = 0u64;
-        for i in 0..8 {
-            v |= (h[i] as u64) << (8 * i);
+        for (i, &byte) in h.iter().take(8).enumerate() {
+            v |= (byte as u64) << (8 * i);
         }
         row_hashes.push(v);
     }
@@ -145,7 +145,7 @@ pub fn prove(trace: &Trace, air: &AirSpec) -> StarkProof {
     // For each layer, compute Merkle proofs & record claimed values at those indices.
     let mut layer_openings: Vec<Vec<MerkleProof>> = Vec::with_capacity(fri.layers.len());
     let mut layer_values:   Vec<Vec<u64>>        = Vec::with_capacity(fri.layers.len());
-    for (lid, layer) in fri.layers.iter().enumerate() {
+    for layer in fri.layers.iter() {
         let m = layer.evals.len().max(1);
         // Hash each eval into a leaf to match the commitment rule.
         let leaves: Vec<[u8; 32]> = layer

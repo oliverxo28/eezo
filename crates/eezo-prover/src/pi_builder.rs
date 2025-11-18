@@ -7,7 +7,7 @@ use crate::v1_mldsa::{PublicInputsV2, compute_sig_batch_digest};
 
 /// dev-safety: ensure a 32-byte value is not all-zero.
 /// if zero, return a tiny deterministic tag so LC doesn't revert on "zero root".
-fn ensure_nonzero(mut b: [u8; 32], tag: u8) -> [u8; 32] {
+fn ensure_nonzero(b: [u8; 32], tag: u8) -> [u8; 32] {
     if b == [0u8; 32] {
         // use the `log` crate (env_logger initialized in the bin)
         log::warn!(

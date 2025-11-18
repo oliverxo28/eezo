@@ -79,6 +79,7 @@ pub struct ProverConfig {
 }
 
 /// Round x up to the next multiple of m (m>0).
+#[allow(dead_code)]
 fn round_up_to_multiple(x: u64, m: u64) -> u64 {
     if m == 0 { return x; }
     let r = x % m;
@@ -165,7 +166,7 @@ fn try_acquire_lock(dir: &Path) -> Result<Option<File>> {
             // write a tiny payload (pid + timestamp), then fsync
             let pid = std::process::id();
             let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-            let _ = write!(f, "pid={pid} ts={ts}\n");
+            let _ = writeln!(f, "pid={pid} ts={ts}");
             let _ = f.sync_all();
             Ok(Some(f))
         }
@@ -231,9 +232,9 @@ pub async fn run_prover_loop(cfg: ProverConfig) -> Result<()> {
             reclaimed
         );
         // metrics: count how many gap dirs we healed (partials cleaned)
-        GAPS_HEALED_TOTAL.inc_by(healed as u64);
+        GAPS_HEALED_TOTAL.inc_by(healed);
         // metrics: reclaimed stale locks are also counted as claim timeouts
-        CLAIM_TIMEOUTS_TOTAL.inc_by(reclaimed as u64);
+        CLAIM_TIMEOUTS_TOTAL.inc_by(reclaimed);
     }
 
     // how many checkpoint rotations to keep on disk (T37.8 lifecycle policy)
@@ -352,7 +353,7 @@ pub async fn run_prover_loop(cfg: ProverConfig) -> Result<()> {
                         concat.extend_from_slice(&pis.tx_root_v2);
                         concat.extend_from_slice(&pis.state_root_v2);
                         concat.extend_from_slice(&pis.sig_batch_digest);
-                        let hdr_hash: [u8;32] = (*blake3_hash(&concat).as_bytes()).into();
+                        let hdr_hash: [u8;32] = *blake3_hash(&concat).as_bytes();
                         let canon = CanonicalPi {
                             chain_id20: cfg.chain_id20,
                             suite_id: (pis.suite_id as u8),

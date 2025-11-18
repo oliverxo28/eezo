@@ -6,7 +6,7 @@ use blake3::hash;
 #[test]
 fn merkle_roundtrip() {
     // simple leaves
-    let values = vec![1u64, 2, 3, 4, 5, 6];
+    let values = [1u64, 2, 3, 4, 5, 6];
     let leaves: Vec<[u8;32]> =
         values.iter().map(|x| hash(&x.to_le_bytes()).into()).collect();
 

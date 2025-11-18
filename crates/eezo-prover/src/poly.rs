@@ -38,10 +38,10 @@ impl Polynomial {
         let n = self.coeffs.len().max(other.coeffs.len());
         let mut out = vec![0u64; n];
 
-        for i in 0..n {
+        for (i, out_val) in out.iter_mut().enumerate() {
             let a = *self.coeffs.get(i).unwrap_or(&0);
             let b = *other.coeffs.get(i).unwrap_or(&0);
-            out[i] = a.wrapping_add(b);  // Goldilocks-friendly later
+            *out_val = a.wrapping_add(b);  // Goldilocks-friendly later
         }
 
         Self { coeffs: out }

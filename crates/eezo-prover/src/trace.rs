@@ -15,6 +15,13 @@ const fn idx(c: Col) -> usize { c as usize }
 #[derive(Clone, Debug)]
 pub struct Row(pub [F; N_COLS]);
 
+impl Default for Row {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Row {
     #[inline]
     pub fn new() -> Self { Self([0u64; N_COLS]) }

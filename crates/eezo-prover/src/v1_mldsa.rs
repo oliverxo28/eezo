@@ -86,6 +86,7 @@ impl PublicInputsV2 {
     /// ABI shape expected by the EezoLightClient v2 path (Solidity):
     /// (uint32,uint64,bytes32,bytes32,bytes32,uint32,bytes20,uint32)
     /// = (circuit_version,height,tx_root_v2,state_root_v2,sig_batch_digest,batch_len,chain_id20,suite_id)
+	#[allow(clippy::type_complexity)]
     pub fn as_abi_tuple(&self) -> (
         u32, u64, [u8;32], [u8;32], [u8;32], u32, [u8;20], u32
     ) {
@@ -125,7 +126,7 @@ mod tests {
             [0u8; 20],
         );
         let proof = prove_mldsa_batch(&pis, [(&[1u8][..], &[2u8][..], &[3u8][..])]).unwrap();
-        assert!(proof.len() > 0);
+        assert!(!proof.is_empty());
     }
 
     #[test]

@@ -18,7 +18,7 @@ fn ssz_state_digest(accounts: [u8;32], supply: [u8;32]) -> [u8;32] {
     state_bytes.extend_from_slice(&supply);
     *blake3::hash(&state_bytes).as_bytes()
 }
-
+#[allow(dead_code)]
 fn ssz_txs_digest(leaves: &[[u8;32]]) -> [u8;32] {
     let mut b = Vec::with_capacity(4 + 32 * leaves.len());
     b.extend_from_slice(&(leaves.len() as u32).to_le_bytes());

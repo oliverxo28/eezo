@@ -121,7 +121,7 @@ fn tamper_state_root_fails_boundary() {
     let leaves = vec![[10u8; 32], [11u8; 32]];
     let state_pair = (accounts, supply);
 
-    let mut trace = build_trace(&pi, &boundary, &leaves, state_pair);
+    let trace = build_trace(&pi, &boundary, &leaves, state_pair);
 
     // ----------------------------------------------------------
     // constant columns still OK

@@ -33,7 +33,7 @@ pub fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
     let mut layer = leaves.to_vec();
 
     while layer.len() > 1 {
-        let mut next = Vec::with_capacity((layer.len() + 1) / 2);
+        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
 
         // First collect all pair inputs for this layer into a temporary buffer.
         let mut pair_bytes: Vec<[u8; 64]> = Vec::with_capacity(layer.len() / 2);
@@ -85,7 +85,7 @@ pub fn merkle_proof(leaves: &[[u8; 32]], index: usize) -> Option<MerkleProof> {
     let mut idx = index;
 
     while layer.len() > 1 {
-        let mut next = Vec::with_capacity((layer.len() + 1) / 2);
+        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
         for i in (0..layer.len()).step_by(2) {
             if i + 1 < layer.len() {
                 let mut buf = [0u8; 64];

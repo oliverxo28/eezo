@@ -171,25 +171,25 @@ pub fn default_batch_engine() -> &'static Blake3BatchEngine {
 
 /// Front-door helper for batch hashing with metrics + optional
 /// CPU-vs-GPU cross-check (controlled by env vars).
-///
+/// 
 /// Env knobs:
 ///   - `EEZO_GPU_HASH_CHECK=1`:
-///         run GPU + CPU and compare digests.
-///         On mismatch: increment GPU_HASH_MISMATCH_TOTAL and
-///         optionally error out if `EEZO_GPU_HASH_STRICT=1`.
-///
+///     run GPU + CPU and compare digests.
+///     On mismatch: increment GPU_HASH_MISMATCH_TOTAL and
+///     optionally error out if `EEZO_GPU_HASH_STRICT=1`.
+/// 
 ///   - `EEZO_GPU_HASH_STRICT=1`:
-///         in compare mode, treat any mismatch as a hard error.
-///
+///     in compare mode, treat any mismatch as a hard error.
+/// 
 /// Metrics:
 ///   - `GPU_HASH_ATTEMPTS_TOTAL`:
-///         incremented for every GPU batch attempt (engine = Gpu).
+///     incremented for every GPU batch attempt (engine = Gpu).
 ///   - `GPU_HASH_FALLBACKS_TOTAL`:
-///         incremented when GPU hashing fails and we fall back to CPU.
+///     incremented when GPU hashing fails and we fall back to CPU.
 ///   - `GPU_HASH_COMPARE_TOTAL`:
-///         incremented when compare mode is active.
+///     incremented when compare mode is active.
 ///   - `GPU_HASH_MISMATCH_TOTAL`:
-///         incremented if GPU and CPU digests differ.
+///     incremented if GPU and CPU digests differ.
 pub fn hash_batch_with_metrics(batch: &mut Blake3GpuBatch<'_>) -> Result<(), GpuError> {
     let engine = default_batch_engine();
 
@@ -631,7 +631,7 @@ impl Blake3GpuBackend for GpuBlake3Context {
 
         // offsets + lens: one u32 per message.
         let meta_len = n;
-        let meta_bytes = (meta_len * std::mem::size_of::<u32>()) as u64;
+        let meta_bytes = std::mem::size_of_val(batch.offsets) as u64; // <-- FIXED: use size_of_val
 
         // offsets buffer (currently just copies the existing offsets).
         let offsets_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -644,8 +644,8 @@ impl Blake3GpuBackend for GpuBlake3Context {
         if meta_len > 0 {
             // write offsets as little-endian u32 to the GPU buffer
             let mut tmp = Vec::with_capacity(meta_len * 4);
-            for &off in batch.offsets {
-                tmp.extend_from_slice(&(off as u32).to_le_bytes());
+            for &off in batch.offsets.iter().take(meta_len) { // <-- FIXED: use iter().take()
+                tmp.extend_from_slice(&off.to_le_bytes()); // <-- FIXED: remove unnecessary cast
             }
             queue.write_buffer(&offsets_buf, 0, &tmp);
         }
@@ -661,7 +661,7 @@ impl Blake3GpuBackend for GpuBlake3Context {
         if meta_len > 0 {
             let mut tmp = Vec::with_capacity(meta_len * 4);
             for &len in batch.lens {
-                tmp.extend_from_slice(&(len as u32).to_le_bytes());
+                tmp.extend_from_slice(&len.to_le_bytes()); // <-- FIXED: remove unnecessary cast
             }
             queue.write_buffer(&lens_buf, 0, &tmp);
         }

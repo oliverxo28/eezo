@@ -163,14 +163,14 @@ pub fn deserialize_proof(mut bytes: &[u8]) -> Option<StarkProof> {
     if version != 1 { return None; }
 
     // roots/hashes
-    let trace_root = read_32(&mut bytes)?.try_into().ok()?;
-    let public_inputs_hash = read_32(&mut bytes)?.try_into().ok()?;
+    let trace_root = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
+    let public_inputs_hash = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
 
     // fri layers
     let lcnt = read_u32(&mut bytes)? as usize;
     let mut layers = Vec::with_capacity(lcnt);
     for _ in 0..lcnt {
-        let root: [u8;32] = read_32(&mut bytes)?.try_into().ok()?;
+        let root: [u8;32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
         let len = read_u32(&mut bytes)? as usize;
         let mut evals = Vec::with_capacity(len);
         for _ in 0..len { evals.push(read_u64(&mut bytes)?); }
@@ -195,15 +195,15 @@ pub fn deserialize_proof(mut bytes: &[u8]) -> Option<StarkProof> {
         let q = read_u32(&mut bytes)? as usize;
         let mut proofs = Vec::with_capacity(q);
         for _ in 0..q {
-            let leaf: [u8;32] = read_32(&mut bytes)?.try_into().ok()?;
+            let leaf: [u8;32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
             let plen = read_u32(&mut bytes)? as usize;
             let mut path = Vec::with_capacity(plen);
             for _ in 0..plen {
-                let sib: [u8;32] = read_32(&mut bytes)?.try_into().ok()?;
+                let sib: [u8;32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
                 let is_left = read_u8(&mut bytes)? == 1;
                 path.push(crate::merkle::ProofNode { sibling: sib, is_left });
             }
-            let root: [u8;32] = read_32(&mut bytes)?.try_into().ok()?;
+            let root: [u8;32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
             proofs.push(MerkleProof { leaf, path, root });
         }
         layer_openings.push(proofs);
@@ -225,15 +225,15 @@ pub fn deserialize_proof(mut bytes: &[u8]) -> Option<StarkProof> {
         let q = read_u32(&mut bytes)? as usize;
         let mut proofs = Vec::with_capacity(q);
         for _ in 0..q {
-            let leaf: [u8;32] = read_32(&mut bytes)?.try_into().ok()?;
+            let leaf: [u8;32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
             let plen = read_u32(&mut bytes)? as usize;
             let mut path = Vec::with_capacity(plen);
             for _ in 0..plen {
-                let sib: [u8;32] = read_32(&mut bytes)?.try_into().ok()?;
+                let sib: [u8;32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
                 let is_left = read_u8(&mut bytes)? == 1;
                 path.push(crate::merkle::ProofNode { sibling: sib, is_left });
             }
-            let root: [u8;32] = read_32(&mut bytes)?.try_into().ok()?;
+            let root: [u8;32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
             proofs.push(crate::merkle::MerkleProof { leaf, path, root });
         }
         prev_left_openings.push(proofs);
@@ -246,15 +246,15 @@ pub fn deserialize_proof(mut bytes: &[u8]) -> Option<StarkProof> {
         let q = read_u32(&mut bytes)? as usize;
         let mut proofs = Vec::with_capacity(q);
         for _ in 0..q {
-            let leaf: [u8;32] = read_32(&mut bytes)?.try_into().ok()?;
+            let leaf: [u8;32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
             let plen = read_u32(&mut bytes)? as usize;
             let mut path = Vec::with_capacity(plen);
             for _ in 0..plen {
-                let sib: [u8;32] = read_32(&mut bytes)?.try_into().ok()?;
+                let sib: [u8;32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
                 let is_left = read_u8(&mut bytes)? == 1;
                 path.push(crate::merkle::ProofNode { sibling: sib, is_left });
             }
-            let root: [u8;32] = read_32(&mut bytes)?.try_into().ok()?;
+            let root: [u8;32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
             proofs.push(crate::merkle::MerkleProof { leaf, path, root });
         }
         prev_right_openings.push(proofs);
@@ -280,19 +280,19 @@ pub fn deserialize_proof(mut bytes: &[u8]) -> Option<StarkProof> {
         prev_right_values.push(vals);
     }
     // === constraints commitment & openings ===
-    let constraints_root: [u8; 32] = read_32(&mut bytes)?.try_into().ok()?;
+    let constraints_root: [u8; 32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
     let c_cnt = read_u32(&mut bytes)? as usize;
     let mut constraints_openings = Vec::with_capacity(c_cnt);
     for _ in 0..c_cnt {
-        let leaf: [u8; 32] = read_32(&mut bytes)?.try_into().ok()?;
+        let leaf: [u8; 32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
         let plen = read_u32(&mut bytes)? as usize;
         let mut path = Vec::with_capacity(plen);
         for _ in 0..plen {
-            let sib: [u8; 32] = read_32(&mut bytes)?.try_into().ok()?;
+            let sib: [u8; 32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
             let is_left = read_u8(&mut bytes)? == 1;
             path.push(crate::merkle::ProofNode { sibling: sib, is_left });
         }
-        let root: [u8; 32] = read_32(&mut bytes)?.try_into().ok()?;
+        let root: [u8; 32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
         constraints_openings.push(crate::merkle::MerkleProof { leaf, path, root });
     }
     let cv_cnt = read_u32(&mut bytes)? as usize;
@@ -305,7 +305,7 @@ pub fn deserialize_proof(mut bytes: &[u8]) -> Option<StarkProof> {
     let fcnt = read_u32(&mut bytes)? as usize;
     let mut final_coeffs = Vec::with_capacity(fcnt);
     for _ in 0..fcnt { final_coeffs.push(read_u64(&mut bytes)?); }
-    let final_poly_root: [u8; 32] = read_32(&mut bytes)?.try_into().ok()?;	
+    let final_poly_root: [u8; 32] = read_32(&mut bytes)?; // <-- FIXED: removed unnecessary conversion
 
     Some(StarkProof {
         trace_root,
@@ -333,7 +333,7 @@ pub fn deserialize_proof(mut bytes: &[u8]) -> Option<StarkProof> {
 fn write_u32(out: &mut Vec<u8>, x: u32) { out.extend_from_slice(&x.to_le_bytes()); }
 fn write_u64(out: &mut Vec<u8>, x: u64) { out.extend_from_slice(&x.to_le_bytes()); }
 
-fn read_u8(inp: &mut &[u8]) -> Option<u8> { if inp.len()<1 {None} else {let v=inp[0]; *inp=&inp[1..]; Some(v)} }
+fn read_u8(inp: &mut &[u8]) -> Option<u8> { if inp.is_empty() {None} else {let v=inp[0]; *inp=&inp[1..]; Some(v)} } // <-- FIXED: use is_empty()
 fn read_32(inp: &mut &[u8]) -> Option<[u8;32]> { if inp.len()<32 {None} else {let mut a=[0u8;32]; a.copy_from_slice(&inp[..32]); *inp=&inp[32..]; Some(a)} }
 fn read_u32(inp: &mut &[u8]) -> Option<u32> {
     if inp.len() < 4 { None } else {

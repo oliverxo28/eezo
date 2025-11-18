@@ -39,6 +39,12 @@ pub struct Transcript {
     hasher: Hasher,
 }
 
+impl Default for Transcript { // <-- ADDED: Default implementation
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Transcript {
     pub fn new() -> Self {
         Self { hasher: Hasher::new() }
@@ -53,8 +59,8 @@ impl Transcript {
         let bytes = digest.as_bytes();
         // deterministically convert 8 bytes → u64
         let mut out = 0u64;
-        for i in 0..8 {
-            out |= (bytes[i] as u64) << (8 * i);
+        for (i, &b) in bytes.iter().take(8).enumerate() { // <-- FIXED: better iteration pattern
+            out |= (b as u64) << (8 * i);
         }
         // re-seed for next challenge
         self.hasher = Hasher::new();
@@ -87,7 +93,7 @@ fn fold_layer(prev: &[u64], alpha: u64) -> Vec<u64> {
 /// Run the FRI protocol on a polynomial evaluated over a domain.
 pub fn fri_prove(
     evals: Vec<u64>,
-    domain: &Domain,
+    _domain: &Domain, // <-- FIXED: prefix with underscore since parameter is unused
 ) -> FriProof {
     let mut transcript = Transcript::new();
     let mut layers = Vec::new();

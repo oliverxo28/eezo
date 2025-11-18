@@ -11,7 +11,7 @@ pub fn assert_constant_cols(trace: &Trace, cols: &[Col]) -> Result<(), &'static 
     if trace.rows.is_empty() { return Err("trace empty"); }
     for &c in cols {
         let first = trace.rows[0].0[idx(c)];
-        for (i, r) in trace.rows.iter().enumerate().skip(1) {
+        for (_i, r) in trace.rows.iter().enumerate().skip(1) { // <-- FIXED: unused variable `i`
             if r.0[idx(c)] != first {
                 return Err(match c {
                     Col::Height => "height not constant",
@@ -50,10 +50,8 @@ pub fn assert_state_step_sequence(trace: &Trace) -> Result<(), &'static str> {
             if !seen_a { return Err("StateB before StateA"); }
             if seen_b { return Err("duplicate StateB"); }
             seen_b = true;
-        } else if k == Step::Finalize as u64 {
-            if !seen_len || !seen_a || !seen_b {
-                return Err("Finalize before completing state sequence");
-            }
+        } else if k == Step::Finalize as u64 && (!seen_len || !seen_a || !seen_b) { // <-- FIXED: simplified condition
+            return Err("Finalize before completing state sequence");
         }
     }
     if !(seen_len && seen_a && seen_b) {
@@ -134,7 +132,7 @@ pub fn assert_boundary(trace: &Trace, b: &Boundary, pi: &AirPiV2) -> Result<(), 
     let r0 = &trace.rows[0].0;
     let mut r0_parent = [0u8;32];
     for (j, lane) in [Col::Htr_0, Col::Htr_1, Col::Htr_2, Col::Htr_3].iter().enumerate() {
-        r0_parent[j*8..(j+1)*8].copy_from_slice(&trace.rows[0].0[idx(*lane)].to_le_bytes());
+        r0_parent[j*8..(j+1)*8].copy_from_slice(&r0[idx(*lane)].to_le_bytes()); // <-- FIXED: use `r0` instead of `trace.rows[0].0`
     }
     if r0_parent != b.row0_parent_hash { return Err("row0 parent hash mismatch"); }
 

@@ -181,10 +181,10 @@ fn run_prove_checkpoint(args: ProveCheckpoint) -> Result<()> {
     concat.extend_from_slice(&pis.tx_root_v2);
     concat.extend_from_slice(&pis.state_root_v2);
     concat.extend_from_slice(&pis.sig_batch_digest);
-    let hdr_hash: [u8;32] = (*blake3_hash(&concat).as_bytes()).into();
+    let hdr_hash: [u8;32] = *blake3_hash(&concat).as_bytes();
     let canon = CanonicalPi {
         chain_id20: chain_arr,
-        suite_id: args.suite_id as u8,
+        suite_id: args.suite_id,
         circuit_version: 2,
         ssz_version: 2,
         header_hash: hdr_hash,
@@ -250,7 +250,7 @@ fn run_auto(args: Auto) -> Result<()> {
     let lc_addr = args
         .lc_addr
         .or_else(|| std::env::var("LC_ADDR").ok())
-        .unwrap_or_else(|| "".to_string());
+        .unwrap_or_default();
     if lc_addr.is_empty() {
         anyhow::bail!("LC address is required. Pass --lc-addr or set $LC_ADDR");
     }	
