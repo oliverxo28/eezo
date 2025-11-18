@@ -74,13 +74,11 @@ fn spawn_node_with_logs(
         let name = name.to_string();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    println!("{} STDOUT: {}", name, line);
-                    let mut s = buf.lock().unwrap();
-                    s.push_str(&line);
-                    s.push('\n');
-                }
+            for line in reader.lines().flatten() {
+                println!("{} STDOUT: {}", name, line);
+                let mut s = buf.lock().unwrap();
+                s.push_str(&line);
+                s.push('\n');
             }
         });
     }
@@ -91,13 +89,11 @@ fn spawn_node_with_logs(
         let name = name.to_string();
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    eprintln!("{} STDERR: {}", name, line);
-                    let mut s = buf.lock().unwrap();
-                    s.push_str(&line);
-                    s.push('\n');
-                }
+            for line in reader.lines().flatten() {
+                eprintln!("{} STDERR: {}", name, line);
+                let mut s = buf.lock().unwrap();
+                s.push_str(&line);
+                s.push('\n');
             }
         });
     }
@@ -134,7 +130,6 @@ fn flags_override_env_and_readiness_flips() {
     //   * readiness flipping correctly.
     // We no longer try to seed an anchor via HTTP here.
 
-
     // ── Step 2: Start CLIENT node with bootstrap; CLI overrides env ─────────
     let client_port = 39112u16;
     let client_datadir = "test-ops-client";
@@ -144,7 +139,7 @@ fn flags_override_env_and_readiness_flips() {
     // Env sets page limit to 16 (losing), resume=true (works with either flag style).
     // CLI sets page limit to 48 (winning). We do NOT pass --sync-resume on CLI to
     // avoid the "unexpected argument 'true'" case when the binary uses SetTrue.
-    let (client_child, client_logs) = spawn_node_with_logs(
+    let (client_child, _client_logs) = spawn_node_with_logs(
         client_datadir,
         &client_listen,
         &[

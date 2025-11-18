@@ -105,7 +105,7 @@ fn extract_datadir(args: &[&str]) -> String {
 fn extract_listen_addr(args: &[&str]) -> Option<String> {
     args.windows(2)
         .find(|w| w[0] == "--listen")
-        .map(|w| format!("127.0.0.1:{}", w[1].split(':').last().unwrap_or(w[1])))
+        .map(|w| format!("127.0.0.1:{}", w[1].split(':').next_back().unwrap_or(w[1])))
 }
 
 /// Spawn eezo-node directly using the compiled binary (default: panic if early exit).

@@ -34,18 +34,18 @@ fn cli_listen_binds_custom_port() {
     if !ok {
         eprintln!("stdout:\n{}", child.read_stdout());
         eprintln!("stderr:\n{}", child.read_stderr());
-        let _ = child.kill();
+        child.kill();
         panic!("node did not become ready on 127.0.0.1:{port}");
     }
 
     // sanity check: /config should report the chosen listen address
-    let v: serde_json::Value = reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", port))
+    let v: serde_json::Value = reqwest::blocking::get(format!("http://127.0.0.1:{}/config", port))
         .expect("fetch /config")
         .json()
         .expect("parse json");
     assert_eq!(v["node"]["listen"], format!("127.0.0.1:{port}"));
 
-    let _ = child.kill();
+    child.kill();
     let _ = child.wait();
     let _ = fs::remove_dir_all(&datadir);
 }

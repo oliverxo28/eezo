@@ -86,13 +86,13 @@ fn boolean_parsing_is_case_insensitive() {
 
     assert!(common::wait_until_ready(port, 15_000));
 
-    let v: serde_json::Value = reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", port))
+    let v: serde_json::Value = reqwest::blocking::get(format!("http://127.0.0.1:{}/config", port))
         .unwrap()
         .json()
         .unwrap();
 
-    assert_eq!(v["parallel_verify"].as_bool().unwrap(), false);
-    assert_eq!(v["metrics_on"].as_bool().unwrap(), false);
+    assert!(!v["parallel_verify"].as_bool().unwrap());
+    assert!(!v["metrics_on"].as_bool().unwrap());
 
     child.kill();
 }
@@ -124,7 +124,7 @@ fn numeric_parsing_fallbacks() {
 
     assert!(common::wait_until_ready(port, 15_000));
 
-    let v: serde_json::Value = reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", port))
+    let v: serde_json::Value = reqwest::blocking::get(format!("http://127.0.0.1:{}/config", port))
         .unwrap()
         .json()
         .unwrap();
@@ -179,7 +179,7 @@ log_level = "warn"
 
     assert!(common::wait_until_ready(port, 15_000));
 
-    let v: serde_json::Value = reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", port))
+    let v: serde_json::Value = reqwest::blocking::get(format!("http://127.0.0.1:{}/config", port))
         .unwrap()
         .json()
         .unwrap();

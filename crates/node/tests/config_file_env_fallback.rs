@@ -37,7 +37,7 @@ log_level = "warn"
         let stderr = child.read_stderr();
         println!("Node stdout:\n{}", stdout);
         println!("Node stderr:\n{}", stderr);
-        let _ = child.kill();
+        child.kill();
         panic!("Node did not become ready");
     }
 
@@ -55,7 +55,7 @@ log_level = "warn"
     assert_eq!(v["node"]["log_level"], "info");
 
     // Clean shutdown
-    let _ = child.kill();
+    child.kill();
     let _ = child.wait();
 }
 
@@ -105,12 +105,12 @@ log_level = "warn"
         let stderr = child.read_stderr();
         println!("Node stdout:\n{}", stdout);
         println!("Node stderr:\n{}", stderr);
-        let _ = child.kill();
+        child.kill();
         panic!("Node did not become ready");
     }
 
     // Fetch /config
-    let v: serde_json::Value = reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", port))
+    let v: serde_json::Value = reqwest::blocking::get(format!("http://127.0.0.1:{}/config", port))
         .expect("Failed GET /config")
         .json()
         .expect("Invalid JSON");
@@ -123,7 +123,7 @@ log_level = "warn"
     assert_eq!(v["node"]["log_level"], "debug");
 
     // Clean shutdown
-    let _ = child.kill();
+    child.kill();
     let _ = child.wait();
 }
 

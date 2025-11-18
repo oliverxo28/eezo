@@ -14,7 +14,7 @@ fn config_exposes_effective_cli() {
     ]);
     assert!(common::wait_until_ready(port, 10_000));
 
-    let v: serde_json::Value = reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", port))
+    let v: serde_json::Value = reqwest::blocking::get(format!("http://127.0.0.1:{}/config", port))
         .unwrap()
         .json()
         .unwrap();
@@ -29,7 +29,7 @@ fn config_exposes_effective_cli() {
     assert!(node.get("genesis").is_some());
     assert!(node.get("log_level").is_some()); // Should be present now
 
-    let _ = child.kill();
+    child.kill();
 }
 
 #[test]
@@ -53,13 +53,13 @@ fn config_reflects_log_level_cli() {
     ]);
     assert!(common::wait_until_ready(port, 10_000));
 
-    let v: serde_json::Value = reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", port))
+    let v: serde_json::Value = reqwest::blocking::get(format!("http://127.0.0.1:{}/config", port))
         .unwrap()
         .json()
         .unwrap();
 
     assert_eq!(v["node"]["log_level"], "debug");
-    let _ = child.kill();
+    child.kill();
 }
 
 #[test]
@@ -88,12 +88,12 @@ fn cli_log_level_precedence_over_env() {
 
     assert!(common::wait_until_ready(port, 10_000));
 
-    let v: serde_json::Value = reqwest::blocking::get(&format!("http://127.0.0.1:{}/config", port))
+    let v: serde_json::Value = reqwest::blocking::get(format!("http://127.0.0.1:{}/config", port))
         .unwrap()
         .json()
         .unwrap();
 
     // CLI should take precedence over ENV
     assert_eq!(v["node"]["log_level"], "debug");
-    let _ = child.kill();
+    child.kill();
 }

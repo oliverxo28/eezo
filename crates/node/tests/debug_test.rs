@@ -35,5 +35,5 @@ fn debug_env_vars() {
         println!("Process is running (as expected for this smoke test)");
     }
 
-    let _ = child.kill(); // ChildGuard will also clean up the datadir
+    child.kill(); // ChildGuard will also clean up the datadir
 }

@@ -11,13 +11,12 @@ fn node_info_metric_exposes_identity_and_build_labels() {
     let listen_addr = format!("127.0.0.1:{}", port);
 
     // Build a flat CLI arg list and use the new one-arg helper.
-    let args: [&str; 6] = [
+    let _args: [&str; 6] = [
         "--datadir", &datadir,
         "--listen", &listen_addr,
         "--genesis", "crates/genesis.min.json",
     ];
     let mut child = spawn_node(&datadir, &listen_addr, &[]);
-
     assert!(common::wait_until_ready(port, 10_000));
 
     // Fetch /status to learn node_id and version
@@ -31,10 +30,12 @@ fn node_info_metric_exposes_identity_and_build_labels() {
     // Add retry logic to handle timing issues with metrics initialization
     let mut body = String::new();
     for i in 0..10 {
-        match reqwest::blocking::get(&metrics_url) {
-            Ok(resp) => if let Ok(text) = resp.text() { body = text; break; },
-            Err(_) => {}
-        }
+        if let Ok(resp) = reqwest::blocking::get(&metrics_url) {
+            if let Ok(text) = resp.text() {
+                body = text;
+                break;
+            }
+        };
         if i < 9 {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
