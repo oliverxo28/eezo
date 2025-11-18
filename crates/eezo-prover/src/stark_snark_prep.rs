@@ -1,10 +1,7 @@
 // T38.8 — STARK → SNARK preparation layer
 // Feature-gated: no effect on production unless `stark-air` is enabled.
 
-#![cfg(feature = "stark-air")]
-
 use crate::proof::StarkProof;
-use crate::fri::{FriProof, FriLayer, Transcript as FriTranscript};
 use crate::merkle::MerkleProof;
 
 /// Public, circuit‑friendly representation of a STARK proof.
@@ -145,7 +142,7 @@ mod tests {
         let a = AirSpec::default();
         let proof = prove(&t, &a);
         let pubp = prepare_for_snark(&proof);
-        assert!(pubp.fri_roots.len() > 0);
+        assert!(!pubp.fri_roots.is_empty());
     }
 
     #[test]

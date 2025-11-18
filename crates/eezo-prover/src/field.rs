@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 // T38.3 — minimal Goldilocks field helpers for AIR paths.
 // We model F as u64 with arithmetic mod p = 2^64 - 2^32 + 1.
 // NOTE: This is a tiny, local helper for tests/prototyping (no external dep).

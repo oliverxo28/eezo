@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 use blake3::hash;
 
 /// canonical, rotation-safe public inputs for LC + SNARK wrappers

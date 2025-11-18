@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 // T38.2 — minimal trace container for AIR rows (mock witness).
 // Single responsibility: hold rows and basic helpers.
 // No hashing/constraints here (added in witness.rs / constraints.rs).

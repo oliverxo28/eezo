@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 // T38.5 — End-to-end STARK proof scaffold.
 // This connects:
 //   - trace.rows()

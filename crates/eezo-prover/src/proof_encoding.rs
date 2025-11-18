@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 // T38.6 — proof (de)serialization for current StarkProof/FriProof shapes.
 // Format (little-endian, versioned):
 //   u8  : version (=1)

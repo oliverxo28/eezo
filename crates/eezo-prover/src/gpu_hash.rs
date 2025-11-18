@@ -1,5 +1,3 @@
-#![cfg(feature = "gpu-hash")]
-
 // ======================================================================
 // T44.4 — GPU hashing (wgpu) context + compute pipeline stub
 //

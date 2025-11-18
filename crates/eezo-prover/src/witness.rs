@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 // T38.2 — mock trace builder (no real hashing yet).
 // Builds rows in the exact absorption order from the AIR spec,
 // but uses a stub sponge (we'll replace in T38.3).

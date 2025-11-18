@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 use crate::air_spec::{AirPiV2, Boundary, Col, Step};
 use crate::trace::Trace;
 use crate::hash_b3::{DigestWitness, enforce_state_root_constraints};

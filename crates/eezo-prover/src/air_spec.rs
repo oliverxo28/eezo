@@ -204,7 +204,6 @@ pub mod params {
     pub const MAX_ROWS_PER_BLOCK: usize = 1 << 16;
 }
 
-/// english spec (concise) of the transition rules we will formalize in T38.2:
 pub mod rules {
     //! * Height, SuiteId, CircuitVer: constant within a block.
     //! * Blake3 lanes evolve deterministically over the exact SSZ byte stream:

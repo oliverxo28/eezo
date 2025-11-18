@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 // T38.5 — Minimal polynomial backend.
 // This provides:
 //   - Polynomial struct

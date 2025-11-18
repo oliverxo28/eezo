@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 // T38.5 — Merkle commitment layer.
 // Provides:
 //   - blake3-based leaf hashing

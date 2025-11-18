@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 // T38.6 — minimal verifier scaffold that matches current proof.rs/fri.rs.
 // Validates:
 //  - public_inputs_hash consistency
@@ -12,7 +10,7 @@
 use blake3::hash;
 
 use crate::air_spec::AirSpec;
-use crate::fri::{FriProof, Transcript};
+use crate::fri::Transcript;
 use crate::merkle::{merkle_root, verify_proof};
 use crate::proof::StarkProof;
 
@@ -118,7 +116,7 @@ pub fn stark_verify(proof: &StarkProof, air: &AirSpec) -> Result<(), VerifyError
         if proofs.len() != expected_q || vals.len() != expected_q {
             return Err(VerifyError::OpeningCountMismatch { layer: lid });
         }
-        for (qix, (&qi, (mp, &val))) in proof.query_indices.iter()
+        for (qix, (&_qi, (mp, &val))) in proof.query_indices.iter()
             .zip(proofs.iter().zip(vals.iter()))
             .enumerate()
         {
@@ -167,8 +165,8 @@ pub fn stark_verify(proof: &StarkProof, air: &AirSpec) -> Result<(), VerifyError
         for (qix, &qi) in proof.query_indices.iter().enumerate() {
             // map index to current and previous layers
             let idx_cur   = qi % m_cur;
-            let i_left    = (2 * idx_cur) % m_prev;
-            let i_right   = (i_left + 1) % m_prev;
+            let _i_left   = (2 * idx_cur) % m_prev;
+            let _i_right  = (_i_left + 1) % m_prev;
 
             // verify prev-left & prev-right merkle paths against prev.root
             let lp = &left_proofs[qix];
@@ -204,7 +202,7 @@ pub fn stark_verify(proof: &StarkProof, air: &AirSpec) -> Result<(), VerifyError
     {
         return Err(VerifyError::ConstraintsOpeningCountMismatch);
     }
-    for (qix, (&qi, (mp, &val))) in proof.query_indices
+    for (qix, (&_qi, (mp, &val))) in proof.query_indices
         .iter()
         .zip(proof.constraints_openings.iter().zip(proof.constraints_values.iter()))
         .enumerate()

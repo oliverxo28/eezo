@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 // T38.5 — Evaluation domain & LDE scaffold.
 // This file defines:
 //   - evaluation domain size

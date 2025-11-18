@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 // ======================================================================
 // T38.3 ‚Äî BLAKE3 state_root_v2 gadget skeleton
 // Minimal structure only; no real algebraic constraints yet.

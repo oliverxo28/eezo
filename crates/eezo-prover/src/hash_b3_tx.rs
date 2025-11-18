@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 // ======================================================================
 // T38.4 — txs_root_v2 gadget (variable-length SSZ vector) — skeleton
 //  * software witness only (BLAKE3 over SSZ(len:u32 LE || leaves[*]))

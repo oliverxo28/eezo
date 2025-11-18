@@ -1,5 +1,3 @@
-#![cfg(feature = "stark-air")]
-
 // T38.5 — FRI scaffolding (minimal, deterministic).
 // This file defines:
 //   - FRI layer structure
