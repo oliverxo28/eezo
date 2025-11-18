@@ -90,6 +90,7 @@ impl PeerService {
     // ──────────────────────────────────────────────────────────────────────
     /// Store/rotate a ticket for a peer URL.
     #[cfg(feature = "kemtls-resume")]
+    #[allow(dead_code)]
     pub async fn set_ticket_for(&self, peer_url: &str, ticket: Vec<u8>) {
         let mut t = self.tickets.write().await;
         t.insert(peer_url.to_string(), ticket);
@@ -97,6 +98,7 @@ impl PeerService {
 
     /// Take (remove) any cached ticket for a peer URL.
     #[cfg(feature = "kemtls-resume")]
+    #[allow(dead_code)]
     pub async fn take_ticket_for(&self, peer_url: &str) -> Option<Vec<u8>> {
         let mut t = self.tickets.write().await;
         t.remove(peer_url)
@@ -104,6 +106,7 @@ impl PeerService {
 
     /// Peek at the current ticket (if any) for a peer URL.
     #[cfg(feature = "kemtls-resume")]
+    #[allow(dead_code)]
     pub async fn peek_ticket_for(&self, peer_url: &str) -> Option<Vec<u8>> {
         let t = self.tickets.read().await;
         t.get(peer_url).cloned()
@@ -112,6 +115,7 @@ impl PeerService {
     /// Connect to a peer using KEMTLS, preferring **resumption** if a ticket exists.
     /// On success, rotates the ticket with the one issued by the server.
     #[cfg(feature = "kemtls-resume")]
+    #[allow(dead_code)]
     pub async fn connect_or_resume<K, IO>(
         &self,
         peer_url: &str,
@@ -127,7 +131,7 @@ impl PeerService {
         if let Some(ticket) = self.take_ticket_for(peer_url).await {
             // Try resume path first
             match client_connect_resume_async::<K, _>(server_pk, ticket, io).await {
-                Ok(mut fs) => {
+                Ok(fs) => {
                     if let Some(newt) = fs.new_ticket().map(|b| b.to_vec()) {
                         self.set_ticket_for(peer_url, newt).await;
                     }
@@ -313,6 +317,7 @@ use eezo_ledger::checkpoints::CheckpointAnchor;
 /// A small transport interface so consensus runner/client code can fetch
 /// state-sync resources without knowing *how* (HTTP, loopback, etc).
 #[cfg(feature = "state-sync")]
+#[allow(dead_code)]
 pub trait StateSyncTransport {
     fn get_anchor(&self) -> Result<CheckpointAnchor, SyncError>;
     fn get_snapshot(
@@ -331,6 +336,7 @@ pub trait StateSyncTransport {
 
 /// Loopback transport: uses in-process handlers (no networking).
 #[cfg(feature = "state-sync")]
+#[allow(dead_code)]
 pub struct LoopbackTransport<'a> {
     pub db: &'a Persistence,
 }
@@ -366,6 +372,7 @@ impl<'a> StateSyncTransport for LoopbackTransport<'a> {
 // HTTP transport for cross-node sync (optional, feature-gated)
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(feature = "state-sync-http")]
+#[allow(dead_code)]
 pub struct HttpTransport {
     pub base: String, // e.g., "http://127.0.0.1:18180"
 }
@@ -380,8 +387,8 @@ impl StateSyncTransport for HttpTransport {
         if r.status() == 404 {
             return Err(SyncError::AnchorMissing);
         }
-        Ok(r.into_json()
-            .map_err(|e| SyncError::Persistence(e.to_string()))?)
+        r.into_json()
+            .map_err(|e| SyncError::Persistence(e.to_string()))
     }
 
     fn get_snapshot(
@@ -404,8 +411,8 @@ impl StateSyncTransport for HttpTransport {
         let r = ureq::get(&url)
             .call()
             .map_err(|e| SyncError::Persistence(e.to_string()))?;
-        Ok(r.into_json()
-            .map_err(|e| SyncError::Persistence(e.to_string()))?)
+        r.into_json()
+            .map_err(|e| SyncError::Persistence(e.to_string()))
     }
 
     fn get_delta(
@@ -421,7 +428,7 @@ impl StateSyncTransport for HttpTransport {
         let r = ureq::get(&url)
             .call()
             .map_err(|e| SyncError::Persistence(e.to_string()))?;
-        Ok(r.into_json()
-            .map_err(|e| SyncError::Persistence(e.to_string()))?)
+        r.into_json()
+            .map_err(|e| SyncError::Persistence(e.to_string()))
     }
 }

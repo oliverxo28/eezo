@@ -436,7 +436,7 @@ pub async fn get_bridge_header_latest(State(state): State<AppState>) -> (StatusC
          None => {
              // +++ Added log +++
              log::info!("get_bridge_header_latest: No latest file found.");
-             #[cfg(feature="metrics")]{ bridge_served_inc("latest"); } return (StatusCode::NOT_FOUND, Json(json!({})));
+             #[cfg(feature="metrics")]{ bridge_served_inc("latest"); } (StatusCode::NOT_FOUND, Json(json!({})))
          }
          Some(path) => {
              // +++ Added log +++
@@ -777,10 +777,7 @@ let index: usize = params
         .unwrap_or(0);
 // 2) Load block from persistence
     #[cfg(feature = "persistence")]
-    let block_opt: Option<eezo_ledger::Block> = match state.db.get_block(height) {
-        Ok(b) => Some(b),   // got a Block directly
-        Err(_) => None,     // map any error (e.g. not found) to None
-    };
+    let block_opt: Option<eezo_ledger::Block> = state.db.get_block(height).ok();
 #[cfg(not(feature = "persistence"))]
     // Give None an explicit type so the compiler can infer later uses of `block`
     let block_opt: Option<eezo_ledger::Block> = None; // Use ledger::Block type
@@ -857,11 +854,11 @@ let Some((leaf, branch, root)) = tx_inclusion_proof(&block.txs, index) else {
 }
 
         let leaf_hex = format!("0x{}", hex::encode(leaf));
-let branch_hex: Vec<String> = branch
+        let branch_hex: Vec<String> = branch
             .into_iter()
             .map(|n| format!("0x{}", hex::encode(n)))
             .collect();
-return (
+        (
             StatusCode::OK,
             Json(json!({
                 "height": height,
@@ -871,7 +868,7 @@ return (
 
          "branch_hex": branch_hex
             })),
-        );
+        )
 }
 }
 
@@ -1030,4 +1027,3 @@ fn read_checkpoint_any(height: u64) -> Result<(PathBuf, BridgeHeader), &'static 
     let default_dir = PathBuf::from(CHECKPOINTS_DIR);
     read_checkpoint_any_in(&default_dir, height)
 }
-

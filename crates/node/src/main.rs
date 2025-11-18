@@ -411,7 +411,7 @@ async fn metrics_handler() -> (axum::http::StatusCode, String) {
 async fn metrics_handler_any() -> (axum::http::StatusCode, String) {
     #[cfg(feature = "metrics")]
     {
-        return metrics_handler().await;
+        metrics_handler().await
     }
     #[cfg(not(feature = "metrics"))]
     {
@@ -781,10 +781,7 @@ async fn reload_handler(
         .map(|Json(ReloadPeers(v))| v)
         .unwrap_or_default();
     let new_peers = if peers_from_body.is_empty() {
-        match load_nodecfg_peers_or_empty(&state.config_file_path) {
-            Ok(v) => v,
-            Err(_) => Vec::new(),
-        }
+        load_nodecfg_peers_or_empty(&state.config_file_path).unwrap_or_default()
     } else {
         peers_from_body
             .into_iter()
@@ -800,10 +797,7 @@ async fn reload_handler(
 }
 
 async fn reload_from_file_handler(State(state): State<AppState>) -> (StatusCode, &'static str) {
-    let v = match load_nodecfg_peers_or_empty(&state.config_file_path) {
-        Ok(v) => v,
-        Err(_) => Vec::new(),
-    };
+    let v = load_nodecfg_peers_or_empty(&state.config_file_path).unwrap_or_default();
     state.peer_svc.set_peers(dedup_preserve_order(v)).await;
     (StatusCode::OK, "ok")
 }
@@ -1517,6 +1511,7 @@ async fn seed_anchor_dev(State(state): State<AppState>) -> (StatusCode, &'static
 }
 // Helper to resolve the correct bridge checkpoint output directory
 #[cfg(feature = "checkpoints")]
+#[allow(dead_code)]
 fn resolve_outbox_dir(datadir: Option<&std::path::Path>) -> std::path::PathBuf {
     if let Ok(p) = env::var("EEZO_BRIDGE_OUTBOX_DIR") {
         return std::path::PathBuf::from(p);
@@ -2141,11 +2136,13 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(all(feature = "pq44-runtime", not(feature = "persistence")))]
     let core_runner: Option<Arc<CoreRunnerHandle>> = {
         // Build runtime cfg from env (with safe defaults)
-        let mut cfg = SingleNodeCfg::default();
-        cfg.chain_id = chain_id; // already parsed earlier
-        cfg.block_byte_budget = env_usize("EEZO_MAX_BLOCK_BYTES", 1 << 20);
-        cfg.header_cache_cap = env_usize("EEZO_HEADER_CACHE_CAP", 10_000);
-        #[cfg(feature = "checkpoints")]
+    let mut cfg = SingleNodeCfg {
+        chain_id, // already parsed earlier
+        block_byte_budget: env_usize("EEZO_MAX_BLOCK_BYTES", 1 << 20),
+        header_cache_cap: env_usize("EEZO_HEADER_CACHE_CAP", 10_000),
+        ..Default::default()
+    };
+    #[cfg(feature = "checkpoints")]
         {
             let v: u64 = env::var("EEZO_CHECKPOINT_INTERVAL")
                 .ok()
