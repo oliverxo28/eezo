@@ -5,7 +5,6 @@ use anyhow::{Context, Result};
 use eezo_crypto::sig::ml_dsa::{sk_from_bytes, MlDsa44};
 use eezo_crypto::sig::{PkBytes, SigBytes, SignatureScheme};
 use eezo_ledger::tx_types::{SignedTx, TxCore};
-use serde_json;
 use std::env;
 use std::{fs, io::Write, path::Path};
 #[cfg(unix)]

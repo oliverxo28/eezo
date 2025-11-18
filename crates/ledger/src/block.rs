@@ -232,6 +232,7 @@ pub const HEADER_BUDGET_BYTES: usize = 132;
 // count only the block header fields in the fixed base
 #[inline]
 pub fn header_base_bytes() -> u64 {
+	#[allow(unused_mut)]
     // height(8) + prev_hash(32) + tx_root(32) + fee_total(16) + tx_count(4) + timestamp_ms(8)
     let mut base = (8 + 32 + 32 + 16 + 4 + 8) as u64; // = 100
                                                      // Add tx_root_v2 when eth-ssz is enabled.

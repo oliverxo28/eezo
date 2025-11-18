@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! EEZO keystore file format (v0)
 //! --------------------------------
 //! **Purpose:** store a secret key (e.g., ML-DSA-44 SK) encrypted at rest.

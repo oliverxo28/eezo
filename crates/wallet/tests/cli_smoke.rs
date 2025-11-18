@@ -16,7 +16,7 @@ fn cli_helpers_smoke() {
 fn cli_prove_bridge_writes_artifact() {
     // Prepare a minimal header JSON where the CLI can point to (optional input)
     let height: u64 = 128;
-    let mut hdr_dir = PathBuf::from("proof/checkpoints");
+    let hdr_dir = PathBuf::from("proof/checkpoints");
     fs::create_dir_all(&hdr_dir).unwrap();
     let mut hdr_path = hdr_dir.clone();
     hdr_path.push(format!("{:020}.json", height));
