@@ -843,6 +843,7 @@ impl CoreRunnerHandle {
     }
 
     /// Access to the inner node for tests / future wiring (use sparingly).
+	#[allow(dead_code)]
     pub async fn with_node<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut SingleNode) -> R,

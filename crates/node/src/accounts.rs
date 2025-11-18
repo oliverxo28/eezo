@@ -33,6 +33,7 @@ impl Accounts {
     }
 
     /// Normalize an address exactly like our internal map keys do.
+    #[allow(dead_code)]
     pub fn normalize(addr: &str) -> String {
         let mut t = addr.trim().to_ascii_lowercase();
         if !t.starts_with("0x") { t = format!("0x{}", t); }

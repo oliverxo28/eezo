@@ -1503,7 +1503,7 @@ async fn seed_anchor_dev(State(state): State<AppState>) -> (StatusCode, &'static
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "load failed"),
     }
 
-    if let Err(_) = state.db.save_checkpoint_anchor(&anchor) {
+    if state.db.save_checkpoint_anchor(&anchor).is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, "save failed");
     }
 
@@ -2098,10 +2098,12 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(all(feature = "pq44-runtime", feature = "persistence"))]
     let core_runner: Option<Arc<CoreRunnerHandle>> = {
         // Build runtime cfg from env (with safe defaults)
-        let mut cfg = SingleNodeCfg::default();
-        cfg.chain_id = chain_id; // already parsed earlier
-        cfg.block_byte_budget = env_usize("EEZO_MAX_BLOCK_BYTES", 1 << 20);
-        cfg.header_cache_cap = env_usize("EEZO_HEADER_CACHE_CAP", 10_000);
+        let mut cfg = SingleNodeCfg {
+            chain_id, // already parsed earlier
+            block_byte_budget: env_usize("EEZO_MAX_BLOCK_BYTES", 1 << 20),
+            header_cache_cap: env_usize("EEZO_HEADER_CACHE_CAP", 10_000),
+            ..Default::default()
+        };
         #[cfg(feature = "checkpoints")]
         {
             let v: u64 = env::var("EEZO_CHECKPOINT_INTERVAL")

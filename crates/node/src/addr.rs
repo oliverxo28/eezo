@@ -60,6 +60,7 @@ fn parse_hex_lenient(s: &str) -> Option<[u8; 20]> {
 }
 
 /// Fast boolean guard that mirrors `parse_account_addr`.
+#[allow(dead_code)]
 pub fn is_valid_account_addr(s: &str) -> bool {
     parse_account_addr(s).is_some()
 }

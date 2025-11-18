@@ -34,6 +34,7 @@ pub type TxHash = [u8; 32];
 pub struct TxEntry {
     pub hash: TxHash,
     pub bytes: Arc<Vec<u8>>, // opaque payload; proposer will decode
+    #[allow(dead_code)]
     pub received_at: Instant,
 }
 
@@ -340,7 +341,7 @@ mod tests {
         // mark included / bytes shrink
         mp.mark_included(&h(1), 42, 100).await;
         let (_, cur, _, _) = mp.stats().await;
-        assert!(cur >= 200 && cur < 1000); // only best-effort accounting remained
+        assert!((200..1000).contains(&cur)); // only best-effort accounting remained
 
         // status checks
         assert!(matches!(mp.status(&h(1)).await, Some(TxStatus::Included { block_height: 42 })));
