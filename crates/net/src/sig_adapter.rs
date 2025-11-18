@@ -9,9 +9,13 @@ use std::sync::Mutex;
 use std::time::Instant;
 // needed for as_bytes()/from_bytes() on PublicKey & DetachedSignature
 use pqcrypto_traits::sign::{DetachedSignature as SigTrait, PublicKey as PkTrait};
+// v-- IMPORT HandshakeError --v
+use crate::handshake::HandshakeError;
 
 /// Domain separator for T3/T3.1 auth.
 const T3_DOMAIN: &[u8] = b"EEZO-PQC-AUTH-V1";
+
+// <-- DELETED SigAdapterError ENUM -->
 
 /// Build a domain-separated message: "EEZO-PQC-AUTH-V1|ctx|msg"
 fn bind_context(ctx: &[u8], msg: &[u8]) -> Vec<u8> {
@@ -124,15 +128,15 @@ impl MlDsa {
     pub fn pk_to_bytes(pk: &dsa::PublicKey) -> Vec<u8> {
         pk.as_bytes().to_vec()
     }
-    pub fn pk_from_bytes(bs: &[u8]) -> Result<dsa::PublicKey, ()> {
-        dsa::PublicKey::from_bytes(bs).map_err(|_| ())
+    pub fn pk_from_bytes(bs: &[u8]) -> Result<dsa::PublicKey, HandshakeError> { // <-- CHANGED
+        dsa::PublicKey::from_bytes(bs).map_err(|_| HandshakeError::InvalidBytes) // <-- CHANGED
     }
 
     pub fn sig_to_bytes(sig: &dsa::DetachedSignature) -> Vec<u8> {
         sig.as_bytes().to_vec()
     }
-    pub fn sig_from_bytes(bs: &[u8]) -> Result<dsa::DetachedSignature, ()> {
-        dsa::DetachedSignature::from_bytes(bs).map_err(|_| ())
+    pub fn sig_from_bytes(bs: &[u8]) -> Result<dsa::DetachedSignature, HandshakeError> { // <-- CHANGED
+        dsa::DetachedSignature::from_bytes(bs).map_err(|_| HandshakeError::InvalidBytes) // <-- CHANGED
     }
 }
 
@@ -154,7 +158,7 @@ impl crate::handshake::MlDsaLike for MlDsaLikeImpl {
     fn pk_to_bytes(pk: &Self::PublicKey) -> Vec<u8> {
         MlDsa::pk_to_bytes(pk)
     }
-    fn pk_from_bytes(bs: &[u8]) -> Result<Self::PublicKey, ()> {
+    fn pk_from_bytes(bs: &[u8]) -> Result<Self::PublicKey, HandshakeError> { // <-- CHANGED
         MlDsa::pk_from_bytes(bs)
     }
     fn pk_eq(a: &Self::PublicKey, b: &Self::PublicKey) -> bool {
@@ -163,7 +167,7 @@ impl crate::handshake::MlDsaLike for MlDsaLikeImpl {
     fn sig_to_bytes(sig: &Self::Signature) -> Vec<u8> {
         MlDsa::sig_to_bytes(sig)
     }
-    fn sig_from_bytes(bs: &[u8]) -> Result<Self::Signature, ()> {
+    fn sig_from_bytes(bs: &[u8]) -> Result<Self::Signature, HandshakeError> { // <-- CHANGED
         MlDsa::sig_from_bytes(bs)
     }
 }

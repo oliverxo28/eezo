@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Transport session with AEAD contexts and nonce sequences.
 //!
 //! Nonce format: flag(1) | session_id(3) | counter(8, LE).

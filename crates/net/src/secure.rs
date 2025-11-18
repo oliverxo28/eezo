@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 // crates/net/src/secure.rs
 use crate::handshake::{
     client_handshake,    // T2

@@ -46,7 +46,7 @@ async fn run_full_then_resume_once() {
     });
 
     let mut c_join2 = tokio::io::join(c_r2, c_w2);
-    let mut cli2 = client_connect_resume_async::<MlKem768, _>(&pk, ticket1.clone(), &mut c_join2)
+    let cli2 = client_connect_resume_async::<MlKem768, _>(&pk, ticket1.clone(), &mut c_join2)
         .await
         .expect("client resume handshake");
 

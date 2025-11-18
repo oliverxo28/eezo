@@ -14,8 +14,8 @@ async fn kemtls_1rtt_roundtrip_with_real_mlkem768() {
     let (pk, sk) = keypair();
     let (client_io, server_io) = duplex(64 * 1024);
     
-    let (mut c_read, mut c_write) = tokio::io::split(client_io);
-    let (mut s_read, mut s_write) = tokio::io::split(server_io);
+    let (c_read, c_write) = tokio::io::split(client_io);
+    let (s_read, s_write) = tokio::io::split(server_io);
 
     let server = tokio::spawn(async move {
         // Use separate read/write halves to avoid blocking

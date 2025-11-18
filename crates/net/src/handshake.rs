@@ -65,6 +65,8 @@ pub enum HandshakeError {
     // T37.2: Added for ticket sealing
     #[error("ticket seal error")]
     TicketSeal(#[from] SealError),
+    #[error("invalid bytes for public key or signature")] // <-- ADDED THIS VARIANT
+    InvalidBytes,
 }
 
 /// KEM abstraction; implement this using your ML-KEM in `crates/crypto`.
@@ -550,11 +552,11 @@ pub trait MlDsaLike {
     fn verify(pk: &Self::PublicKey, msg: &[u8], ctx: &[u8], sig: &Self::Signature) -> bool;
 
     fn pk_to_bytes(pk: &Self::PublicKey) -> Vec<u8>;
-    fn pk_from_bytes(bs: &[u8]) -> Result<Self::PublicKey, ()>;
+    fn pk_from_bytes(bs: &[u8]) -> Result<Self::PublicKey, HandshakeError>; // <-- CHANGED
     fn pk_eq(a: &Self::PublicKey, b: &Self::PublicKey) -> bool;
 
     fn sig_to_bytes(sig: &Self::Signature) -> Vec<u8>;
-    fn sig_from_bytes(bs: &[u8]) -> Result<Self::Signature, ()>;
+    fn sig_from_bytes(bs: &[u8]) -> Result<Self::Signature, HandshakeError>; // <-- CHANGED
 }
 
 #[cfg(test)]
@@ -584,4 +586,3 @@ mod tests {
         assert_eq!(th.len(), 32);
     }
 }
-

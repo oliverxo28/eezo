@@ -12,6 +12,7 @@ use eezo_ledger::{
 use pqcrypto_mldsa::mldsa44::PublicKey;
 
 /// Minimal dummy cert store for T16.4 sims (no real validation).
+#[allow(dead_code)]
 struct DummyCerts;
 impl CertLookup for DummyCerts {
     fn public_key(&self, _signer: ValidatorId) -> Option<PublicKey> {

@@ -40,7 +40,7 @@ async fn run_full_then_resume_once() {
         let _srv_sess = server_accept_async::<MlKem768, _>(&sk2, &mut s2).await.unwrap();
     });
 
-    let mut cli2 = client_connect_resume_async::<MlKem768, _>(&pk, ticket1.clone(), &mut c2)
+    let cli2 = client_connect_resume_async::<MlKem768, _>(&pk, ticket1.clone(), &mut c2)
         .await
         .expect("client resume handshake");
     srv2.await.expect("server 2 join");

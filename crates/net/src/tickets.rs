@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! opaque AEAD-protected resume tickets with key rotation
 //! format: versioned, aead(chacha20poly1305), aad = b"EEZO:TKT|v1|" || node_id
 //! plaintext = ticket_id(12) || issued_unix_ms(8) || session_id(3) || reserved(1)

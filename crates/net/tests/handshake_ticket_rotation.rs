@@ -4,6 +4,7 @@ use eezo_net::replay::ShardedReplay;
 use eezo_net::tickets::{self};
 
 // `Epoch` is no longer used, timestamps are u64
+#[allow(dead_code)]
 fn epoch_ms(s: u64) -> u64 {
     s * 1000
 }
