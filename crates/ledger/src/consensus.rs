@@ -36,6 +36,8 @@ use thiserror::Error;
 // === T27: HotStuff-like pipeline (uses new message module) ===
 use crate::block::BlockId;
 use std::sync::Arc;
+// ADDED: std::env for reading EEZO_BLOCK_MAX_TX
+use std::env;
 
 // Import T27 message types with a module alias to avoid name collisions
 use crate::consensus_msg as hs_msg;
@@ -46,6 +48,21 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+// 1️⃣ Add helper to read EEZO_BLOCK_MAX_TX from env
+fn block_max_tx_from_env() -> Option<usize> {
+    if let Ok(raw) = std::env::var("EEZO_BLOCK_MAX_TX") {
+        if raw.is_empty() {
+            return None;
+        }
+        if let Ok(v) = raw.parse::<usize>() {
+            if v > 0 {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 pub const PK_LEN: usize = 1312; // ML-DSA-44 public key bytes
@@ -580,21 +597,25 @@ impl SingleNode {
         let ts_ms = now_ms();
 
         // Drain fee/byte-ordered candidates under the byte budget
-        let candidates = self.mempool.drain_for_block(self.cfg.block_byte_budget);
+        // 2a) Change to use 'let mut'
+        let mut candidates = self
+            .mempool
+            .drain_for_block(self.cfg.block_byte_budget);
 
         // === Nonce-aware selection for property tests (filter, don't error) ===
         // Keep mempool's cross-sender ordering; for each sender accept the longest
         // contiguous nonce prefix starting at the account's current nonce, even if
         // higher nonces appeared earlier in the fee-ordered list.
         #[cfg(feature = "consensus-tests")]
-        let candidates = {
+        {
             use crate::tx::sender_from_pubkey_first20;
             use std::collections::HashMap;
 
             // expected nonce per sender (starts from current account nonce)
             let mut expect: HashMap<crate::Address, u64> = HashMap::new();
             let mut kept: Vec<_> = Vec::with_capacity(candidates.len());
-            let mut remaining = candidates;
+            // Use std::mem::take to transfer ownership out of candidates
+            let mut remaining = std::mem::take(&mut candidates);
 
             loop {
                 let mut progress = false;
@@ -625,8 +646,17 @@ impl SingleNode {
                 remaining = next;
             }
 
-            kept
-        };
+            // Assign the filtered list back to the mutable candidates
+            candidates = kept;
+        }
+
+        // 2c) Add the max-tx cap before assemble_block
+        // Apply optional EEZO_BLOCK_MAX_TX cap (hard limit on txs per block).
+        if let Some(max_tx) = block_max_tx_from_env() {
+            if candidates.len() > max_tx {
+                candidates.truncate(max_tx);
+            }
+        }
 
         // Empty mempool is allowed for liveness: assemble and apply an empty block
         #[cfg_attr(not(feature = "checkpoints"), allow(unused_mut))]

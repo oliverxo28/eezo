@@ -77,9 +77,12 @@ use tokio::time::interval;
 mod metrics;
 mod peers;
 mod mempool;
+mod sigpool;
 mod accounts;
+
 use peers::{parse_peers_from_env, peers_handler, PeerMap, PeerService};
 use accounts::{Accounts, AccountView, FaucetReq};
+use crate::sigpool::SigPool;
 mod addr;
 use crate::addr::parse_account_addr;
 use std::net::SocketAddr;
@@ -612,6 +615,7 @@ struct TransferTx {
 #[derive(Deserialize, Serialize, Clone, Debug)]
 struct SignedTxEnvelope {
     tx: TransferTx,
+	#[serde(default)]
     sig: String, // base64 or hex — devnet accepts opaque string for now
 }
 
@@ -709,6 +713,8 @@ struct AppState {
     block_height: Arc<AtomicU64>,
     // Shared in-proc mempool (T30)
     mempool: crate::mempool::SharedMempool,
+	// T51.5a: multi-threaded signature verification pool
+	sigpool: Arc<SigPool>,
     accounts: Accounts,
     // Recent blocks (in-memory, dev only): height -> tx hashes (hex)
     // Keep only last N heights to avoid unbounded memory.
@@ -846,7 +852,7 @@ async fn block_handler(
     }
 }
 
-// T30: POST /tx → accept SignedTxEnvelope JSON, hash it, enqueue to mempool.
+// T30/T51.5a: POST /tx → accept SignedTxEnvelope JSON, run through sigpool, then enqueue to mempool.
 async fn post_tx(
     State(state): State<AppState>,
     Json(env): Json<SignedTxEnvelope>,
@@ -861,25 +867,40 @@ async fn post_tx(
             )
         }
     };
+
+    // T51.5a: send through sigpool (parallel verification/preprocessing).
+    let raw = match state.sigpool.verify(raw).await {
+        Ok(bytes) => bytes,
+        Err(()) => {
+            // If the sigpool is down or overloaded, treat as a server error.
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "sigpool unavailable"})),
+            );
+        }
+    };
+
+    // Hash after sigpool so we always hash what we actually submit.
     let hash32: [u8; 32] = *blake3::hash(&raw).as_bytes();
     let hash_hex = format!("0x{}", hex::encode(hash32));
+
     // For now, use loopback IP (we’ll wire real remote IP later if needed).
     let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
     match state.mempool.submit(ip, hash32, raw).await {
         Ok(()) => {
-			#[cfg(feature = "metrics")]
-			{
-				crate::metrics::EEZO_MEMPOOL_LEN.set(state.mempool.len().await as i64);
-			}
-			(StatusCode::OK, Json(serde_json::json!(SubmitTxResp { hash: hash_hex })))
-		}
+            #[cfg(feature = "metrics")]
+            {
+                crate::metrics::EEZO_MEMPOOL_LEN.set(state.mempool.len().await as i64);
+            }
+            (StatusCode::OK, Json(serde_json::json!(SubmitTxResp { hash: hash_hex })))
+        }
         Err(crate::mempool::SubmitError::Duplicate) => {
-			#[cfg(feature = "metrics")]
-			{
-				crate::metrics::EEZO_MEMPOOL_LEN.set(state.mempool.len().await as i64);
-			}
-		(StatusCode::OK, Json(serde_json::json!(SubmitTxResp { hash: hash_hex })))
-	    }
+            #[cfg(feature = "metrics")]
+            {
+                crate::metrics::EEZO_MEMPOOL_LEN.set(state.mempool.len().await as i64);
+            }
+            (StatusCode::OK, Json(serde_json::json!(SubmitTxResp { hash: hash_hex })))
+        }
         Err(crate::mempool::SubmitError::RateLimited) => (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "rate limited"})),
@@ -1536,13 +1557,16 @@ async fn main() -> anyhow::Result<()> {
         args.genesis, args.datadir, args.listen, args.log_level, args.config_file
     );
     println!(
-        "ENV vars - EEZO_CONFIG_FILE: {:?}, EEZO_LISTEN: {:?}, EEZO_DATADIR: {:?}, EEZO_GENESIS: {:?}, EEZO_LOG_LEVEL: {:?}",
+        "ENV vars - EEZO_CONFIG_FILE: {:?}, EEZO_LISTEN: {:?}, EEZO_DATADIR: {:?}, EEZO_GENESIS: {:?}, EEZO_LOG_LEVEL: {:?}, EEZO_BLOCK_MAX_TX: {:?}, EEZO_BLOCK_TARGET_TIME_MS: {:?}",
         std::env::var("EEZO_CONFIG_FILE").ok(),
         std::env::var("EEZO_LISTEN").ok(),
         std::env::var("EEZO_DATADIR").ok(),
         std::env::var("EEZO_GENESIS").ok(),
-        std::env::var("EEZO_LOG_LEVEL").ok()
+        std::env::var("EEZO_LOG_LEVEL").ok(),
+        std::env::var("EEZO_BLOCK_MAX_TX").ok(),
+        std::env::var("EEZO_BLOCK_TARGET_TIME_MS").ok(),
     );
+
     let mut cfg = NodeCfg::default();
     let config_path = args.config_file.clone();
     println!("Resolved config path: {:?}", config_path);
@@ -2229,6 +2253,11 @@ async fn main() -> anyhow::Result<()> {
         mp_rate_capacity,
         mp_rate_per_min,
     ));
+	// -- T51.5a: sigpool runtime config (multi-threaded signature verification) --
+    let sigpool_threads = env_usize("EEZO_SIGPOOL_THREADS", 4);
+    let sigpool_queue   = env_usize("EEZO_SIGPOOL_QUEUE", 10_000);
+    let sigpool = SigPool::new(sigpool_threads, sigpool_queue);
+	
     // -- T34.0: crypto-suite rotation policy (env > genesis > defaults) ---------
     // we support both EEZO_ROTATION_* and EEZO_* env keys (either may be set).
     fn env_u8(keys: &[&str]) -> Option<u8> {
@@ -2448,9 +2477,9 @@ async fn main() -> anyhow::Result<()> {
         peer_svc: peer_svc.clone(),
         config_file_path: args.config_file.clone(),
 
-      
-         block_height: block_height.clone(),
+        block_height: block_height.clone(),
         mempool: mempool.clone(),
+		sigpool: sigpool.clone(),
         accounts: accounts.clone(),
         recent_blocks: recent_blocks.clone(),
         receipts: receipts.clone(),
@@ -3070,8 +3099,10 @@ async fn main() -> anyhow::Result<()> {
                         error: None,
                     };
                     state_clone.receipts.write().await.insert(hhex.clone(), receipt);
-                    #[cfg(feature = "metrics")] {
+                    #[cfg(feature = "metrics")] 
+					{
                         TX_ACCEPTED_TOTAL.inc();
+						crate::metrics::txs_included_inc(1);
                     }
                     block_hashes.push(format!("0x{}", hex::encode(entry.hash)));
                 }

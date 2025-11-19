@@ -109,6 +109,38 @@ pub static EEZO_MEMPOOL_BYTES: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!("eezo_mempool_bytes_gauge", "Current bytes in mempool").unwrap()
 });
 
+// T51.4 – total transactions included in committed blocks (node view).
+// In single-node devnet we treat "accepted into a block" as "included".
+pub static EEZO_TXS_INCLUDED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_txs_included_total",
+        "Transactions included in committed blocks (node view)"
+    )
+    .expect("metric registered")
+});
+
+#[inline]
+pub fn txs_included_inc(n: u64) {
+    EEZO_TXS_INCLUDED_TOTAL.inc_by(n);
+}
+
+// T51.4.d – labeled transaction rejection metrics
+pub static EEZO_TX_REJECTED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "eezo_tx_rejected_total",
+        "Txs rejected by proposer (labeled by reason)",
+        &["reason"]
+    )
+    .expect("metric registered")
+});
+
+#[inline]
+pub fn tx_rejected_inc(reason: &str) {
+    EEZO_TX_REJECTED_TOTAL
+        .with_label_values(&[reason])
+        .inc();
+}
+
 // T32 schema anchors (lower-case names)
 pub static EEZO_BLOCK_E2E_LATENCY_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
     // Use a tolerant registration pattern: if registration fails (e.g., already registered),
@@ -131,11 +163,11 @@ pub static EEZO_BLOCK_E2E_LATENCY_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
     })
 });
 
-pub static EEZO_TX_REJECTED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "eezo_tx_rejected_total",
-        "Rejected transactions by reason",
-        &["reason"] // e.g., "bad_sig" | "nonce" | "insufficient_funds" | "decoding"
+// Keep the old simple counter for backward compatibility during transition
+pub static EEZO_TX_REJECTED_SIMPLE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_tx_rejected_simple_total",
+        "Rejected transactions (simple counter, deprecated for labeled version)"
     )
     .unwrap()
 });
@@ -861,3 +893,70 @@ pub fn suite_rotation_inc() {
         EEZO_SUITE_ROTATION_TOTAL.inc();
     }
 }
+
+// -----------------------------------------------------------------------------
+// T51.5a — TPS / block builder metrics
+// -----------------------------------------------------------------------------
+
+/// Gauge: number of transactions included in the most recently built block.
+pub static EEZO_BLOCK_TX_COUNT: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_block_tx_count",
+        "Number of transactions included in the last built block"
+    )
+    .unwrap()
+});
+
+/// Counter: blocks that reached the configured EEZO_BLOCK_MAX_TX (i.e. fully packed).
+pub static EEZO_BLOCK_FULL_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_block_full_total",
+        "Total number of blocks that reached EEZO_BLOCK_MAX_TX transactions"
+    )
+    .unwrap()
+});
+
+/// Counter: blocks that had at least 1 tx but fewer than EEZO_BLOCK_MAX_TX.
+pub static EEZO_BLOCK_UNDERFILLED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_block_underfilled_total",
+        "Total number of non-empty blocks built with fewer than EEZO_BLOCK_MAX_TX transactions"
+    )
+    .unwrap()
+});
+
+// -----------------------------------------------------------------------------
+// T51.5a — sigpool metrics
+// -----------------------------------------------------------------------------
+
+pub static EEZO_SIGPOOL_QUEUED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_sigpool_queued_total",
+        "Total number of txs submitted to the sigpool"
+    )
+    .unwrap()
+});
+
+pub static EEZO_SIGPOOL_VERIFIED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_sigpool_verified_total",
+        "Total number of txs whose signatures verified in sigpool"
+    )
+    .unwrap()
+});
+
+pub static EEZO_SIGPOOL_FAILED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_sigpool_failed_total",
+        "Total number of txs whose signatures failed in sigpool"
+    )
+    .unwrap()
+});
+
+pub static EEZO_SIGPOOL_ACTIVE_THREADS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_sigpool_active_threads",
+        "Number of active sigpool worker threads"
+    )
+    .unwrap()
+});

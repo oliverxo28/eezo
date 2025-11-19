@@ -20,7 +20,7 @@ use eezo_ledger::consensus_api::{run_one_slot, SlotOutcome};
 // --- END UPDATE ---
 
 // --- FIX: Import Block ---
-use eezo_ledger::Block;
+use eezo_ledger::Block; // Keep this import, as we'll need it to reconstruct the Block
 
 // T36.6 metrics hooks
 #[cfg(feature = "metrics")]
@@ -89,6 +89,13 @@ impl CoreRunnerHandle {
         let stop_c = Arc::clone(&stop);
         let node_c = Arc::clone(&node);
         // Note: db_c is not available in this cfg block
+
+        // 1️⃣ Add MAX_TX reading at struct init (persistence disabled path)
+        let block_max_tx = std::env::var("EEZO_BLOCK_MAX_TX")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+            
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
 			// expose T36.6 bridge metrics on /metrics immediately
@@ -131,7 +138,8 @@ impl CoreRunnerHandle {
                     run_one_slot(&mut guard, rollback_on_error)
                 };
                 #[cfg(feature = "metrics")]
-                if let Ok(SlotOutcome::Committed { .. }) = outcome {
+                // FIX: Revert pattern match for time metric to match only height or ignore all fields
+                if let Ok(SlotOutcome::Committed { height: _ }) = outcome {
                     let sec = slot_start.elapsed().as_secs_f64();
                     crate::metrics::EEZO_BLOCK_E2E_LATENCY_SECONDS
                         .with_label_values(&["commit"])
@@ -139,8 +147,41 @@ impl CoreRunnerHandle {
                 }
                 // optional: structured logs (kept minimal in T36.0)
                 match outcome {
-                    // Assuming SlotOutcome::Committed { height } as per teacher's plan to NOT change API
+                    // FIX: Revert pattern match to only use 'height'
                     Ok(SlotOutcome::Committed { height }) => {
+
+                        // 🚨 NEW LOGIC: Lock the node again to retrieve the recently committed block data
+                        // This is necessary because blk/summary are not returned by run_one_slot
+                        let blk_opt = {
+                            let node_guard = node_c.lock().await;
+                            node_guard.last_committed_header()
+                                .zip(node_guard.last_committed_txs())
+                                .map(|(header, txs)| Block { header, txs })
+                        };
+                        
+                        // --- T51.5a block batching metrics (MOVED HERE) ---
+                        #[cfg(feature = "metrics")]
+                        {
+                            use crate::metrics::{
+                                EEZO_BLOCK_TX_COUNT,
+                                EEZO_BLOCK_FULL_TOTAL,
+                                EEZO_BLOCK_UNDERFILLED_TOTAL,
+                            };
+
+                            if let Some(ref blk) = blk_opt {
+                                let tx_count = blk.txs.len();
+                                EEZO_BLOCK_TX_COUNT.set(tx_count as i64);
+
+                                // Use pre-read block_max_tx
+                                if tx_count == block_max_tx {
+                                    EEZO_BLOCK_FULL_TOTAL.inc();
+                                } else if tx_count > 0 {
+                                    EEZO_BLOCK_UNDERFILLED_TOTAL.inc();
+                                }
+                            }
+                        }
+                        // --- END METRICS ---
+
                         // update committed height gauge
                         #[cfg(feature = "metrics")]
                         {
@@ -148,7 +189,7 @@ impl CoreRunnerHandle {
                         }
 
                         // capture the committed header hash once, reuse later for checkpoint
-                        let mut last_commit_hash_opt: Option<[u8;32]> = None;
+                        let mut _last_commit_hash_opt: Option<[u8;32]> = None;
                         // log every Nth commit to avoid console spam
                         if log_every == 0 || height % log_every == 0 {
                             log::info!("consensus: committed height={}", height);
@@ -360,19 +401,7 @@ impl CoreRunnerHandle {
                                 };
 
                                 // Prefer in-memory hash from the just-committed header; fall back to DB only if needed
-                                let committed_header_hash = if let Some(hh) = last_commit_hash_opt {
-                                    hh
-                                } else {
-                                    // NOTE: Persistence logic is dead code here.
-                                    #[cfg(feature = "persistence")]
-                                    {
-                                        db_c.as_ref()
-                                            .and_then(|db| db.get_header(height).ok())
-                                            .map(|h| h.hash()).unwrap_or([0u8;32])
-                                    }
-                                    #[cfg(not(feature = "persistence"))] { [0u8;32] }
-                                };
-
+                                let committed_header_hash = blk_opt.as_ref().map(|b| b.header.hash()).unwrap_or([0u8;32]);
 
                                 let mut hdr = BridgeHeader::new(
                                     height,
@@ -505,6 +534,12 @@ impl CoreRunnerHandle {
         let db_c = db.clone();
         // Clone Option<Arc<Persistence>> for the loop
 
+        // 1️⃣ Add MAX_TX reading at struct init (persistence enabled path)
+        let block_max_tx = std::env::var("EEZO_BLOCK_MAX_TX")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
 			// expose T36.6 bridge metrics on /metrics immediately
@@ -532,16 +567,51 @@ impl CoreRunnerHandle {
                     // FIX: Removed extraneous closing parenthesis ')' here.
                     run_one_slot(&mut guard, rollback_on_error)
                 };
+
                 #[cfg(feature = "metrics")]
-                if let Ok(SlotOutcome::Committed { .. }) = outcome {
+                // FIX: Revert pattern match for time metric to match only height or ignore all fields
+                if let Ok(SlotOutcome::Committed { height: _ }) = outcome {
                     let sec = slot_start.elapsed().as_secs_f64();
                     crate::metrics::EEZO_BLOCK_E2E_LATENCY_SECONDS
                         .with_label_values(&["commit"])
                         .observe(sec);
                 }				
                 match outcome {
-                     // Assuming SlotOutcome::Committed { height }
+                     // FIX: Revert pattern match to only use 'height'
                     Ok(SlotOutcome::Committed { height }) => {
+                        
+                        // 🚨 NEW LOGIC: Lock the node again to retrieve the recently committed block data
+                        // This is necessary because blk/summary are not returned by run_one_slot
+                        let blk_opt = {
+                            let node_guard = node_c.lock().await;
+                            node_guard.last_committed_header()
+                                .zip(node_guard.last_committed_txs())
+                                .map(|(header, txs)| Block { header, txs })
+                        };
+                        
+                        // --- T51.5a block batching metrics (MOVED HERE) ---
+                        #[cfg(feature = "metrics")]
+                        {
+                            use crate::metrics::{
+                                EEZO_BLOCK_TX_COUNT,
+                                EEZO_BLOCK_FULL_TOTAL,
+                                EEZO_BLOCK_UNDERFILLED_TOTAL,
+                            };
+
+                            if let Some(ref blk) = blk_opt {
+                                let tx_count = blk.txs.len();
+                                EEZO_BLOCK_TX_COUNT.set(tx_count as i64);
+
+                                // Use pre-read block_max_tx
+                                if tx_count == block_max_tx {
+                                    EEZO_BLOCK_FULL_TOTAL.inc();
+                                } else if tx_count > 0 {
+                                    EEZO_BLOCK_UNDERFILLED_TOTAL.inc();
+                                }
+                            }
+                        }
+                        // --- END METRICS ---
+
                         // update committed height gauge
                         #[cfg(feature = "metrics")]
                         {
@@ -558,26 +628,19 @@ impl CoreRunnerHandle {
                         if let Some(ref db_handle) = db_c {
 
                             // --- Start Replacement ---
-                            // Lock once to get both header and transactions
-                            let (header_opt, txs_opt) = {
-                                let node_guard = node_c.lock().await;
-                                (
-                                    node_guard.last_committed_header(),
-                                    // *** TEACHER'S CORRECTION APPLIED HERE ***
-                                    node_guard.last_committed_txs()
-                                )
-                            };
+                            // Use blk_opt derived above
+                            if let Some(ref blk) = blk_opt {
+                                // We need hdr and txs for matching the original logic's calls
+                                let hdr = &blk.header;
 
-                            if let (Some(hdr), Some(txs)) = (header_opt, txs_opt) {
                                 if hdr.height == height { // Sanity check height
 
-                                    // 1. Construct the full block
-                                    let block = Block { header: hdr.clone(), txs };
+                                    // 1. Block is already constructed as blk
 
-                                    last_commit_hash_opt = Some(block.header.hash());
+                                    last_commit_hash_opt = Some(hdr.hash());
 
-                                    // 2. Save the full block AND header
-                                    if let Err(e) = db_handle.put_header_and_block(height, &block.header, &block) {
+                                    // 2. Save the full block AND header (passing blk as the block data)
+                                    if let Err(e) = db_handle.put_header_and_block(height, hdr, blk) {
                                         log::error!("❌ runner: failed to persist block at h={}: {}", height, e);
                                     } else {
                                         log::debug!("runner: persisted block at h={}", height);
@@ -739,14 +802,7 @@ impl CoreRunnerHandle {
                                     ([0u8;32], [0u8;32], 0u64)
                                 };
                                 // Prefer in-memory hash from the just-committed header; fall back to DB only if needed
-                                let committed_header_hash = if let Some(hh) = last_commit_hash_opt {
-                                    hh
-                                } else {
-                                    db_c.as_ref()
-                                        .and_then(|db| db.get_header(height).ok())
-                                        .map(|h| h.hash())
-                                        .unwrap_or([0u8;32])
-                                };
+                                let committed_header_hash = blk_opt.as_ref().map(|b| b.header.hash()).unwrap_or([0u8;32]);
 
                                 let mut hdr = BridgeHeader::new(height, committed_header_hash, sr, tr, ts, finality_depth);
                                 // T41.2: optionally attach QC sidecar v2 at cutover+1
