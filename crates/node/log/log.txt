@@ -1,0 +1,366 @@
+terminal 1:
+saeed@DESKTOP-T3Q3B29:~/Block/eezo$ pkill eezo-node || true
+rm -rf /tmp/eezo-t52
+
+EEZO_LOG_LEVEL=info \
+EEZO_BLOCK_MAX_TX=500 \
+EEZO_BLOCK_TARGET_TIME_MS=1000 \
+cargo run -p eezo-node -- \
+  --datadir /tmp/eezo-t52 \
+  --genesis ./genesis.min.json
+   Compiling eezo-ledger v0.1.0 (/home/saeed/Block/eezo/crates/ledger)
+warning: unused import: `std::env`
+  --> crates/ledger/src/consensus.rs:40:5
+   |
+40 | use std::env;
+   |     ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+   Compiling eezo-wallet v0.1.0 (/home/saeed/Block/eezo/crates/wallet)
+   Compiling eezo-net v0.1.0 (/home/saeed/Block/eezo/crates/net)
+warning: `eezo-ledger` (lib) generated 1 warning (run `cargo fix --lib -p eezo-ledger` to apply 1 suggestion)
+   Compiling eezo-node v0.1.0 (/home/saeed/Block/eezo/crates/node)
+warning: unused import: `std::path::PathBuf`
+  --> crates/node/src/main.rs:45:5
+   |
+45 | use std::path::PathBuf;
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `Engine as _` and `engine::general_purpose::STANDARD as B64`
+ --> crates/node/src/peers.rs:2:14
+  |
+2 | use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `single::SingleThreadExecutor`
+  --> crates/node/src/executor/mod.rs:13:9
+   |
+13 | pub use single::SingleThreadExecutor;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `state`
+   --> crates/node/src/bridge.rs:765:11
+    |
+765 |     State(state): State<AppState>,
+    |           ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/node/src/consensus_runner.rs:324:41
+    |
+324 | ...                   let mut sr = [0u8; 32];
+    |                           ----^^
+    |                           |
+    |                           help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/node/src/consensus_runner.rs:325:41
+    |
+325 | ...                   let mut tr = [0u8; 32];
+    |                           ----^^
+    |                           |
+    |                           help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/node/src/consensus_runner.rs:326:41
+    |
+326 | ...                   let mut ts = 0u64;
+    |                           ----^^
+    |                           |
+    |                           help: remove this `mut`
+
+warning: unused variable: `prev_h`
+    --> crates/node/src/main.rs:3138:25
+     |
+3138 |                     let prev_h = cur_h;
+     |                         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_prev_h`
+
+warning: unused variable: `block`
+    --> crates/node/src/main.rs:3159:25
+     |
+3159 |                     let block = Block { header, txs: Vec::new() };
+     |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_block`
+
+warning: static `HTTP_REQS` is never used
+  --> crates/node/src/metrics.rs:19:12
+   |
+19 | pub static HTTP_REQS: Lazy<IntCounterVec> = Lazy::new(|| {
+   |            ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: function `http_inc` is never used
+  --> crates/node/src/metrics.rs:29:8
+   |
+29 | pub fn http_inc(route: &str, status: u16) {
+   |        ^^^^^^^^
+
+warning: static `STATE_SYNC_TLS_HANDSHAKE_FAIL_TOTAL` is never used
+  --> crates/node/src/metrics.rs:43:12
+   |
+43 | pub static STATE_SYNC_TLS_HANDSHAKE_FAIL_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `STATE_SYNC_TLS_CONFIG_FAIL_TOTAL` is never used
+  --> crates/node/src/metrics.rs:53:12
+   |
+53 | pub static STATE_SYNC_TLS_CONFIG_FAIL_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `STATE_SYNC_MTLS_FAIL_TOTAL` is never used
+  --> crates/node/src/metrics.rs:63:12
+   |
+63 | pub static STATE_SYNC_MTLS_FAIL_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `STATE_SYNC_ANCHOR_VERIFY_FAIL_TOTAL` is never used
+  --> crates/node/src/metrics.rs:74:12
+   |
+74 | pub static STATE_SYNC_ANCHOR_VERIFY_FAIL_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `STATE_SYNC_ANCHOR_SIGNED_TOTAL` is never used
+  --> crates/node/src/metrics.rs:85:12
+   |
+85 | pub static STATE_SYNC_ANCHOR_SIGNED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `STATE_SYNC_ANCHOR_UNSIGNED_TOTAL` is never used
+  --> crates/node/src/metrics.rs:95:12
+   |
+95 | pub static STATE_SYNC_ANCHOR_UNSIGNED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tx_rejected_inc` is never used
+   --> crates/node/src/metrics.rs:138:8
+    |
+138 | pub fn tx_rejected_inc(reason: &str) {
+    |        ^^^^^^^^^^^^^^^
+
+warning: static `EEZO_TX_REJECTED_SIMPLE_TOTAL` is never used
+   --> crates/node/src/metrics.rs:167:12
+    |
+167 | pub static EEZO_TX_REJECTED_SIMPLE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_STATE_SYNC_LATEST_HEIGHT` is never used
+   --> crates/node/src/metrics.rs:320:12
+    |
+320 | pub static EEZO_STATE_SYNC_LATEST_HEIGHT: Lazy<IntGauge> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_STATE_SYNC_TOTAL` is never used
+   --> crates/node/src/metrics.rs:340:12
+    |
+340 | pub static EEZO_STATE_SYNC_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_STATE_SYNC_RETRY_TOTAL` is never used
+   --> crates/node/src/metrics.rs:360:12
+    |
+360 | pub static EEZO_STATE_SYNC_RETRY_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `state_sync_latest_height_set` is never used
+   --> crates/node/src/metrics.rs:401:8
+    |
+401 | pub fn state_sync_latest_height_set(h: u64) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `state_sync_total_inc` is never used
+   --> crates/node/src/metrics.rs:416:8
+    |
+416 | pub fn state_sync_total_inc() {
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `state_sync_retry_inc` is never used
+   --> crates/node/src/metrics.rs:425:8
+    |
+425 | pub fn state_sync_retry_inc() {
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: static `SS_RETRIES_TOTAL` is never used
+   --> crates/node/src/metrics.rs:444:12
+    |
+444 | pub static SS_RETRIES_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: static `SS_FAILURES_TOTAL` is never used
+   --> crates/node/src/metrics.rs:449:12
+    |
+449 | pub static SS_FAILURES_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: static `SS_PAGES_APPLIED_TOTAL` is never used
+   --> crates/node/src/metrics.rs:454:12
+    |
+454 | pub static SS_PAGES_APPLIED_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `SS_DELTA_BATCHES_APPLIED_TOTAL` is never used
+   --> crates/node/src/metrics.rs:459:12
+    |
+459 | pub static SS_DELTA_BATCHES_APPLIED_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_EXECUTOR_BLOCK_SECONDS` is never used
+   --> crates/node/src/metrics.rs:932:12
+    |
+932 | pub static EEZO_EXECUTOR_BLOCK_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_EXECUTOR_TX_SECONDS` is never used
+   --> crates/node/src/metrics.rs:952:12
+    |
+952 | pub static EEZO_EXECUTOR_TX_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_EXECUTOR_TPS_INFERRED` is never used
+   --> crates/node/src/metrics.rs:972:12
+    |
+972 | pub static EEZO_EXECUTOR_TPS_INFERRED: Lazy<IntGauge> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ExecutorRequest` is never constructed
+  --> crates/node/src/executor/types.rs:21:12
+   |
+21 | pub struct ExecutorRequest {
+   |            ^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> crates/node/src/executor/types.rs:30:12
+   |
+29 | impl ExecutorRequest {
+   | -------------------- associated function in this implementation
+30 |     pub fn new(height_before: u64, rollback_on_error: bool) -> Self {
+   |            ^^^
+
+warning: struct `ExecutorOutcome` is never constructed
+  --> crates/node/src/executor/types.rs:40:12
+   |
+40 | pub struct ExecutorOutcome {
+   |            ^^^^^^^^^^^^^^^
+
+warning: trait `BlockExecutor` is never used
+  --> crates/node/src/executor/types.rs:57:11
+   |
+57 | pub trait BlockExecutor: Send + Sync {
+   |           ^^^^^^^^^^^^^
+
+warning: struct `SingleThreadExecutor` is never constructed
+  --> crates/node/src/executor/single.rs:29:12
+   |
+29 | pub struct SingleThreadExecutor;
+   |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> crates/node/src/executor/single.rs:32:12
+   |
+31 | impl SingleThreadExecutor {
+   | ------------------------- associated function in this implementation
+32 |     pub fn new() -> Self {
+   |            ^^^
+
+warning: `eezo-node` (bin "eezo-node") generated 38 warnings (run `cargo fix --bin "eezo-node"` to apply 6 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.25s
+     Running `target/debug/eezo-node --datadir /tmp/eezo-t52 --genesis ./genesis.min.json`
+🚀 Node starting up...
+CLI args - genesis: Some("./genesis.min.json"), datadir: Some("/tmp/eezo-t52"), listen: None, log_level: None, config_file: None
+ENV vars - EEZO_CONFIG_FILE: None, EEZO_LISTEN: None, EEZO_DATADIR: None, EEZO_GENESIS: None, EEZO_LOG_LEVEL: Some("info"), EEZO_BLOCK_MAX_TX: Some("500"), EEZO_BLOCK_TARGET_TIME_MS: Some("1000")
+Resolved config path: None
+✅ Config merged successfully
+Final listen address: 127.0.0.1:8080
+Final datadir: /tmp/eezo-t52
+Final log level: info
+🔍 About to read .lock file at: "/tmp/eezo-t52/.lock"
+🔍 No existing lock file found
+🔍 Writing new lock file with PID: 25024
+🔍 Loading node identity from: "/tmp/eezo-t52/NODE_ID"
+🔍 No NODE_ID file, checking for legacy IDENTITY
+🔍 No legacy identity found, creating new identity
+✅ Node identity loaded: 41de46ba-9b2b-4ebb-a608-db305ebf773c
+[2025-11-19T22:16:47Z INFO  eezo_node] spawned metrics server on 127.0.0.1:9898
+EEZO_CHAIN_ID not set and persistence is off; defaulting to devnet chain_id=...0001
+🔍 Chain ID (effective): 0000000000000000000000000000000000000001
+🔍 Opening persistence store at: /tmp/eezo-t52
+[2025-11-19T22:16:47Z INFO  eezo_node] metrics: binding on http://127.0.0.1:9898
+[2025-11-19T22:16:47Z INFO  eezo_node] crypto-rotation policy: active_suite=1 next_suite=None dual_accept_until=None window_open=false
+✅ Preparing runtime config
+✅ Runtime config built: node_id=41de46ba-9b2b-4ebb-a608-db305ebf773c, listen=127.0.0.1:8080
+🔍 Configured peers: []
+✅ Peer service started - current readiness: true
+🔍 Zero-peer mode status: true
+✅ AppState initialized: ready_flag=true, version=0.1.0, git_sha=None
+[2025-11-19T22:16:47Z INFO  eezo_node] 🔶 bridge checkpoint emitter disabled: node built without `persistence` feature
+✅ Router built with /ready, /config, /status, /peers, /_admin endpoints
+🔍 Binding to address: 127.0.0.1:8080
+✅ TCP listener bound on 127.0.0.1:8080
+🚀 Server starting with readiness = true
+🎉 SERVER SUMMARY:
+   • Node ID: 41de46ba-9b2b-4ebb-a608-db305ebf773c
+   • Listening on: 127.0.0.1:8080
+   • Data directory: /tmp/eezo-t52
+   • Chain ID: 0000000000000000000000000000000000000001
+   • Version: 0.1.0
+   • Git SHA: None
+   • Ready: true
+   • Configured peers: 0
+   • Mempool: max_len=10000, max_bytes=67108864 (rate: cap=60, per_min=600)
+🚀 Node is ready and listening on 127.0.0.1:8080
+🔍 Final readiness check before server start: true
+🚀 Launching Axum server now...
+warning: failed to register eezo_block_e2e_latency_seconds: Duplicate metrics collector registration attempted (using unregistered fallback histogram)
+[2025-11-19T22:16:53Z INFO  eezo_node] ✅ committed block h=1 (8 txs)
+[2025-11-19T22:16:53Z INFO  eezo_node] ✅ committed block h=2 (12 txs)
+[2025-11-19T22:16:54Z INFO  eezo_node] ✅ committed block h=3 (14 txs)
+[2025-11-19T22:16:54Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=32: Not a directory (os error 20)
+[2025-11-19T22:16:54Z INFO  eezo_node] ✅ committed block h=4 (13 txs)
+[2025-11-19T22:16:54Z INFO  eezo_node] ✅ committed block h=5 (14 txs)
+[2025-11-19T22:16:55Z INFO  eezo_node] ✅ committed block h=6 (13 txs)
+[2025-11-19T22:16:55Z INFO  eezo_node] ✅ committed block h=7 (11 txs)
+[2025-11-19T22:16:57Z INFO  eezo_node::consensus_runner] consensus: committed height=50
+[2025-11-19T22:17:00Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=64: Not a directory (os error 20)
+[2025-11-19T22:17:07Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=96: Not a directory (os error 20)
+[2025-11-19T22:17:07Z INFO  eezo_node::consensus_runner] consensus: committed height=100
+[2025-11-19T22:17:13Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=128: Not a directory (os error 20)
+[2025-11-19T22:17:17Z INFO  eezo_node::consensus_runner] consensus: committed height=150
+[2025-11-19T22:17:19Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=160: Not a directory (os error 20)
+[2025-11-19T22:17:27Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=192: Not a directory (os error 20)
+[2025-11-19T22:17:28Z INFO  eezo_node::consensus_runner] consensus: committed height=200
+[2025-11-19T22:17:33Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=224: Not a directory (os error 20)
+[2025-11-19T22:17:38Z INFO  eezo_node::consensus_runner] consensus: committed height=250
+[2025-11-19T22:17:39Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=256: Not a directory (os error 20)
+[2025-11-19T22:17:46Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=288: Not a directory (os error 20)  
+
+
+terminal 2:
+saeed@DESKTOP-T3Q3B29:~/Block/eezo$ ADDR_FROM="0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+curl -s -X POST http://127.0.0.1:8080/faucet \
+  -H "Content-Type: application/json" \
+  -d "{\"to\":\"$ADDR_FROM\",\"amount\":\"100000000000\"}"
+
+scripts/spam_tps.sh 200
+{"balance":"100000000000","nonce":"0","to":"0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}[spam] using NODE=http://127.0.0.1:8080 COUNT=200
+[spam] account = {"balance":"100000000000","nonce":"0"}
+[spam] starting nonce = 0
+[spam] submitted 200 tx
+saeed@DESKTOP-T3Q3B29:~/Block/eezo$ curl -s http://127.0.0.1:9898/metrics \
+  | rg 'eezo_txs_included_total|eezo_block_tx_count|eezo_mempool_len'
+# HELP eezo_block_tx_count Number of transactions included in the last built block
+# TYPE eezo_block_tx_count gauge
+eezo_block_tx_count 0
+# HELP eezo_mempool_len Current mempool length
+# TYPE eezo_mempool_len gauge
+eezo_mempool_len 36
+# HELP eezo_txs_included_total Transactions included in committed blocks (node view)
+# TYPE eezo_txs_included_total counter
+eezo_txs_included_total 85
+saeed@DESKTOP-T3Q3B29:~/Block/eezo$ 
+

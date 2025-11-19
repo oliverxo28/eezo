@@ -73,6 +73,8 @@ use std::sync::{
 };
 use std::time::Duration;
 use tokio::time::interval;
+#[cfg(feature = "pq44-runtime")]
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 mod metrics;
 mod peers;
@@ -2761,11 +2763,14 @@ async fn main() -> anyhow::Result<()> {
 
     println!("✅ Router built with /ready, /config, /status, /peers, /_admin endpoints");
     // -------------------------------------------------------------------------
-    // T30: Minimal single-node proposer
+    // T30: Minimal single-node proposer (DISABLED when pq44-runtime is active)
     // - Every EEZO_PROPOSER_INTERVAL_MS (default 400ms), pop a batch from mempool
     // - DEV STUB: mark each popped tx as included at (height += 1)
-    //   (next step: call ledger::apply_signed_tx and mark accepted/rejected accordingly)
+    // - NOTE: When pq44-runtime feature is enabled, the consensus runner handles
+    //   block production via its own internal mempool. The T30 proposer conflicts
+    //   with it and must be disabled.
     // -------------------------------------------------------------------------
+    #[cfg(not(feature = "pq44-runtime"))]
     {
         let state_clone = state.clone();
         let interval_ms = env_usize("EEZO_PROPOSER_INTERVAL_MS", 400) as u64;
@@ -3218,6 +3223,134 @@ async fn main() -> anyhow::Result<()> {
 
             }
         });
+    }
+
+    // -------------------------------------------------------------------------
+    // Mempool Bridge (pq44-runtime only): Feed HTTP txs into SingleNode
+    // -------------------------------------------------------------------------
+    #[cfg(feature = "pq44-runtime")]
+    {
+        if let Some(ref runner) = state.core_runner {
+            let state_clone = state.clone();
+            let runner_clone = Arc::clone(runner);
+            let interval_ms = env_usize("EEZO_MEMPOOL_BRIDGE_INTERVAL_MS", 50) as u64;
+            let chain_id = state.runtime_config.chain_id_hex.clone();
+            
+            tokio::spawn(async move {
+                let mut tick = interval(Duration::from_millis(interval_ms));
+                loop {
+                    tick.tick().await;
+                    
+                    // Pop a batch from HTTP mempool
+                    let target_bytes = state_clone.runtime_config.max_block_bytes;
+                    let batch = state_clone.mempool.pop_batch(target_bytes).await;
+                    
+                    if batch.is_empty() {
+                        continue;
+                    }
+                    
+                    // Convert and enqueue into SingleNode's mempool
+                    let batch_len = batch.len();
+                    runner_clone.with_node(|node| {
+                        for entry in batch {
+                            // Parse the HTTP envelope
+                            let env: SignedTxEnvelope = match serde_json::from_slice(&entry.bytes) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    log::warn!("mempool bridge: failed to parse envelope: {}", e);
+                                    continue;
+                                }
+                            };
+                            
+                            // Convert to ledger format
+                            let to_addr = match parse_account_addr(&env.tx.to) {
+                                Some(addr) => addr,
+                                None => {
+                                    log::warn!("mempool bridge: invalid 'to' address: {}", env.tx.to);
+                                    continue;
+                                }
+                            };
+                            
+                            let amount = match env.tx.amount.parse::<u64>() {
+                                Ok(v) => v as u128,
+                                Err(_) => {
+                                    log::warn!("mempool bridge: invalid amount: {}", env.tx.amount);
+                                    continue;
+                                }
+                            };
+                            
+                            let fee = match env.tx.fee.parse::<u64>() {
+                                Ok(v) => v as u128,
+                                Err(_) => {
+                                    log::warn!("mempool bridge: invalid fee: {}", env.tx.fee);
+                                    continue;
+                                }
+                            };
+                            
+                            let nonce = match env.tx.nonce.parse::<u64>() {
+                                Ok(v) => v,
+                                Err(_) => {
+                                    log::warn!("mempool bridge: invalid nonce: {}", env.tx.nonce);
+                                    continue;
+                                }
+                            };
+                            
+                            // Decode signature (try hex first, then base64)
+                            let sig = if env.sig.starts_with("0x") {
+                                hex::decode(env.sig.trim_start_matches("0x")).ok()
+                            } else if !env.sig.is_empty() {
+                                BASE64.decode(&env.sig).ok()
+                            } else {
+                                Some(vec![]) // Empty sig for devnet
+                            };
+                            
+                            let sig = match sig {
+                                Some(s) => s,
+                                None => {
+                                    log::warn!("mempool bridge: failed to decode signature");
+                                    continue;
+                                }
+                            };
+                            
+                            // Extract or derive pubkey
+                            // For devnet, we can derive it from the 'from' address
+                            let pubkey = if let Some(from_addr) = parse_account_addr(&env.tx.from) {
+                                // Use the from address bytes as a placeholder pubkey
+                                // In production, this should come from the signature verification
+                                from_addr.as_bytes().to_vec()
+                            } else {
+                                vec![]
+                            };
+                            
+                            // Create ledger SignedTx
+                            let signed_tx = eezo_ledger::SignedTx {
+                                core: eezo_ledger::TxCore {
+                                    to: to_addr,
+                                    amount,
+                                    fee,
+                                    nonce,
+                                },
+                                pubkey,
+                                sig,
+                            };
+                            
+                            // Enqueue into SingleNode's mempool
+                            node.mempool.enqueue_tx(signed_tx);
+                        }
+                    }).await;
+                    
+                    // Update HTTP mempool metrics after transferring transactions
+                    #[cfg(feature = "metrics")]
+                    {
+                        crate::metrics::EEZO_MEMPOOL_LEN.set(state_clone.mempool.len().await as i64);
+                    }
+                    
+                    log::debug!("mempool bridge: fed {} transactions to SingleNode", batch_len);
+                }
+            });
+            
+            log::info!("✅ Mempool bridge started (feeding HTTP txs to consensus runner)");
+        }
     }
 
     let addr: SocketAddr = cfg.listen.parse().context("invalid listen address")?;
