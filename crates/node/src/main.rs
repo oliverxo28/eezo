@@ -2985,31 +2985,54 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
                     };
-                    // nonce must equal current sender nonce
+                    // nonce policy: reject replays, defer future nonces
                     let (bal, cur_nonce) = state_clone.accounts.get(&from_hex).await;
-                    if want_nonce != cur_nonce {
-                        let reason = format!("bad nonce: want={}, cur={}", want_nonce, cur_nonce);
-                        state_clone.mempool
+
+                    // Case 1: replay (nonce too low) → hard reject.
+                    if want_nonce < cur_nonce {
+                        let reason = format!("nonce too low: want={}, cur={}", want_nonce, cur_nonce);
+                        state_clone
+                            .mempool
                             .mark_rejected(&entry.hash, reason.clone(), entry.bytes.len())
                             .await;
                         let hhex = format!("0x{}", hex::encode(entry.hash));
-                        let receipt = Receipt{
+                        let receipt = Receipt {
                             hash: hhex.clone(),
                             status: "rejected",
                             block_height: None,
-     
                             from: env.tx.from.clone(),
                             to: env.tx.to.clone(),
                             amount: env.tx.amount.clone(),
-                  
-                             fee: env.tx.fee.clone(),
+                            fee: env.tx.fee.clone(),
                             nonce: env.tx.nonce.clone(),
                             error: Some(reason),
                         };
-                        state_clone.receipts.write().await.insert(hhex.clone(), receipt.clone());
-                        #[cfg(feature = "metrics")] { TX_REJECTED_TOTAL.inc(); }
+                        state_clone
+                            .receipts
+                            .write()
+                            .await
+                            .insert(hhex.clone(), receipt.clone());
+                        #[cfg(feature = "metrics")]
+                        {
+                            TX_REJECTED_TOTAL.inc();
+                        }
                         continue;
                     }
+
+                    // Case 2: future nonce (gap) → defer, keep Pending.
+                    if want_nonce > cur_nonce {
+                        tracing::debug!(
+                            "deferring tx due to future nonce: want={} cur={}",
+                            want_nonce,
+                            cur_nonce,
+                        );
+                        // Do NOT mark as rejected; put it back into the mempool queue.
+                        state_clone.mempool.requeue(entry.clone()).await;
+                        continue;
+                    }
+
+                    // Case 3: want_nonce == cur_nonce → eligible for inclusion, proceed.
+                    // (bal is already loaded above)
 
                     // 4) sufficient balance
                     let need = amount.saturating_add(fee);

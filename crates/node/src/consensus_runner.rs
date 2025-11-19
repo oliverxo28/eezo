@@ -159,20 +159,26 @@ impl CoreRunnerHandle {
                                 .map(|(header, txs)| Block { header, txs })
                         };
                         
-                        // --- T51.5a block batching metrics (MOVED HERE) ---
+                        // --- T51.5a/T51.5c block batching + inclusion metrics ---
                         #[cfg(feature = "metrics")]
                         {
                             use crate::metrics::{
                                 EEZO_BLOCK_TX_COUNT,
                                 EEZO_BLOCK_FULL_TOTAL,
                                 EEZO_BLOCK_UNDERFILLED_TOTAL,
+                                txs_included_inc,
                             };
 
                             if let Some(ref blk) = blk_opt {
                                 let tx_count = blk.txs.len();
                                 EEZO_BLOCK_TX_COUNT.set(tx_count as i64);
 
-                                // Use pre-read block_max_tx
+                                // T51.5c: bump global included-tx counter for this committed block.
+                                if tx_count > 0 {
+                                    txs_included_inc(tx_count as u64);
+                                }
+
+                                // Use pre-read block_max_tx for fullness stats.
                                 if tx_count == block_max_tx {
                                     EEZO_BLOCK_FULL_TOTAL.inc();
                                 } else if tx_count > 0 {
@@ -181,7 +187,6 @@ impl CoreRunnerHandle {
                             }
                         }
                         // --- END METRICS ---
-
                         // update committed height gauge
                         #[cfg(feature = "metrics")]
                         {

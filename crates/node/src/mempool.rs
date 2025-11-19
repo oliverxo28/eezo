@@ -232,6 +232,30 @@ impl Mempool {
         }
     }
 
+    /// Reinsert a pending entry back into the FIFO queue without changing its status.
+    ///
+    /// Used by the proposer when a tx has a nonce that is **too high**:
+    /// we want to keep it Pending instead of marking it Rejected.
+    pub fn requeue(&mut self, entry: Arc<TxEntry>) {
+        // If the queue is already at capacity, just drop the requeue request.
+        // The original submit() call already accounted for this tx in cur_bytes.
+        if self.queue.len() >= self.max_len {
+            return;
+        }
+
+        // If we somehow already have this hash in the pending index, don't double-insert.
+        if self.pending_index.contains_key(&entry.hash) {
+            return;
+        }
+
+        self.pending_index.insert(entry.hash, ());
+        self.queue.push_back(entry);
+
+        #[cfg(feature = "metrics")]
+        self.refresh_gauges();
+    }
+
+
     pub fn status(&self, hash: &TxHash) -> Option<TxStatus> {
         self.statuses.get(hash).cloned()
     }
@@ -283,6 +307,11 @@ impl SharedMempool {
     pub async fn pop_batch(&self, target_bytes: usize) -> Vec<Arc<TxEntry>> {
         let mut g = self.0.lock().await;
         g.pop_batch(target_bytes)
+    }
+
+    pub async fn requeue(&self, entry: Arc<TxEntry>) {
+        let mut g = self.0.lock().await;
+        g.requeue(entry);
     }
 
     pub async fn mark_included(&self, hash: &TxHash, height: u64, approx_bytes: usize) {
@@ -381,5 +410,99 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1100)).await;
         let e = mp.submit(ip, h(3), vec![0u8; 64]).await.err().unwrap();
         assert!(matches!(e, SubmitError::BytesCapReached));
+    }
+
+    #[tokio::test]
+    async fn basic_requeue() {
+        let mp = SharedMempool::new(Mempool::new(3, 10_000, 10, 600));
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Submit three transactions
+        mp.submit(ip, h(1), vec![0u8; 100]).await.unwrap();
+        mp.submit(ip, h(2), vec![0u8; 200]).await.unwrap();
+        mp.submit(ip, h(3), vec![0u8; 300]).await.unwrap();
+        assert_eq!(mp.len().await, 3);
+
+        // Pop the first two transactions (h1 and h2)
+        let mut batch = mp.pop_batch(1000).await;
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].hash, h(1));
+        assert_eq!(batch[1].hash, h(2));
+        assert_eq!(mp.len().await, 1); // h3 is left
+
+        // Proposer sees h2 has too high a nonce and requeues it.
+        // It's removed from the front index by pop_batch, but still Pending in statuses.
+        let tx_h2 = batch.pop().unwrap();
+        mp.requeue(tx_h2).await;
+        assert_eq!(mp.len().await, 2); // h3 is at front, h2 is at back
+
+        // Pop again: h3 should come first, then the requeued h2
+        let batch_requeued = mp.pop_batch(1000).await;
+        assert_eq!(batch_requeued.len(), 2);
+        assert_eq!(batch_requeued[0].hash, h(3));
+        assert_eq!(batch_requeued[1].hash, h(2));
+
+        // Statuses should still be Pending
+        assert!(matches!(mp.status(&h(2)).await, Some(TxStatus::Pending)));
+        assert!(matches!(mp.status(&h(3)).await, Some(TxStatus::Pending)));
+    }
+
+    #[tokio::test]
+    async fn requeue_capacity_check() {
+        let mp = SharedMempool::new(Mempool::new(1, 10_000, 10, 600));
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Fill mempool
+        mp.submit(ip, h(1), vec![0u8; 100]).await.unwrap();
+        // Submit fails because full
+        let e = mp.submit(ip, h(2), vec![0u8; 200]).await.err().unwrap();
+        assert!(matches!(e, SubmitError::QueueFull));
+
+        // Pop h1
+        let batch = mp.pop_batch(1000).await;
+        let tx_h1 = batch[0].clone();
+        assert_eq!(mp.len().await, 0);
+
+        // Submit h2 (now fits)
+        mp.submit(ip, h(2), vec![0u8; 200]).await.unwrap();
+        assert_eq!(mp.len().await, 1);
+
+        // Mempool is full again (len=1, max_len=1). Requeuing h1 should be dropped.
+        mp.requeue(tx_h1).await;
+        assert_eq!(mp.len().await, 1);
+        // h1 is still in statuses as Pending, but not in the queue.
+        assert!(matches!(mp.status(&h(1)).await, Some(TxStatus::Pending)));
+
+        // Pop h2
+        mp.pop_batch(1000).await;
+        assert_eq!(mp.len().await, 0);
+
+        // Now requeuing h1 should succeed.
+        mp.requeue(batch[0].clone()).await;
+        assert_eq!(mp.len().await, 1);
+        assert!(mp.pop_batch(1000).await[0].hash == h(1));
+    }
+
+    #[tokio::test]
+    async fn requeue_duplicate_check() {
+        let mp = SharedMempool::new(Mempool::new(2, 10_000, 10, 600));
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Submit h1
+        mp.submit(ip, h(1), vec![0u8; 100]).await.unwrap();
+        assert_eq!(mp.len().await, 1);
+
+        // Pop h1 (now removed from queue/pending_index)
+        let batch = mp.pop_batch(1000).await;
+        let tx_h1 = batch[0].clone();
+        assert_eq!(mp.len().await, 0);
+
+        // Requeue h1 (success)
+        mp.requeue(tx_h1.clone()).await;
+        assert_eq!(mp.len().await, 1);
+
+        // Requeue h1 again (should be rejected by pending_index check)
+        mp.requeue(tx_h1).await;
+        assert_eq!(mp.len().await, 1);
     }
 }
