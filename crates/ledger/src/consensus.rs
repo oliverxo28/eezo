@@ -652,9 +652,27 @@ impl SingleNode {
 
         // 2c) Add the max-tx cap before assemble_block
         // Apply optional EEZO_BLOCK_MAX_TX cap (hard limit on txs per block).
+        //
+        // IMPORTANT:
+        // `mempool.drain_for_block` has *already* removed all `candidates`
+        // from the internal mempool. If we simply truncate here, the
+        // truncated tail is *lost forever*.
+        //
+        // Fix: keep the first `max_tx` in `candidates`, and re-enqueue
+        // the dropped tail back into the mempool.
         if let Some(max_tx) = block_max_tx_from_env() {
             if candidates.len() > max_tx {
-                candidates.truncate(max_tx);
+                // `candidates` keeps [0..max_tx), `dropped_txs` gets [max_tx..)
+                let dropped_txs = candidates.split_off(max_tx);
+                log::debug!(
+                    "propose_block: hard cap dropped {} candidate txs; re-enqueuing to mempool",
+                    dropped_txs.len()
+                );
+
+                for tx in dropped_txs {
+                    // Reinsert into mempool so they can be considered in future blocks
+                    self.mempool.enqueue_tx(tx);
+                }
             }
         }
 
