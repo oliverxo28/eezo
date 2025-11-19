@@ -926,6 +926,68 @@ pub static EEZO_BLOCK_UNDERFILLED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 // -----------------------------------------------------------------------------
+// T52.1 — executor timing metrics
+// -----------------------------------------------------------------------------
+#[cfg(feature = "metrics")]
+pub static EEZO_EXECUTOR_BLOCK_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "eezo_executor_block_seconds",
+        "Time spent executing blocks (seconds, executor hot path)",
+        &["kind"] // currently always "block"
+    )
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "warning: failed to register eezo_executor_block_seconds: {} (using unregistered fallback histogram)",
+            e
+        );
+        let opts = HistogramOpts::new(
+            "eezo_executor_block_seconds_fallback",
+            "unregistered fallback histogram for executor block time (seconds)",
+        );
+        HistogramVec::new(opts, &["kind"]).expect("fallback histogram constructed")
+    })
+});
+
+#[cfg(feature = "metrics")]
+pub static EEZO_EXECUTOR_TX_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "eezo_executor_tx_seconds",
+        "Execution time per transaction (seconds, inferred from blocks)",
+        &["kind"] // currently always "tx"
+    )
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "warning: failed to register eezo_executor_tx_seconds: {} (using unregistered fallback histogram)",
+            e
+        );
+        let opts = HistogramOpts::new(
+            "eezo_executor_tx_seconds_fallback",
+            "unregistered fallback histogram for executor per-tx time (seconds)",
+        );
+        HistogramVec::new(opts, &["kind"]).expect("fallback histogram constructed")
+    })
+});
+
+#[cfg(feature = "metrics")]
+pub static EEZO_EXECUTOR_TPS_INFERRED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_executor_tps_inferred",
+        "Instantaneous TPS estimated from executor timings (tx_count / block_time)"
+    )
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "warning: failed to register eezo_executor_tps_inferred: {} (using unregistered fallback gauge)",
+            e
+        );
+        IntGauge::new(
+            "eezo_executor_tps_inferred_fallback",
+            "unregistered fallback gauge for executor TPS"
+        )
+        .expect("fallback gauge constructed")
+    })
+});
+
+// -----------------------------------------------------------------------------
 // T51.5a — sigpool metrics
 // -----------------------------------------------------------------------------
 

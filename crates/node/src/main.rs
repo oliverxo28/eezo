@@ -79,6 +79,7 @@ mod peers;
 mod mempool;
 mod sigpool;
 mod accounts;
+mod executor;
 
 use peers::{parse_peers_from_env, peers_handler, PeerMap, PeerService};
 use accounts::{Accounts, AccountView, FaucetReq};
