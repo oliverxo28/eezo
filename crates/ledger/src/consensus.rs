@@ -894,6 +894,18 @@ impl SingleNode {
 
         Ok((blk, summary))
     }
+    /// Enqueue a signed transaction into the ledger's mempool.
+    ///
+    /// This is the canonical entry point for user transactions at the
+    /// consensus level. It does not perform stateful checks here; all
+    /// shape / signature / nonce / balance validation still happens in
+    /// the block proposal + validation path.
+    ///
+    /// Node layer (HTTP, network, etc.) should only call this with
+    /// syntactically valid `SignedTx`s.
+    pub fn submit_signed_tx(&mut self, tx: SignedTx) {
+        self.mempool.enqueue_tx(tx);
+    }	
 
     // ────────────────────────────────────────────────────────────────────────
     // Snapshot helpers (no side effects). Node layer decides when/if to write.
