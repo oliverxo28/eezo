@@ -1,0 +1,179 @@
+terminal 1:
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 24.80s
+     Running `target/debug/eezo-node --genesis genesis.min.json --datadir /tmp/eezo-t52`
+🚀 Node starting up...
+CLI args - genesis: Some("genesis.min.json"), datadir: Some("/tmp/eezo-t52"), listen: None, log_level: None, config_file: None
+ENV vars - EEZO_CONFIG_FILE: None, EEZO_LISTEN: None, EEZO_DATADIR: None, EEZO_GENESIS: None, EEZO_LOG_LEVEL: None, EEZO_BLOCK_MAX_TX: Some("500"), EEZO_BLOCK_TARGET_TIME_MS: None
+Resolved config path: None
+✅ Config merged successfully
+Final listen address: 127.0.0.1:8080
+Final datadir: /tmp/eezo-t52
+Final log level: info
+🔍 About to read .lock file at: "/tmp/eezo-t52/.lock"
+🔍 No existing lock file found
+🔍 Writing new lock file with PID: 45918
+🔍 Loading node identity from: "/tmp/eezo-t52/NODE_ID"
+🔍 No NODE_ID file, checking for legacy IDENTITY
+🔍 No legacy identity found, creating new identity
+✅ Node identity loaded: d61206cb-5f83-4019-9421-e5e5305d46aa
+[2025-11-20T01:18:32Z INFO  eezo_node] spawned metrics server on 127.0.0.1:9898
+[2025-11-20T01:18:32Z INFO  eezo_node] metrics: binding on http://127.0.0.1:9898
+🔍 Chain ID (effective): 0000000000000000000000000000000000000001
+🔍 Opening persistence store at: /tmp/eezo-t52
+[2025-11-20T01:18:32Z INFO  eezo_node] 🔍 Using persistence snapshot_interval = 1000 blocks
+[2025-11-20T01:18:32Z INFO  eezo_node] crypto-rotation policy: active_suite=1 next_suite=None dual_accept_until=None window_open=false
+🔍 About to read genesis file: genesis.min.json
+🔍 Parsing genesis JSON...
+✅ Genesis file read and parsed
+🔍 Genesis chain ID: 0000000000000000000000000000000000000001
+🔍 Runtime chain ID: 0000000000000000000000000000000000000001
+✅ Genesis chain_id matches runtime
+🔍 Applying genesis...
+[2025-11-20T01:18:32Z INFO  eezo_ledger::persistence] Snapshot height 0 accounts count = 2, supply = Supply { native_mint_total: 5000000000, bridge_mint_total: 0, burn_total: 0 }
+[2025-11-20T01:18:32Z WARN  eezo_ledger::genesis] prewrite SSZ snapshot blob (height 0) failed: not found
+✅ Genesis applied
+✅ Preparing runtime config
+✅ Runtime config built: node_id=d61206cb-5f83-4019-9421-e5e5305d46aa, listen=127.0.0.1:8080
+🔍 Configured peers: []
+✅ Peer service started - current readiness: true
+🔍 Zero-peer mode status: true
+warning: failed to register eezo_block_e2e_latency_seconds: Duplicate metrics collector registration attempted (using unregistered fallback histogram)
+🔍 No tip found, start at 0
+✅ AppState initialized: ready_flag=true, version=0.1.0, git_sha=None
+[2025-11-20T01:18:32Z INFO  eezo_node] 🔶 bridge checkpoint emitter disabled (set EEZO_BRIDGE_OUTBOX_ENABLED=1 to enable)
+✅ Router built with /ready, /config, /status, /peers, /_admin endpoints
+🔍 Binding to address: 127.0.0.1:8080
+✅ TCP listener bound on 127.0.0.1:8080
+🚀 Server starting with readiness = true
+🎉 SERVER SUMMARY:
+   • Node ID: d61206cb-5f83-4019-9421-e5e5305d46aa
+   • Listening on: 127.0.0.1:8080
+   • Data directory: /tmp/eezo-t52
+   • Chain ID: 0000000000000000000000000000000000000001
+   • Version: 0.1.0
+   • Git SHA: None
+   • Ready: true
+   • Configured peers: 0
+   • Mempool: max_len=10000, max_bytes=52428800 (rate: cap=60, per_min=600)
+🚀 Node is ready and listening on 127.0.0.1:8080
+🔍 Final readiness check before server start: true
+🚀 Launching Axum server now...
+[2025-11-20T01:18:38Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=32: Not a directory (os error 20)
+[2025-11-20T01:18:42Z INFO  eezo_node::consensus_runner] consensus: committed height=50
+[2025-11-20T01:18:45Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=64: Not a directory (os error 20)
+[2025-11-20T01:18:51Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=96: Not a directory (os error 20)
+[2025-11-20T01:18:53Z INFO  eezo_node::consensus_runner] consensus: committed height=100
+[2025-11-20T01:18:59Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=128: Not a directory (os error 20)
+[2025-11-20T01:19:03Z INFO  eezo_ledger::persistence] Snapshot height 1 accounts count = 0, supply = Supply { native_mint_total: 5000000000, bridge_mint_total: 0, burn_total: 0 }
+[2025-11-20T01:19:03Z INFO  eezo_node] ✅ committed block h=1 (7 txs)
+[2025-11-20T01:19:03Z INFO  eezo_node::consensus_runner] consensus: committed height=150
+[2025-11-20T01:19:03Z INFO  eezo_ledger::persistence] Snapshot height 2 accounts count = 0, supply = Supply { native_mint_total: 5000000000, bridge_mint_total: 0, burn_total: 0 }
+[2025-11-20T01:19:03Z INFO  eezo_node] ✅ committed block h=2 (20 txs)
+[2025-11-20T01:19:04Z INFO  eezo_ledger::persistence] Snapshot height 3 accounts count = 0, supply = Supply { native_mint_total: 5000000000, bridge_mint_total: 0, burn_total: 0 }
+[2025-11-20T01:19:04Z INFO  eezo_node] ✅ committed block h=3 (20 txs)
+[2025-11-20T01:19:04Z INFO  eezo_ledger::persistence] Snapshot height 4 accounts count = 0, supply = Supply { native_mint_total: 5000000000, bridge_mint_total: 0, burn_total: 0 }
+[2025-11-20T01:19:04Z INFO  eezo_node] ✅ committed block h=4 (20 txs)
+[2025-11-20T01:19:05Z INFO  eezo_ledger::persistence] Snapshot height 5 accounts count = 0, supply = Supply { native_mint_total: 5000000000, bridge_mint_total: 0, burn_total: 0 }
+[2025-11-20T01:19:05Z INFO  eezo_node] ✅ committed block h=5 (7 txs)
+[2025-11-20T01:19:05Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=160: Not a directory (os error 20)
+[2025-11-20T01:19:12Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=192: Not a directory (os error 20)
+[2025-11-20T01:19:13Z INFO  eezo_node::consensus_runner] consensus: committed height=200
+[2025-11-20T01:19:18Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=224: Not a directory (os error 20)
+[2025-11-20T01:19:23Z INFO  eezo_node::consensus_runner] consensus: committed height=250
+[2025-11-20T01:19:24Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=256: Not a directory (os error 20)
+[2025-11-20T01:19:32Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=288: Not a directory (os error 20)
+[2025-11-20T01:19:34Z INFO  eezo_node::consensus_runner] consensus: committed height=300
+[2025-11-20T01:19:38Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=320: Not a directory (os error 20)
+[2025-11-20T01:19:44Z INFO  eezo_node::consensus_runner] consensus: committed height=350
+[2025-11-20T01:19:45Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=352: Not a directory (os error 20)
+[2025-11-20T01:19:51Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=384: Not a directory (os error 20)
+[2025-11-20T01:19:54Z INFO  eezo_node::consensus_runner] consensus: committed height=400
+[2025-11-20T01:19:57Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=416: Not a directory (os error 20)
+[2025-11-20T01:20:05Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=448: Not a directory (os error 20)
+[2025-11-20T01:20:05Z INFO  eezo_node::consensus_runner] consensus: committed height=450
+[2025-11-20T01:20:11Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=480: Not a directory (os error 20)
+[2025-11-20T01:20:15Z INFO  eezo_node::consensus_runner] consensus: committed height=500
+[2025-11-20T01:20:18Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=512: Not a directory (os error 20)
+[2025-11-20T01:20:24Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=544: Not a directory (os error 20)
+[2025-11-20T01:20:25Z INFO  eezo_node::consensus_runner] consensus: committed height=550
+[2025-11-20T01:20:30Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=576: Not a directory (os error 20)
+[2025-11-20T01:20:36Z INFO  eezo_node::consensus_runner] consensus: committed height=600
+[2025-11-20T01:20:38Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=608: Not a directory (os error 20)
+[2025-11-20T01:20:44Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=640: Not a directory (os error 20)
+[2025-11-20T01:20:46Z INFO  eezo_node::consensus_runner] consensus: committed height=650
+[2025-11-20T01:20:51Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=672: Not a directory (os error 20)
+[2025-11-20T01:20:56Z INFO  eezo_node::consensus_runner] consensus: committed height=700
+[2025-11-20T01:20:57Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=704: Not a directory (os error 20)
+[2025-11-20T01:21:03Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=736: Not a directory (os error 20)
+[2025-11-20T01:21:07Z INFO  eezo_node::consensus_runner] consensus: committed height=750
+[2025-11-20T01:21:11Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=768: Not a directory (os error 20)
+[2025-11-20T01:21:17Z INFO  eezo_node::consensus_runner] consensus: committed height=800
+[2025-11-20T01:21:17Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=800: Not a directory (os error 20)
+[2025-11-20T01:21:24Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=832: Not a directory (os error 20)
+[2025-11-20T01:21:27Z INFO  eezo_node::consensus_runner] consensus: committed height=850
+[2025-11-20T01:21:30Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=864: Not a directory (os error 20)
+[2025-11-20T01:21:36Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=896: Not a directory (os error 20)
+[2025-11-20T01:21:37Z INFO  eezo_node::consensus_runner] consensus: committed height=900
+[2025-11-20T01:21:44Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=928: Not a directory (os error 20)
+[2025-11-20T01:21:48Z INFO  eezo_node::consensus_runner] consensus: committed height=950
+[2025-11-20T01:21:50Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=960: Not a directory (os error 20)
+[2025-11-20T01:21:57Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=992: Not a directory (os error 20)
+[2025-11-20T01:21:58Z INFO  eezo_node::consensus_runner] consensus: committed height=1000
+[2025-11-20T01:21:58Z INFO  eezo_ledger::persistence] Snapshot height 1000 accounts count = 0, supply = Supply { native_mint_total: 0, bridge_mint_total: 0, burn_total: 0 }
+[2025-11-20T01:21:58Z INFO  eezo_node::consensus_runner] ✅ runner: wrote state snapshot at h=1000
+[2025-11-20T01:22:03Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1024: Not a directory (os error 20)
+[2025-11-20T01:22:08Z INFO  eezo_node::consensus_runner] consensus: committed height=1050
+[2025-11-20T01:22:10Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1056: Not a directory (os error 20)
+[2025-11-20T01:22:17Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1088: Not a directory (os error 20)
+[2025-11-20T01:22:19Z INFO  eezo_node::consensus_runner] consensus: committed height=1100
+[2025-11-20T01:22:23Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1120: Not a directory (os error 20)
+[2025-11-20T01:22:29Z INFO  eezo_node::consensus_runner] consensus: committed height=1150
+[2025-11-20T01:22:30Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1152: Not a directory (os error 20)
+[2025-11-20T01:22:36Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1184: Not a directory (os error 20)
+[2025-11-20T01:22:39Z INFO  eezo_node::consensus_runner] consensus: committed height=1200
+[2025-11-20T01:22:43Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1216: Not a directory (os error 20)
+[2025-11-20T01:22:50Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1248: Not a directory (os error 20)
+[2025-11-20T01:22:50Z INFO  eezo_node::consensus_runner] consensus: committed height=1250
+[2025-11-20T01:22:56Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1280: Not a directory (os error 20)
+[2025-11-20T01:23:00Z INFO  eezo_node::consensus_runner] consensus: committed height=1300
+[2025-11-20T01:23:03Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1312: Not a directory (os error 20)
+[2025-11-20T01:23:09Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1344: Not a directory (os error 20)
+[2025-11-20T01:23:10Z INFO  eezo_node::consensus_runner] consensus: committed height=1350
+[2025-11-20T01:23:16Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1376: Not a directory (os error 20)
+[2025-11-20T01:23:21Z INFO  eezo_node::consensus_runner] consensus: committed height=1400  
+
+
+terminal 2:
+saeed@DESKTOP-T3Q3B29:~$ cd ~/Block/eezo
+NODE="http://127.0.0.1:8080"
+
+ADDR_FROM="0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+ADDR_TO="0xcafebabecafebabecafebabecafebabecafebabe"
+
+curl -s -X POST "$NODE/faucet" \
+  -H "Content-Type: application/json" \
+  -d "{\"to\":\"$ADDR_FROM\",\"amount\":\"100000000\"}" > /dev/null
+
+curl -s "$NODE/account/${ADDR_FROM}"
+echo
+{"balance":"100000000","nonce":"0"}
+saeed@DESKTOP-T3Q3B29:~/Block/eezo$
+
+terminal 3:
+saeed@DESKTOP-T3Q3B29:~$ cd ~/Block/eezo
+scripts/spam_tps.sh 10000
+[spam] using NODE=http://127.0.0.1:8080 COUNT=10000
+[spam] account = {"balance":"100000000","nonce":"0"}
+[spam] starting nonce = 0
+[spam] submitted 10000 tx
+saeed@DESKTOP-T3Q3B29:~/Block/eezo$ curl -s http://127.0.0.1:9898/metrics | rg 'eezo_txs_included_total|eezo_mempool_'
+# HELP eezo_mempool_bytes_gauge Current bytes in mempool
+# TYPE eezo_mempool_bytes_gauge gauge
+eezo_mempool_bytes_gauge 382884
+# HELP eezo_mempool_len Current mempool length
+# TYPE eezo_mempool_len gauge
+eezo_mempool_len 2189
+# HELP eezo_txs_included_total Transactions included in committed blocks (node view)
+# TYPE eezo_txs_included_total counter
+eezo_txs_included_total 74
+saeed@DESKTOP-T3Q3B29:~/Block/eezo$
