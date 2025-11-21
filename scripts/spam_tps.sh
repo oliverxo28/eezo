@@ -46,7 +46,7 @@ for i in $(seq 0 $((COUNT-1))); do
 
   curl -s -X POST "$NODE/tx" \
     -H "Content-Type: application/json" \
-    -d "$BODY" > /dev/null &
+    -d "$BODY"  
 done
 
 wait

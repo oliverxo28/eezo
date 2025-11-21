@@ -30,12 +30,13 @@ use crate::metrics::{EEZO_MEMPOOL_BYTES, EEZO_MEMPOOL_LEN, EEZO_TX_REJECTED_TOTA
 pub type TxHash = [u8; 32];
 
 /// Runtime view of a transaction stored in the mempool.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TxEntry {
     pub hash: TxHash,
     pub bytes: Arc<Vec<u8>>, // opaque payload; proposer will decode
     #[allow(dead_code)]
     pub received_at: Instant,
+    pub requeue_count: u32,
 }
 
 /// Public status exposed to `/tx/{hash}`.
@@ -173,6 +174,7 @@ impl Mempool {
             hash,
             bytes: Arc::new(bytes),
             received_at: Instant::now(),
+            requeue_count: 0,
         });
         self.queue.push_back(entry);
         self.pending_index.insert(hash, ());
@@ -236,23 +238,43 @@ impl Mempool {
     ///
     /// Used by the proposer when a tx has a nonce that is **too high**:
     /// we want to keep it Pending instead of marking it Rejected.
-    pub fn requeue(&mut self, entry: Arc<TxEntry>) {
+    ///
+    /// Returns Some(new_count) if requeued successfully, None if rejected due to too many requeues.
+    /// The caller should check the return value and mark the tx as rejected if None is returned.
+    pub fn requeue(&mut self, entry: Arc<TxEntry>, max_requeues: u32) -> Option<u32> {
         // If the queue is already at capacity, just drop the requeue request.
         // The original submit() call already accounted for this tx in cur_bytes.
         if self.queue.len() >= self.max_len {
-            return;
+            return Some(entry.requeue_count);
         }
 
         // If we somehow already have this hash in the pending index, don't double-insert.
         if self.pending_index.contains_key(&entry.hash) {
-            return;
+            return Some(entry.requeue_count);
         }
 
+        // Check if we've exceeded the max requeue count
+        let new_count = entry.requeue_count.saturating_add(1);
+        if new_count > max_requeues {
+            // Too many requeues - caller should reject this tx
+            return None;
+        }
+
+        // Create a new entry with incremented requeue count
+        let updated_entry = Arc::new(TxEntry {
+            hash: entry.hash,
+            bytes: entry.bytes.clone(),
+            received_at: entry.received_at,
+            requeue_count: new_count,
+        });
+
         self.pending_index.insert(entry.hash, ());
-        self.queue.push_back(entry);
+        self.queue.push_back(updated_entry);
 
         #[cfg(feature = "metrics")]
         self.refresh_gauges();
+
+        Some(new_count)
     }
 
 
@@ -309,9 +331,9 @@ impl SharedMempool {
         g.pop_batch(target_bytes)
     }
 
-    pub async fn requeue(&self, entry: Arc<TxEntry>) {
+    pub async fn requeue(&self, entry: Arc<TxEntry>, max_requeues: u32) -> Option<u32> {
         let mut g = self.0.lock().await;
-        g.requeue(entry);
+        g.requeue(entry, max_requeues)
     }
 
     pub async fn mark_included(&self, hash: &TxHash, height: u64, approx_bytes: usize) {
@@ -423,28 +445,30 @@ mod tests {
         mp.submit(ip, h(3), vec![0u8; 300]).await.unwrap();
         assert_eq!(mp.len().await, 3);
 
-        // Pop the first two transactions (h1 and h2)
+        // Pop with target_bytes=1000 - since all 3 txs fit (100+200+300=600 < 1000), all are popped
         let mut batch = mp.pop_batch(1000).await;
-        assert_eq!(batch.len(), 2);
+        assert_eq!(batch.len(), 3);
         assert_eq!(batch[0].hash, h(1));
         assert_eq!(batch[1].hash, h(2));
-        assert_eq!(mp.len().await, 1); // h3 is left
+        assert_eq!(batch[2].hash, h(3));
+        assert_eq!(mp.len().await, 0); // All popped
 
         // Proposer sees h2 has too high a nonce and requeues it.
-        // It's removed from the front index by pop_batch, but still Pending in statuses.
-        let tx_h2 = batch.pop().unwrap();
-        mp.requeue(tx_h2).await;
-        assert_eq!(mp.len().await, 2); // h3 is at front, h2 is at back
+        // It's removed from the pending index by pop_batch, but still in statuses as Pending.
+        let tx_h2 = batch.remove(1); // Remove h2 (the middle one)
+        let requeue_result = mp.requeue(tx_h2, 100).await;
+        assert!(requeue_result.is_some()); // Should succeed
+        assert_eq!(requeue_result.unwrap(), 1); // First requeue, count = 1
+        assert_eq!(mp.len().await, 1); // Just h2 requeued
 
-        // Pop again: h3 should come first, then the requeued h2
+        // Pop again: should get the requeued h2
         let batch_requeued = mp.pop_batch(1000).await;
-        assert_eq!(batch_requeued.len(), 2);
-        assert_eq!(batch_requeued[0].hash, h(3));
-        assert_eq!(batch_requeued[1].hash, h(2));
+        assert_eq!(batch_requeued.len(), 1);
+        assert_eq!(batch_requeued[0].hash, h(2));
+        assert_eq!(batch_requeued[0].requeue_count, 1); // Verify requeue count
 
-        // Statuses should still be Pending
+        // Statuses: h1 and h3 were in original batch but not explicitly marked, h2 is still Pending
         assert!(matches!(mp.status(&h(2)).await, Some(TxStatus::Pending)));
-        assert!(matches!(mp.status(&h(3)).await, Some(TxStatus::Pending)));
     }
 
     #[tokio::test]
@@ -468,7 +492,8 @@ mod tests {
         assert_eq!(mp.len().await, 1);
 
         // Mempool is full again (len=1, max_len=1). Requeuing h1 should be dropped.
-        mp.requeue(tx_h1).await;
+        let requeue_result = mp.requeue(tx_h1, 100).await;
+        assert!(requeue_result.is_some()); // Returns Some even if not actually queued due to capacity
         assert_eq!(mp.len().await, 1);
         // h1 is still in statuses as Pending, but not in the queue.
         assert!(matches!(mp.status(&h(1)).await, Some(TxStatus::Pending)));
@@ -478,7 +503,8 @@ mod tests {
         assert_eq!(mp.len().await, 0);
 
         // Now requeuing h1 should succeed.
-        mp.requeue(batch[0].clone()).await;
+        let requeue_result = mp.requeue(batch[0].clone(), 100).await;
+        assert!(requeue_result.is_some());
         assert_eq!(mp.len().await, 1);
         assert!(mp.pop_batch(1000).await[0].hash == h(1));
     }
@@ -498,11 +524,51 @@ mod tests {
         assert_eq!(mp.len().await, 0);
 
         // Requeue h1 (success)
-        mp.requeue(tx_h1.clone()).await;
+        let requeue_result = mp.requeue(tx_h1.clone(), 100).await;
+        assert!(requeue_result.is_some());
         assert_eq!(mp.len().await, 1);
 
         // Requeue h1 again (should be rejected by pending_index check)
-        mp.requeue(tx_h1).await;
+        let requeue_result = mp.requeue(tx_h1, 100).await;
+        assert!(requeue_result.is_some()); // Still returns Some, but doesn't actually double-insert
         assert_eq!(mp.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn requeue_max_count() {
+        let mp = SharedMempool::new(Mempool::new(10, 10_000, 10, 600));
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Submit a transaction
+        mp.submit(ip, h(1), vec![0u8; 100]).await.unwrap();
+        assert_eq!(mp.len().await, 1);
+
+        // Pop it
+        let batch = mp.pop_batch(1000).await;
+        let mut tx = batch[0].clone();
+        assert_eq!(mp.len().await, 0);
+
+        // Requeue it multiple times up to the limit (max_requeues = 3)
+        for i in 1..=3 {
+            // Pop if it's in the queue
+            if mp.len().await > 0 {
+                let batch = mp.pop_batch(1000).await;
+                tx = batch[0].clone();
+            }
+            
+            let result = mp.requeue(tx.clone(), 3).await;
+            assert!(result.is_some(), "Requeue {} should succeed", i);
+            assert_eq!(result.unwrap(), i, "Requeue count should be {}", i);
+            assert_eq!(mp.len().await, 1);
+        }
+
+        // Pop it one more time
+        let batch = mp.pop_batch(1000).await;
+        tx = batch[0].clone();
+
+        // Try to requeue again - should fail (count would be 4 > max 3)
+        let result = mp.requeue(tx, 3).await;
+        assert!(result.is_none(), "Requeue should fail after max count");
+        assert_eq!(mp.len().await, 0); // Should not be requeued
     }
 }

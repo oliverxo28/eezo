@@ -49,6 +49,8 @@ use eezo_ledger::{Block, BlockHeader};
 use eezo_ledger::{Supply, StateSnapshot};
 #[cfg(feature = "pq44-runtime")]
 use eezo_ledger::consensus::{SingleNode, SingleNodeCfg};
+#[cfg(feature = "pq44-runtime")]
+use eezo_ledger::{TxCore, SignedTx as LedgerSignedTx};
 use std::time::{SystemTime, UNIX_EPOCH};
 // Persistence (RocksDB) + genesis helpers are only available when the binary
 // is built with the `persistence` feature.
@@ -616,7 +618,10 @@ struct TransferTx {
 #[derive(Deserialize, Serialize, Clone, Debug)]
 struct SignedTxEnvelope {
     tx: TransferTx,
-	#[serde(default)]
+    /// sender public key (hex) – optional for now, will be required for PQ ledger path
+    #[serde(default)]
+    pubkey: String,
+    #[serde(default)]
     sig: String, // base64 or hex — devnet accepts opaque string for now
 }
 
@@ -885,35 +890,163 @@ async fn post_tx(
     let hash32: [u8; 32] = *blake3::hash(&raw).as_bytes();
     let hash_hex = format!("0x{}", hex::encode(hash32));
 
-    // For now, use loopback IP (we’ll wire real remote IP later if needed).
-    let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
-    match state.mempool.submit(ip, hash32, raw).await {
-        Ok(()) => {
-            #[cfg(feature = "metrics")]
-            {
-                crate::metrics::EEZO_MEMPOOL_LEN.set(state.mempool.len().await as i64);
+    // ─────────────────────────────────────────────────────────────
+    // pq44-runtime path: send directly into ledger::SingleNode mempool
+    // ─────────────────────────────────────────────────────────────
+    #[cfg(feature = "pq44-runtime")]
+    {
+        // 1) parse numeric fields
+        let amount = match env.tx.amount.parse::<u128>() {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid amount"})),
+                );
             }
-            (StatusCode::OK, Json(serde_json::json!(SubmitTxResp { hash: hash_hex })))
-        }
-        Err(crate::mempool::SubmitError::Duplicate) => {
-            #[cfg(feature = "metrics")]
-            {
-                crate::metrics::EEZO_MEMPOOL_LEN.set(state.mempool.len().await as i64);
+        };
+
+        let fee = match env.tx.fee.parse::<u128>() {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid fee"})),
+                );
             }
-            (StatusCode::OK, Json(serde_json::json!(SubmitTxResp { hash: hash_hex })))
+        };
+
+        let nonce = match env.tx.nonce.parse::<u64>() {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid nonce"})),
+                );
+            }
+        };
+
+        // 2) parse and normalize the "to" address (reuse the same helper as /faucet)
+        let to_addr = match parse_account_addr(&env.tx.to) {
+            Some(a) => a,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid to address"})),
+                );
+            }
+        };
+
+        // 3) Decode pubkey + sig if present (devnet: they can be empty)
+        fn strip_0x(s: &str) -> &str {
+            s.strip_prefix("0x").unwrap_or(s)
         }
-        Err(crate::mempool::SubmitError::RateLimited) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({"error": "rate limited"})),
-        ),
-        Err(crate::mempool::SubmitError::QueueFull) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "mempool full"})),
-        ),
-        Err(crate::mempool::SubmitError::BytesCapReached) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "mempool byte cap reached"})),
-        ),
+
+        let pubkey_bytes = if env.pubkey.is_empty() {
+            Vec::new()
+        } else {
+            match hex::decode(strip_0x(&env.pubkey)) {
+                Ok(v) => v,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "invalid pubkey hex"})),
+                    );
+                }
+            }
+        };
+
+        let sig_bytes = if env.sig.is_empty() {
+            Vec::new()
+        } else {
+            match hex::decode(strip_0x(&env.sig)) {
+                Ok(v) => v,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "invalid signature hex"})),
+                    );
+                }
+            }
+        };
+
+        // 4) Build the canonical ledger TxCore + SignedTx
+        let core = TxCore {
+            to: to_addr,
+            amount,
+            fee,
+            nonce,
+        };
+
+        let stx = LedgerSignedTx {
+            core,
+            pubkey: pubkey_bytes,
+            sig: sig_bytes,
+        };
+
+        // 5) Hand off to the consensus core (SingleNode::submit_signed_tx)
+        let Some(core_runner) = &state.core_runner else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "consensus core not available"})),
+            );
+        };
+
+        // the closure returns (), so with_node::<_, ()>(...) is fine
+        core_runner
+            .with_node(|node| {
+                let _ = node.submit_signed_tx(stx);
+            })
+            .await;
+
+        // For now we just return the hash; metrics are driven by the ledger path.
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!(SubmitTxResp { hash: hash_hex })),
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // non-pq44-runtime: keep the existing dev mempool path
+    // ─────────────────────────────────────────────────────────────
+    #[cfg(not(feature = "pq44-runtime"))]
+    {
+        // For now, use loopback IP (we’ll wire real remote IP later if needed).
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        match state.mempool.submit(ip, hash32, raw).await {
+            Ok(()) => {
+                #[cfg(feature = "metrics")]
+                {
+                    crate::metrics::EEZO_MEMPOOL_LEN.set(state.mempool.len().await as i64);
+                }
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!(SubmitTxResp { hash: hash_hex })),
+                )
+            }
+            Err(crate::mempool::SubmitError::Duplicate) => {
+                #[cfg(feature = "metrics")]
+                {
+                    crate::metrics::EEZO_MEMPOOL_LEN.set(state.mempool.len().await as i64);
+                }
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!(SubmitTxResp { hash: hash_hex })),
+                )
+            }
+            Err(crate::mempool::SubmitError::RateLimited) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": "rate limited"})),
+            ),
+            Err(crate::mempool::SubmitError::QueueFull) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "mempool full"})),
+            ),
+            Err(crate::mempool::SubmitError::BytesCapReached) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "mempool byte cap reached"})),
+            ),
+        }
     }
 }
 
@@ -2766,9 +2899,12 @@ async fn main() -> anyhow::Result<()> {
     // - DEV STUB: mark each popped tx as included at (height += 1)
     //   (next step: call ledger::apply_signed_tx and mark accepted/rejected accordingly)
     // -------------------------------------------------------------------------
+	#[cfg(not(feature = "pq44-runtime"))]
     {
         let state_clone = state.clone();
         let interval_ms = env_usize("EEZO_PROPOSER_INTERVAL_MS", 400) as u64;
+        // 1. REMOVE: max_requeues is removed as per instruction
+        // let max_requeues = env_usize("EEZO_MAX_REQUEUES", 100) as u32;
         #[cfg(feature = "persistence")]
         let db = state_clone.db.clone();
         tokio::spawn(async move {
@@ -3063,15 +3199,40 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
 
-                    // Case 2: future nonce (gap) → defer, keep Pending.
+                    // 2. PATCH: Replace Case 2 block to immediately reject future nonces
+                    // Case 2: future nonce (gap) → in dev path, reject to avoid requeue loops.
                     if want_nonce > cur_nonce {
-                        tracing::debug!(
-                            "deferring tx due to future nonce: want={} cur={}",
-                            want_nonce,
-                            cur_nonce,
-                        );
-                        // Do NOT mark as rejected; put it back into the mempool queue.
-                        state_clone.mempool.requeue(entry.clone()).await;
+                        let reason = format!("nonce gap: want={} cur={}", want_nonce, cur_nonce);
+                        tracing::warn!("{}", reason);
+
+                        state_clone
+                            .mempool
+                            .mark_rejected(&entry.hash, reason.clone(), entry.bytes.len())
+                            .await;
+
+                        let hhex = format!("0x{}", hex::encode(entry.hash));
+                        let receipt = Receipt {
+                            hash: hhex.clone(),
+                            status: "rejected",
+                            block_height: None,
+                            from: env.tx.from.clone(),
+                            to: env.tx.to.clone(),
+                            amount: env.tx.amount.clone(),
+                            fee: env.tx.fee.clone(),
+                            nonce: env.tx.nonce.clone(),
+                            error: Some(reason),
+                        };
+                        state_clone
+                            .receipts
+                            .write()
+                            .await
+                            .insert(hhex.clone(), receipt);
+
+                        #[cfg(feature = "metrics")]
+                        {
+                            TX_REJECTED_TOTAL.inc();
+                        }
+
                         continue;
                     }
 

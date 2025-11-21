@@ -73,6 +73,7 @@ parking_lot = "0.12"
 primitive-types = "0.12"
 log = "0.4"
 anyhow = "1"
+blake3 = "1"
 
 # RocksDB only when `persistence` is enabled
 rocksdb = { version = "0.21", default-features = false, features = ["lz4"], optional = true }

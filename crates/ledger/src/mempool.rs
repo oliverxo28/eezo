@@ -8,7 +8,6 @@ use crate::{
     tx_types::validate_tx_shape,
     validate_tx_stateful, verify_signed_tx, Accounts, Address, SignedTx, TxCore, TxStateError,
 };
-
 #[cfg(feature = "pq44-runtime")]
 #[allow(unused_imports)]
 use crate::consensus::SigBytes;
@@ -27,6 +26,16 @@ pub trait VerifyCache {
 
 /// Hard cap to avoid DoS with giant witnesses (tune in config)
 pub const MAX_WITNESS_BYTES: usize = 4096;
+
+fn dev_allow_unsigned_tx() -> bool {
+    match std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {
+        Ok(v) => {
+            let v = v.to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        }
+        Err(_) => false,
+    }
+}
 
 #[cfg(feature = "mempool-batch-verify")]
 const MP_BATCH_MIN: usize = 64;
@@ -77,18 +86,31 @@ pub enum RejectReason {
     InsufficientFunds { have: u128, need: u128 },
 }
 
+#[derive(Debug)]
 pub struct MempoolEntry {
     tx: SignedTx,
     size_bytes: usize, // set at admit time from encoder (120 today)
 }
 
 use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+
+#[derive(Debug, Default)]
+struct SenderQueue {
+    /// Pending transactions for this sender keyed by nonce.
+    /// Only the smallest nonce is considered "ready" at drain time.
+    pending: BTreeMap<u64, MempoolEntry>,
+}
 
 pub struct Mempool {
     chain_id: [u8; 20],
     cert_store: Arc<dyn CertLookupT4 + Sync + Send>,
-    // Pending user transactions (simple queue for now)
-    txs: Vec<MempoolEntry>,
+    /// Per-sender pending transactions keyed by nonce.
+    ///
+    /// This lets us keep higher-nonce transactions as "future" without
+    /// dropping them; only the lowest nonce per sender is considered
+    /// ready when building blocks.
+    per_sender: HashMap<Address, SenderQueue>,
 }
 
 impl Mempool {
@@ -96,7 +118,7 @@ impl Mempool {
         Mempool {
             chain_id,
             cert_store,
-            txs: Vec::new(),
+            per_sender: HashMap::new(),
         }
     }
 
@@ -155,51 +177,167 @@ impl Mempool {
         }
     }
 
-    /// Stateless enqueue: quick checks optional; full state is re-validated during block validate.
-    /// Calls existing admit_signed_tx for validation before push.
+    /// Enqueue a signed transaction into the mempool.
+    ///
+    /// This is sender/nonce-aware: for each sender we maintain a map keyed
+    /// by nonce, and only the smallest nonce for that sender is considered
+    /// "ready" during draining. Higher nonces are kept as futures and will
+    /// be proposed only after the lower ones have been taken.
     pub fn enqueue_tx(&mut self, tx: SignedTx) {
         let size_bytes = tx_size_bytes(&tx);
-        self.txs.push(MempoolEntry { tx, size_bytes });
+
+        // Derive sender address from the pubkey. If this fails we simply
+        // drop the transaction; higher layers (/tx endpoint) are expected
+        // to perform proper validation and should not feed such txs under
+        // normal operation.
+        match sender_from_pubkey_first20(&tx) {
+            Some(sender) => {
+                let nonce = tx.core.nonce;
+                let entry = MempoolEntry { tx, size_bytes };
+
+                let q = self
+                    .per_sender
+                    .entry(sender.clone())
+                    .or_insert_with(SenderQueue::default);
+
+                let existed = q.pending.contains_key(&nonce);
+                if !existed {
+                    q.pending.insert(nonce, entry);
+                    log::debug!(
+                        "ledger-mempool: enqueued tx sender={:?} nonce={}",
+                        sender,
+                        nonce
+                    );
+                } else {
+                    log::debug!(
+                        "ledger-mempool: duplicate nonce tx ignored sender={:?} nonce={}",
+                        sender,
+                        nonce
+                    );
+                }
+            }
+            None => {
+                // This is the important line for your current issue.
+                log::warn!(
+                    "ledger-mempool: dropping tx with invalid pubkey (len={})",
+                    tx.pubkey.len()
+                );
+            }
+        }
+    }
+
+    // -------------------------
+    // NEW: enqueue_admitted()
+    // -------------------------
+    pub fn enqueue_admitted(&mut self, ok: AdmissionOk, signed: SignedTx) {
+        let size_bytes = tx_size_bytes(&signed);
+
+        // Insert into per-sender queue under the admitted nonce
+        let q = self
+            .per_sender
+            .entry(ok.sender.clone())
+            .or_insert_with(SenderQueue::default);
+
+        let existed = q.pending.contains_key(&ok.core.nonce);
+        if !existed {
+            q.pending.insert(
+                ok.core.nonce,
+                MempoolEntry {
+                    tx: signed,
+                    size_bytes,
+                },
+            );
+            log::debug!(
+                "ledger-mempool: admitted tx sender={:?} nonce={}",
+                ok.sender,
+                ok.core.nonce
+            );
+        } else {
+            log::debug!(
+                "ledger-mempool: duplicate admitted nonce ignored sender={:?} nonce={}",
+                ok.sender,
+                ok.core.nonce
+            );
+        }
     }
 
     /// Drain fee-ordered candidates within the byte budget.
-    /// Order: fee desc -> nonce asc -> (stable arrival order as tie-break).
+    ///
+    /// Global order across all *ready* txs:
+    ///   fee desc -> nonce asc.
+    ///
+    /// For each sender, only the transaction with the smallest nonce is
+    /// considered ready at any given time. Higher nonces remain in the
+    /// per-sender queue as futures and will be considered once the lower
+    /// nonces have been removed by inclusion.
     pub fn drain_for_block(&mut self, max_bytes: usize) -> Vec<SignedTx> {
-        if self.txs.is_empty() {
-            return Vec::new();
-        }
-
-        // Sort in place (stable to preserve arrival order as final tie-break)
-        self.txs.sort_by(|a, b| {
-            // Fee and nonce fields assumed as a.core.fee (u64) and a.core.nonce (u64)
-            b.tx.core
-                .fee
-                .cmp(&a.tx.core.fee)
-                .then_with(|| a.tx.core.nonce.cmp(&b.tx.core.nonce))
-        });
-
         let mut used = HEADER_BUDGET_BYTES;
         let mut taken = Vec::new();
-        let mut keep = Vec::new();
 
-        for entry in self.txs.drain(..) {
-            let cost = entry.size_bytes;
-            if used + cost <= max_bytes {
-                used += cost;
-                taken.push(entry.tx);
-            } else {
-                keep.push(entry);
+        loop {
+            // Collect the current "ready" candidate (lowest nonce) for each sender.
+            let mut candidates: Vec<(Address, u64, &MempoolEntry)> = self
+                .per_sender
+                .iter()
+                .filter_map(|(sender, q)| {
+                    q.pending
+                        .iter()
+                        .next()
+                        .map(|(nonce, entry)| (sender.clone(), *nonce, entry))
+                })
+                .collect();
+
+            if candidates.is_empty() {
+                break;
             }
+
+            // Sort by fee desc, then nonce asc.
+            candidates.sort_by(|a, b| {
+                let fee_a = a.2.tx.core.fee;
+                let fee_b = b.2.tx.core.fee;
+                fee_b
+                    .cmp(&fee_a)
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+
+            // Pick the best candidate that still fits in the remaining budget.
+            let mut picked: Option<(Address, u64)> = None;
+            for (sender, nonce, entry) in candidates.into_iter() {
+                let cost = entry.size_bytes;
+                if used + cost <= max_bytes {
+                    picked = Some((sender, nonce));
+                    break;
+                }
+            }
+
+            let Some((sender, nonce)) = picked else {
+                break;
+            };
+
+            // Remove the picked tx from the per-sender queue.
+            if let Some(q) = self.per_sender.get_mut(&sender) {
+                if let Some(entry) = q.pending.remove(&nonce) {
+                    used += entry.size_bytes;
+                    taken.push(entry.tx);
+                }
+            }
+
+            // Clean up empty sender queues.
+            self.per_sender.retain(|_, q| !q.pending.is_empty());
         }
-        self.txs = keep;
+
         taken
     }
 
     pub fn len(&self) -> usize {
-        self.txs.len()
+        self.per_sender
+            .values()
+            .map(|q| q.pending.len())
+            .sum()
     }
+
     pub fn is_empty(&self) -> bool {
-        self.txs.is_empty()
+        self.len() == 0
     }
 }
 
@@ -214,14 +352,28 @@ pub fn admit_signed_tx(
     if validate_tx_shape(&tx.core).is_err() {
         return Err(RejectReason::BadShape);
     }
-    // 2) signature
-    if !verify_signed_tx(chain_id, tx) {
-        return Err(RejectReason::BadSig);
-    }
-    // 3) derive sender (temporary: first 20 bytes of pubkey)
-    let sender = sender_from_pubkey_first20(tx).ok_or(RejectReason::InvalidSender)?;
 
-    // 4) stateful checks
+    let dev_mode = dev_allow_unsigned_tx();
+
+    // 2) signature (can be skipped in dev mode)
+    if !dev_mode {
+        // strict path – testnet / mainnet
+        if !verify_signed_tx(chain_id, tx) {
+            return Err(RejectReason::BadSig);
+        }
+    } else {
+        // dev-only: skip signature verification, but log loudly
+        log::warn!(
+            "dev-mode: skipping signature verification for tx (nonce={} pubkey_len={})",
+            tx.core.nonce,
+            tx.pubkey.len()
+        );
+    }
+
+    // 3) derive sender from pubkey using BLAKE3
+    let sender = crate::tx_types::sender_from_pubkey(&tx.pubkey);
+
+    // 4) stateful checks (nonce, funds, etc.) ALWAYS enforced
     match validate_tx_stateful(accts, sender, &tx.core) {
         Ok(()) => Ok(AdmissionOk {
             sender,

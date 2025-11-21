@@ -36,8 +36,6 @@ use thiserror::Error;
 // === T27: HotStuff-like pipeline (uses new message module) ===
 use crate::block::BlockId;
 use std::sync::Arc;
-// ADDED: std::env for reading EEZO_BLOCK_MAX_TX
-use std::env;
 
 // Import T27 message types with a module alias to avoid name collisions
 use crate::consensus_msg as hs_msg;
@@ -518,6 +516,16 @@ pub struct SlotSummary {
     pub timestamp_ms: u128,
 }
 
+/// Error type for submitting signed transactions into the ledger mempool.
+///
+/// This stays intentionally small for now. Later (T53.3) we can extend it
+/// with richer variants such as bad chain_id, precheck failures, etc.
+#[derive(Debug, Error)]
+pub enum SubmitError {
+    #[error("mempool is full")]
+    MempoolFull,
+}
+
 /// Unified error type for consensus harness.
 #[derive(Debug, Error)]
 pub enum ConsensusError {
@@ -601,6 +609,13 @@ impl SingleNode {
         let mut candidates = self
             .mempool
             .drain_for_block(self.cfg.block_byte_budget);
+
+        // PATCH 3 (optional): log drained candidate count
+        log::debug!(
+            "propose_block: height={} drained {} mempool candidates",
+            self.height + 1,
+            candidates.len()
+        );
 
         // === Nonce-aware selection for property tests (filter, don't error) ===
         // Keep mempool's cross-sender ordering; for each sender accept the longest
@@ -897,15 +912,36 @@ impl SingleNode {
     /// Enqueue a signed transaction into the ledger's mempool.
     ///
     /// This is the canonical entry point for user transactions at the
-    /// consensus level. It does not perform stateful checks here; all
-    /// shape / signature / nonce / balance validation still happens in
-    /// the block proposal + validation path.
+    /// consensus level. It keeps admission policy simple:
     ///
-    /// Node layer (HTTP, network, etc.) should only call this with
+    ///  - No stateful checks here (nonce, balance, etc.)
+    ///  - No signature or chain_id checks here
+    ///
+    /// All of those remain in the existing block validation path. The
+    /// node layer (/tx HTTP, network, etc.) should only call this with
     /// syntactically valid `SignedTx`s.
-    pub fn submit_signed_tx(&mut self, tx: SignedTx) {
-        self.mempool.enqueue_tx(tx);
-    }	
+    pub fn submit_signed_tx(&mut self, tx: SignedTx) -> Result<(), SubmitError> {
+		log::debug!(
+	        "submit_signed_tx: enqueueing tx core.nonce={} pubkey_len={}",
+            tx.core.nonce,
+            tx.pubkey.len()  			
+		);
+		// IMPORTANT:
+		// admit_signed_tx is a FREE FUNCTION, NOT a mempool method.
+		match crate::mempool::admit_signed_tx(self.cfg.chain_id, &self.accounts, &tx) {
+			Ok(ok) => {
+				// Correct enqueue path: must pass AdmissionOk + full SignedTx
+				self.mempool.enqueue_admitted(ok, tx);
+				Ok(())
+			}
+			Err(reason) => {
+				log::warn!("reject tx in submit_signed_tx: {:?}", reason);
+				// SubmitError has ONLY one variant: MempoolFull.
+				// For now, map all admission failures to MempoolFull.
+				Err(SubmitError::MempoolFull)
+			}
+		}
+	}
 
     // ────────────────────────────────────────────────────────────────────────
     // Snapshot helpers (no side effects). Node layer decides when/if to write.
