@@ -246,10 +246,11 @@ impl Mempool {
                     size_bytes,
                 },
             );
-            log::debug!(
-                "ledger-mempool: admitted tx sender={:?} nonce={}",
+            log::info!(
+                "ledger-mempool: admitted tx sender={:?} nonce={} (queue now has {} tx(s))",
                 ok.sender,
-                ok.core.nonce
+                ok.core.nonce,
+                q.pending.len()
             );
         } else {
             log::debug!(
@@ -272,6 +273,21 @@ impl Mempool {
     pub fn drain_for_block(&mut self, max_bytes: usize) -> Vec<SignedTx> {
         let mut used = HEADER_BUDGET_BYTES;
         let mut taken = Vec::new();
+
+        // Log the initial mempool state before draining
+        log::info!(
+            "mempool: drain_for_block called, {} senders with pending txs, max_bytes={}",
+            self.per_sender.len(),
+            max_bytes
+        );
+        for (sender, q) in &self.per_sender {
+            log::debug!(
+                "mempool: sender {:?} has {} pending tx(s), lowest nonce: {:?}",
+                sender,
+                q.pending.len(),
+                q.pending.iter().next().map(|(n, _)| n)
+            );
+        }
 
         loop {
             // Collect the current "ready" candidate (lowest nonce) for each sender.
@@ -325,6 +341,11 @@ impl Mempool {
             self.per_sender.retain(|_, q| !q.pending.is_empty());
         }
 
+        log::info!(
+            "mempool: drained {} transaction(s) for block (used {} bytes)",
+            taken.len(),
+            used - HEADER_BUDGET_BYTES
+        );
         taken
     }
 

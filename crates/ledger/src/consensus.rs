@@ -612,11 +612,22 @@ impl SingleNode {
             .drain_for_block(self.cfg.block_byte_budget);
 
         // PATCH 3 (optional): log drained candidate count
-        log::debug!(
+        log::info!(
             "propose_block: height={} drained {} mempool candidates",
             self.height + 1,
             candidates.len()
         );
+        
+        // Log details about each candidate
+        for (i, tx) in candidates.iter().enumerate() {
+            log::debug!(
+                "propose_block: candidate[{}] nonce={} amount={} fee={}",
+                i,
+                tx.core.nonce,
+                tx.core.amount,
+                tx.core.fee
+            );
+        }
 
         // === Nonce-aware selection for property tests (filter, don't error) ===
         // Keep mempool's cross-sender ordering; for each sender accept the longest

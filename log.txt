@@ -1,27 +1,499 @@
 terminal 1:
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 24.80s
-     Running `target/debug/eezo-node --genesis genesis.min.json --datadir /tmp/eezo-t52`
+saeed@DESKTOP-T3Q3B29:~/Block/eezo$ EEZO_DEV_ALLOW_UNSIGNED_TX=1 \
+EEZO_BLOCK_MAX_TX=500 \
+EEZO_MEMPOOL_MAX_TX=20000 \
+EEZO_MEMPOOL_MAX_BYTES=$((256 * 1024 * 1024)) \
+EEZO_MEMPOOL_RATE_CAP=20000 \
+EEZO_MEMPOOL_RATE_PER_MIN=600000 \
+EEZO_SIGPOOL_THREADS=8 \
+RUST_LOG=info \
+cargo run -p eezo-node --features "pq44-runtime,persistence,checkpoints,metrics" -- \
+  --genesis genesis.min.json \
+  --datadir /tmp/eezo-t53
+   Compiling eezo-ledger v0.1.0 (/home/saeed/Block/eezo/crates/ledger)
+   Compiling eezo-net v0.1.0 (/home/saeed/Block/eezo/crates/net)
+   Compiling eezo-wallet v0.1.0 (/home/saeed/Block/eezo/crates/wallet)
+   Compiling eezo-node v0.1.0 (/home/saeed/Block/eezo/crates/node)
+warning: unused import: `std::path::PathBuf`
+  --> crates/node/src/main.rs:45:5
+   |
+45 | use std::path::PathBuf;
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `BlockHeader` and `Block`
+  --> crates/node/src/main.rs:47:19
+   |
+47 | use eezo_ledger::{Block, BlockHeader};
+   |                   ^^^^^  ^^^^^^^^^^^
+
+warning: unused imports: `StateSnapshot` and `Supply`
+  --> crates/node/src/main.rs:49:19
+   |
+49 | use eezo_ledger::{Supply, StateSnapshot};
+   |                   ^^^^^^  ^^^^^^^^^^^^^
+
+warning: unused imports: `IpAddr` and `Ipv4Addr`
+  --> crates/node/src/main.rs:67:16
+   |
+67 | use std::net::{IpAddr, Ipv4Addr};
+   |                ^^^^^^  ^^^^^^^^
+
+warning: unused import: `tokio::time::interval`
+  --> crates/node/src/main.rs:77:5
+   |
+77 | use tokio::time::interval;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Engine as _` and `engine::general_purpose::STANDARD as B64`
+ --> crates/node/src/peers.rs:2:14
+  |
+2 | use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `single::SingleThreadExecutor`
+  --> crates/node/src/executor/mod.rs:13:9
+   |
+13 | pub use single::SingleThreadExecutor;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable `last_commit_hash_opt` is assigned to, but never used
+   --> crates/node/src/consensus_runner.rs:627:33
+    |
+627 |                         let mut last_commit_hash_opt: Option<[u8;32]> = None;
+    |                                 ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_last_commit_hash_opt` instead
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: value assigned to `last_commit_hash_opt` is never read
+   --> crates/node/src/consensus_runner.rs:645:37
+    |
+645 | ...                   last_commit_hash_opt = Some(hdr.hash());
+    |                       ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` on by default
+
+warning: static `TX_ACCEPTED_TOTAL` is never used
+   --> crates/node/src/main.rs:160:8
+    |
+160 | static TX_ACCEPTED_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::Lazy::new(|| {
+    |        ^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: static `TX_REJECTED_TOTAL` is never used
+   --> crates/node/src/main.rs:164:8
+    |
+164 | static TX_REJECTED_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::Lazy::new(|| {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `parse_chain_id_hex` is never used
+   --> crates/node/src/main.rs:482:4
+    |
+482 | fn parse_chain_id_hex(s: &str) -> Option<[u8; 20]> {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `now_ms` is never used
+   --> crates/node/src/main.rs:701:4
+    |
+701 | fn now_ms() -> u64 {
+    |    ^^^^^^
+
+warning: field `treasury_addr` is never read
+   --> crates/node/src/main.rs:731:5
+    |
+706 | struct AppState {
+    |        -------- field in this struct
+...
+731 |     treasury_addr: Option<String>,
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `AppState` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: fields `order` and `cap` are never read
+   --> crates/node/src/main.rs:760:5
+    |
+758 | struct RecentBlocks {
+    |        ------------ fields in this struct
+759 |     by_height: Map<u64, Vec<String>>,
+760 |     order: VecDeque<u64>,
+    |     ^^^^^
+761 |     cap: usize,
+    |     ^^^
+
+warning: static `HTTP_REQS` is never used
+  --> crates/node/src/metrics.rs:19:12
+   |
+19 | pub static HTTP_REQS: Lazy<IntCounterVec> = Lazy::new(|| {
+   |            ^^^^^^^^^
+
+warning: function `http_inc` is never used
+  --> crates/node/src/metrics.rs:29:8
+   |
+29 | pub fn http_inc(route: &str, status: u16) {
+   |        ^^^^^^^^
+
+warning: static `STATE_SYNC_TLS_HANDSHAKE_FAIL_TOTAL` is never used
+  --> crates/node/src/metrics.rs:43:12
+   |
+43 | pub static STATE_SYNC_TLS_HANDSHAKE_FAIL_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `STATE_SYNC_TLS_CONFIG_FAIL_TOTAL` is never used
+  --> crates/node/src/metrics.rs:53:12
+   |
+53 | pub static STATE_SYNC_TLS_CONFIG_FAIL_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `STATE_SYNC_MTLS_FAIL_TOTAL` is never used
+  --> crates/node/src/metrics.rs:63:12
+   |
+63 | pub static STATE_SYNC_MTLS_FAIL_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `STATE_SYNC_ANCHOR_VERIFY_FAIL_TOTAL` is never used
+  --> crates/node/src/metrics.rs:74:12
+   |
+74 | pub static STATE_SYNC_ANCHOR_VERIFY_FAIL_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `STATE_SYNC_ANCHOR_SIGNED_TOTAL` is never used
+  --> crates/node/src/metrics.rs:85:12
+   |
+85 | pub static STATE_SYNC_ANCHOR_SIGNED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `STATE_SYNC_ANCHOR_UNSIGNED_TOTAL` is never used
+  --> crates/node/src/metrics.rs:95:12
+   |
+95 | pub static STATE_SYNC_ANCHOR_UNSIGNED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_MEMPOOL_LEN` is never used
+   --> crates/node/src/metrics.rs:104:12
+    |
+104 | pub static EEZO_MEMPOOL_LEN: Lazy<IntGauge> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_MEMPOOL_BYTES` is never used
+   --> crates/node/src/metrics.rs:108:12
+    |
+108 | pub static EEZO_MEMPOOL_BYTES: Lazy<IntGauge> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_TXS_INCLUDED_TOTAL` is never used
+   --> crates/node/src/metrics.rs:114:12
+    |
+114 | pub static EEZO_TXS_INCLUDED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `txs_included_inc` is never used
+   --> crates/node/src/metrics.rs:123:8
+    |
+123 | pub fn txs_included_inc(n: u64) {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_TX_REJECTED_TOTAL` is never used
+   --> crates/node/src/metrics.rs:128:12
+    |
+128 | pub static EEZO_TX_REJECTED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tx_rejected_inc` is never used
+   --> crates/node/src/metrics.rs:138:8
+    |
+138 | pub fn tx_rejected_inc(reason: &str) {
+    |        ^^^^^^^^^^^^^^^
+
+warning: static `EEZO_TX_REJECTED_SIMPLE_TOTAL` is never used
+   --> crates/node/src/metrics.rs:167:12
+    |
+167 | pub static EEZO_TX_REJECTED_SIMPLE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_STATE_SYNC_LATEST_HEIGHT` is never used
+   --> crates/node/src/metrics.rs:320:12
+    |
+320 | pub static EEZO_STATE_SYNC_LATEST_HEIGHT: Lazy<IntGauge> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_STATE_SYNC_TOTAL` is never used
+   --> crates/node/src/metrics.rs:340:12
+    |
+340 | pub static EEZO_STATE_SYNC_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_STATE_SYNC_RETRY_TOTAL` is never used
+   --> crates/node/src/metrics.rs:360:12
+    |
+360 | pub static EEZO_STATE_SYNC_RETRY_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `state_sync_latest_height_set` is never used
+   --> crates/node/src/metrics.rs:401:8
+    |
+401 | pub fn state_sync_latest_height_set(h: u64) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `state_sync_total_inc` is never used
+   --> crates/node/src/metrics.rs:416:8
+    |
+416 | pub fn state_sync_total_inc() {
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `state_sync_retry_inc` is never used
+   --> crates/node/src/metrics.rs:425:8
+    |
+425 | pub fn state_sync_retry_inc() {
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: static `SS_RETRIES_TOTAL` is never used
+   --> crates/node/src/metrics.rs:444:12
+    |
+444 | pub static SS_RETRIES_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: static `SS_FAILURES_TOTAL` is never used
+   --> crates/node/src/metrics.rs:449:12
+    |
+449 | pub static SS_FAILURES_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: static `SS_PAGES_APPLIED_TOTAL` is never used
+   --> crates/node/src/metrics.rs:454:12
+    |
+454 | pub static SS_PAGES_APPLIED_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `SS_DELTA_BATCHES_APPLIED_TOTAL` is never used
+   --> crates/node/src/metrics.rs:459:12
+    |
+459 | pub static SS_DELTA_BATCHES_APPLIED_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_EXECUTOR_BLOCK_SECONDS` is never used
+   --> crates/node/src/metrics.rs:932:12
+    |
+932 | pub static EEZO_EXECUTOR_BLOCK_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_EXECUTOR_TX_SECONDS` is never used
+   --> crates/node/src/metrics.rs:952:12
+    |
+952 | pub static EEZO_EXECUTOR_TX_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `EEZO_EXECUTOR_TPS_INFERRED` is never used
+   --> crates/node/src/metrics.rs:972:12
+    |
+972 | pub static EEZO_EXECUTOR_TPS_INFERRED: Lazy<IntGauge> = Lazy::new(|| {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `hash`, `bytes`, and `requeue_count` are never read
+  --> crates/node/src/mempool.rs:35:9
+   |
+34 | pub struct TxEntry {
+   |            ------- fields in this struct
+35 |     pub hash: TxHash,
+   |         ^^^^
+36 |     pub bytes: Arc<Vec<u8>>, // opaque payload; proposer will decode
+   |         ^^^^^
+...
+39 |     pub requeue_count: u32,
+   |         ^^^^^^^^^^^^^
+   |
+   = note: `TxEntry` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variants `Pending`, `Included`, and `Rejected` are never constructed
+  --> crates/node/src/mempool.rs:45:5
+   |
+44 | pub enum TxStatus {
+   |          -------- variants in this enum
+45 |     Pending,
+   |     ^^^^^^^
+46 |     Included { block_height: u64 },
+   |     ^^^^^^^^
+47 |     Rejected { error: String },
+   |     ^^^^^^^^
+   |
+   = note: `TxStatus` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: enum `SubmitError` is never used
+  --> crates/node/src/mempool.rs:51:10
+   |
+51 | pub enum SubmitError {
+   |          ^^^^^^^^^^^
+
+warning: fields `capacity`, `tokens`, `refill_per_sec`, and `last_refill` are never read
+  --> crates/node/src/mempool.rs:74:5
+   |
+73 | struct RateBucket {
+   |        ---------- fields in this struct
+74 |     capacity: u32,
+   |     ^^^^^^^^
+75 |     tokens: f64,
+   |     ^^^^^^
+76 |     refill_per_sec: f64,
+   |     ^^^^^^^^^^^^^^
+77 |     last_refill: Instant,
+   |     ^^^^^^^^^^^
+   |
+   = note: `RateBucket` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `new` and `allow` are never used
+  --> crates/node/src/mempool.rs:81:8
+   |
+80 | impl RateBucket {
+   | --------------- associated items in this implementation
+81 |     fn new(capacity: u32, refill_per_sec: f64) -> Self {
+   |        ^^^
+...
+90 |     fn allow(&mut self, cost: u32) -> bool {
+   |        ^^^^^
+
+warning: fields `pending_index`, `ip_buckets`, `bucket_capacity`, and `bucket_refill_per_sec` are never read
+   --> crates/node/src/mempool.rs:112:5
+    |
+108 | pub struct Mempool {
+    |            ------- fields in this struct
+...
+112 |     pending_index: HashMap<TxHash, ()>,
+    |     ^^^^^^^^^^^^^
+...
+123 |     ip_buckets: HashMap<IpAddr, RateBucket>,
+    |     ^^^^^^^^^^
+124 |     // Rate params
+125 |     bucket_capacity: u32,
+    |     ^^^^^^^^^^^^^^^
+126 |     bucket_refill_per_sec: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> crates/node/src/mempool.rs:145:8
+    |
+129 | impl Mempool {
+    | ------------ methods in this implementation
+...
+145 |     fn bucket_mut(&mut self, ip: IpAddr) -> &mut RateBucket {
+    |        ^^^^^^^^^^
+...
+153 |     pub fn submit(&mut self, ip: IpAddr, hash: TxHash, bytes: Vec<u8>) -> Result<(), SubmitError> {
+    |            ^^^^^^
+...
+189 |     pub fn pop_batch(&mut self, target_bytes: usize) -> Vec<Arc<TxEntry>> {
+    |            ^^^^^^^^^
+...
+209 |     pub fn mark_included(&mut self, hash: &TxHash, block_height: u64, approx_bytes: usize) {
+    |            ^^^^^^^^^^^^^
+...
+223 |     pub fn mark_rejected(&mut self, hash: &TxHash, reason: impl Into<String>, approx_bytes: usize) {
+    |            ^^^^^^^^^^^^^
+...
+244 |     pub fn requeue(&mut self, entry: Arc<TxEntry>, max_requeues: u32) -> Option<u32> {
+    |            ^^^^^^^
+...
+291 |     fn refresh_gauges(&self) {
+    |        ^^^^^^^^^^^^^^
+
+warning: methods `submit`, `pop_batch`, `requeue`, `mark_included`, `mark_rejected`, and `len` are never used
+   --> crates/node/src/mempool.rs:319:18
+    |
+314 | impl SharedMempool {
+    | ------------------ methods in this implementation
+...
+319 |     pub async fn submit(
+    |                  ^^^^^^
+...
+329 |     pub async fn pop_batch(&self, target_bytes: usize) -> Vec<Arc<TxEntry>> {
+    |                  ^^^^^^^^^
+...
+334 |     pub async fn requeue(&self, entry: Arc<TxEntry>, max_requeues: u32) -> Option<u32> {
+    |                  ^^^^^^^
+...
+339 |     pub async fn mark_included(&self, hash: &TxHash, height: u64, approx_bytes: usize) {
+    |                  ^^^^^^^^^^^^^
+...
+344 |     pub async fn mark_rejected(&self, hash: &TxHash, reason: impl Into<String>, approx_bytes: usize) {
+    |                  ^^^^^^^^^^^^^
+...
+360 |     pub async fn len(&self) -> usize {
+    |                  ^^^
+
+warning: method `consume_nonce_and_debit` is never used
+  --> crates/node/src/accounts.rs:24:18
+   |
+11 | impl Accounts {
+   | ------------- method in this implementation
+...
+24 |     pub async fn consume_nonce_and_debit(&self, from: &str, amount_plus_fee: u64) -> Result<u64, String> {
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ExecutorRequest` is never constructed
+  --> crates/node/src/executor/types.rs:21:12
+   |
+21 | pub struct ExecutorRequest {
+   |            ^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> crates/node/src/executor/types.rs:30:12
+   |
+29 | impl ExecutorRequest {
+   | -------------------- associated function in this implementation
+30 |     pub fn new(height_before: u64, rollback_on_error: bool) -> Self {
+   |            ^^^
+
+warning: struct `ExecutorOutcome` is never constructed
+  --> crates/node/src/executor/types.rs:40:12
+   |
+40 | pub struct ExecutorOutcome {
+   |            ^^^^^^^^^^^^^^^
+
+warning: trait `BlockExecutor` is never used
+  --> crates/node/src/executor/types.rs:57:11
+   |
+57 | pub trait BlockExecutor: Send + Sync {
+   |           ^^^^^^^^^^^^^
+
+warning: struct `SingleThreadExecutor` is never constructed
+  --> crates/node/src/executor/single.rs:29:12
+   |
+29 | pub struct SingleThreadExecutor;
+   |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> crates/node/src/executor/single.rs:32:12
+   |
+31 | impl SingleThreadExecutor {
+   | ------------------------- associated function in this implementation
+32 |     pub fn new() -> Self {
+   |            ^^^
+
+warning: `eezo-node` (bin "eezo-node") generated 58 warnings (run `cargo fix --bin "eezo-node"` to apply 7 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 38.57s
+     Running `target/debug/eezo-node --genesis genesis.min.json --datadir /tmp/eezo-t53`
 🚀 Node starting up...
-CLI args - genesis: Some("genesis.min.json"), datadir: Some("/tmp/eezo-t52"), listen: None, log_level: None, config_file: None
+CLI args - genesis: Some("genesis.min.json"), datadir: Some("/tmp/eezo-t53"), listen: None, log_level: None, config_file: None
 ENV vars - EEZO_CONFIG_FILE: None, EEZO_LISTEN: None, EEZO_DATADIR: None, EEZO_GENESIS: None, EEZO_LOG_LEVEL: None, EEZO_BLOCK_MAX_TX: Some("500"), EEZO_BLOCK_TARGET_TIME_MS: None
 Resolved config path: None
 ✅ Config merged successfully
 Final listen address: 127.0.0.1:8080
-Final datadir: /tmp/eezo-t52
+Final datadir: /tmp/eezo-t53
 Final log level: info
-🔍 About to read .lock file at: "/tmp/eezo-t52/.lock"
+🔍 About to read .lock file at: "/tmp/eezo-t53/.lock"
 🔍 No existing lock file found
-🔍 Writing new lock file with PID: 45918
-🔍 Loading node identity from: "/tmp/eezo-t52/NODE_ID"
-🔍 No NODE_ID file, checking for legacy IDENTITY
-🔍 No legacy identity found, creating new identity
-✅ Node identity loaded: d61206cb-5f83-4019-9421-e5e5305d46aa
-[2025-11-20T01:18:32Z INFO  eezo_node] spawned metrics server on 127.0.0.1:9898
-[2025-11-20T01:18:32Z INFO  eezo_node] metrics: binding on http://127.0.0.1:9898
+🔍 Writing new lock file with PID: 40599
+🔍 Loading node identity from: "/tmp/eezo-t53/NODE_ID"
+🔍 Found existing NODE_ID file, contents: "{\n  \"node_id\": \"f97bae28-9e6e-4b9d-8c68-5b838b2fc15c\",\n  \"first_seen\": 1763739811\n}"
+✅ Node identity loaded: f97bae28-9e6e-4b9d-8c68-5b838b2fc15c
+[2025-11-21T15:49:55Z INFO  eezo_node] spawned metrics server on 127.0.0.1:9898
+[2025-11-21T15:49:55Z INFO  eezo_node] metrics: binding on http://127.0.0.1:9898
 🔍 Chain ID (effective): 0000000000000000000000000000000000000001
-🔍 Opening persistence store at: /tmp/eezo-t52
-[2025-11-20T01:18:32Z INFO  eezo_node] 🔍 Using persistence snapshot_interval = 1000 blocks
-[2025-11-20T01:18:32Z INFO  eezo_node] crypto-rotation policy: active_suite=1 next_suite=None dual_accept_until=None window_open=false
+🔍 Opening persistence store at: /tmp/eezo-t53
+[2025-11-21T15:49:55Z INFO  eezo_node] 🔍 Using persistence snapshot_interval = 1000 blocks
+[2025-11-21T15:49:55Z INFO  eezo_node] crypto-rotation policy: active_suite=1 next_suite=None dual_accept_until=None window_open=false
 🔍 About to read genesis file: genesis.min.json
 🔍 Parsing genesis JSON...
 ✅ Genesis file read and parsed
@@ -29,151 +501,561 @@ Final log level: info
 🔍 Runtime chain ID: 0000000000000000000000000000000000000001
 ✅ Genesis chain_id matches runtime
 🔍 Applying genesis...
-[2025-11-20T01:18:32Z INFO  eezo_ledger::persistence] Snapshot height 0 accounts count = 2, supply = Supply { native_mint_total: 5000000000, bridge_mint_total: 0, burn_total: 0 }
-[2025-11-20T01:18:32Z WARN  eezo_ledger::genesis] prewrite SSZ snapshot blob (height 0) failed: not found
 ✅ Genesis applied
 ✅ Preparing runtime config
-✅ Runtime config built: node_id=d61206cb-5f83-4019-9421-e5e5305d46aa, listen=127.0.0.1:8080
+✅ Runtime config built: node_id=f97bae28-9e6e-4b9d-8c68-5b838b2fc15c, listen=127.0.0.1:8080
 🔍 Configured peers: []
 ✅ Peer service started - current readiness: true
 🔍 Zero-peer mode status: true
-warning: failed to register eezo_block_e2e_latency_seconds: Duplicate metrics collector registration attempted (using unregistered fallback histogram)
 🔍 No tip found, start at 0
 ✅ AppState initialized: ready_flag=true, version=0.1.0, git_sha=None
-[2025-11-20T01:18:32Z INFO  eezo_node] 🔶 bridge checkpoint emitter disabled (set EEZO_BRIDGE_OUTBOX_ENABLED=1 to enable)
+[2025-11-21T15:49:55Z INFO  eezo_node] 🔶 bridge checkpoint emitter disabled (set EEZO_BRIDGE_OUTBOX_ENABLED=1 to enable)
+[2025-11-21T15:49:55Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:55Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:55Z INFO  eezo_ledger::consensus] propose_block: height=1 drained 0 mempool candidates
+[2025-11-21T15:49:55Z INFO  eezo_ledger::block] assemble_block: height=1 finished - picked 0 tx(s) from 0 candidate(s)
 ✅ Router built with /ready, /config, /status, /peers, /_admin endpoints
 🔍 Binding to address: 127.0.0.1:8080
 ✅ TCP listener bound on 127.0.0.1:8080
 🚀 Server starting with readiness = true
 🎉 SERVER SUMMARY:
-   • Node ID: d61206cb-5f83-4019-9421-e5e5305d46aa
+   • Node ID: f97bae28-9e6e-4b9d-8c68-5b838b2fc15c
    • Listening on: 127.0.0.1:8080
-   • Data directory: /tmp/eezo-t52
+   • Data directory: /tmp/eezo-t53
    • Chain ID: 0000000000000000000000000000000000000001
    • Version: 0.1.0
    • Git SHA: None
    • Ready: true
    • Configured peers: 0
-   • Mempool: max_len=10000, max_bytes=52428800 (rate: cap=60, per_min=600)
+   • Mempool: max_len=10000, max_bytes=268435456 (rate: cap=20000, per_min=600000)
 🚀 Node is ready and listening on 127.0.0.1:8080
 🔍 Final readiness check before server start: true
 🚀 Launching Axum server now...
-[2025-11-20T01:18:38Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=32: Not a directory (os error 20)
-[2025-11-20T01:18:42Z INFO  eezo_node::consensus_runner] consensus: committed height=50
-[2025-11-20T01:18:45Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=64: Not a directory (os error 20)
-[2025-11-20T01:18:51Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=96: Not a directory (os error 20)
-[2025-11-20T01:18:53Z INFO  eezo_node::consensus_runner] consensus: committed height=100
-[2025-11-20T01:18:59Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=128: Not a directory (os error 20)
-[2025-11-20T01:19:03Z INFO  eezo_ledger::persistence] Snapshot height 1 accounts count = 0, supply = Supply { native_mint_total: 5000000000, bridge_mint_total: 0, burn_total: 0 }
-[2025-11-20T01:19:03Z INFO  eezo_node] ✅ committed block h=1 (7 txs)
-[2025-11-20T01:19:03Z INFO  eezo_node::consensus_runner] consensus: committed height=150
-[2025-11-20T01:19:03Z INFO  eezo_ledger::persistence] Snapshot height 2 accounts count = 0, supply = Supply { native_mint_total: 5000000000, bridge_mint_total: 0, burn_total: 0 }
-[2025-11-20T01:19:03Z INFO  eezo_node] ✅ committed block h=2 (20 txs)
-[2025-11-20T01:19:04Z INFO  eezo_ledger::persistence] Snapshot height 3 accounts count = 0, supply = Supply { native_mint_total: 5000000000, bridge_mint_total: 0, burn_total: 0 }
-[2025-11-20T01:19:04Z INFO  eezo_node] ✅ committed block h=3 (20 txs)
-[2025-11-20T01:19:04Z INFO  eezo_ledger::persistence] Snapshot height 4 accounts count = 0, supply = Supply { native_mint_total: 5000000000, bridge_mint_total: 0, burn_total: 0 }
-[2025-11-20T01:19:04Z INFO  eezo_node] ✅ committed block h=4 (20 txs)
-[2025-11-20T01:19:05Z INFO  eezo_ledger::persistence] Snapshot height 5 accounts count = 0, supply = Supply { native_mint_total: 5000000000, bridge_mint_total: 0, burn_total: 0 }
-[2025-11-20T01:19:05Z INFO  eezo_node] ✅ committed block h=5 (7 txs)
-[2025-11-20T01:19:05Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=160: Not a directory (os error 20)
-[2025-11-20T01:19:12Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=192: Not a directory (os error 20)
-[2025-11-20T01:19:13Z INFO  eezo_node::consensus_runner] consensus: committed height=200
-[2025-11-20T01:19:18Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=224: Not a directory (os error 20)
-[2025-11-20T01:19:23Z INFO  eezo_node::consensus_runner] consensus: committed height=250
-[2025-11-20T01:19:24Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=256: Not a directory (os error 20)
-[2025-11-20T01:19:32Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=288: Not a directory (os error 20)
-[2025-11-20T01:19:34Z INFO  eezo_node::consensus_runner] consensus: committed height=300
-[2025-11-20T01:19:38Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=320: Not a directory (os error 20)
-[2025-11-20T01:19:44Z INFO  eezo_node::consensus_runner] consensus: committed height=350
-[2025-11-20T01:19:45Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=352: Not a directory (os error 20)
-[2025-11-20T01:19:51Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=384: Not a directory (os error 20)
-[2025-11-20T01:19:54Z INFO  eezo_node::consensus_runner] consensus: committed height=400
-[2025-11-20T01:19:57Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=416: Not a directory (os error 20)
-[2025-11-20T01:20:05Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=448: Not a directory (os error 20)
-[2025-11-20T01:20:05Z INFO  eezo_node::consensus_runner] consensus: committed height=450
-[2025-11-20T01:20:11Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=480: Not a directory (os error 20)
-[2025-11-20T01:20:15Z INFO  eezo_node::consensus_runner] consensus: committed height=500
-[2025-11-20T01:20:18Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=512: Not a directory (os error 20)
-[2025-11-20T01:20:24Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=544: Not a directory (os error 20)
-[2025-11-20T01:20:25Z INFO  eezo_node::consensus_runner] consensus: committed height=550
-[2025-11-20T01:20:30Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=576: Not a directory (os error 20)
-[2025-11-20T01:20:36Z INFO  eezo_node::consensus_runner] consensus: committed height=600
-[2025-11-20T01:20:38Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=608: Not a directory (os error 20)
-[2025-11-20T01:20:44Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=640: Not a directory (os error 20)
-[2025-11-20T01:20:46Z INFO  eezo_node::consensus_runner] consensus: committed height=650
-[2025-11-20T01:20:51Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=672: Not a directory (os error 20)
-[2025-11-20T01:20:56Z INFO  eezo_node::consensus_runner] consensus: committed height=700
-[2025-11-20T01:20:57Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=704: Not a directory (os error 20)
-[2025-11-20T01:21:03Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=736: Not a directory (os error 20)
-[2025-11-20T01:21:07Z INFO  eezo_node::consensus_runner] consensus: committed height=750
-[2025-11-20T01:21:11Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=768: Not a directory (os error 20)
-[2025-11-20T01:21:17Z INFO  eezo_node::consensus_runner] consensus: committed height=800
-[2025-11-20T01:21:17Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=800: Not a directory (os error 20)
-[2025-11-20T01:21:24Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=832: Not a directory (os error 20)
-[2025-11-20T01:21:27Z INFO  eezo_node::consensus_runner] consensus: committed height=850
-[2025-11-20T01:21:30Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=864: Not a directory (os error 20)
-[2025-11-20T01:21:36Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=896: Not a directory (os error 20)
-[2025-11-20T01:21:37Z INFO  eezo_node::consensus_runner] consensus: committed height=900
-[2025-11-20T01:21:44Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=928: Not a directory (os error 20)
-[2025-11-20T01:21:48Z INFO  eezo_node::consensus_runner] consensus: committed height=950
-[2025-11-20T01:21:50Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=960: Not a directory (os error 20)
-[2025-11-20T01:21:57Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=992: Not a directory (os error 20)
-[2025-11-20T01:21:58Z INFO  eezo_node::consensus_runner] consensus: committed height=1000
-[2025-11-20T01:21:58Z INFO  eezo_ledger::persistence] Snapshot height 1000 accounts count = 0, supply = Supply { native_mint_total: 0, bridge_mint_total: 0, burn_total: 0 }
-[2025-11-20T01:21:58Z INFO  eezo_node::consensus_runner] ✅ runner: wrote state snapshot at h=1000
-[2025-11-20T01:22:03Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1024: Not a directory (os error 20)
-[2025-11-20T01:22:08Z INFO  eezo_node::consensus_runner] consensus: committed height=1050
-[2025-11-20T01:22:10Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1056: Not a directory (os error 20)
-[2025-11-20T01:22:17Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1088: Not a directory (os error 20)
-[2025-11-20T01:22:19Z INFO  eezo_node::consensus_runner] consensus: committed height=1100
-[2025-11-20T01:22:23Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1120: Not a directory (os error 20)
-[2025-11-20T01:22:29Z INFO  eezo_node::consensus_runner] consensus: committed height=1150
-[2025-11-20T01:22:30Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1152: Not a directory (os error 20)
-[2025-11-20T01:22:36Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1184: Not a directory (os error 20)
-[2025-11-20T01:22:39Z INFO  eezo_node::consensus_runner] consensus: committed height=1200
-[2025-11-20T01:22:43Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1216: Not a directory (os error 20)
-[2025-11-20T01:22:50Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1248: Not a directory (os error 20)
-[2025-11-20T01:22:50Z INFO  eezo_node::consensus_runner] consensus: committed height=1250
-[2025-11-20T01:22:56Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1280: Not a directory (os error 20)
-[2025-11-20T01:23:00Z INFO  eezo_node::consensus_runner] consensus: committed height=1300
-[2025-11-20T01:23:03Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1312: Not a directory (os error 20)
-[2025-11-20T01:23:09Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1344: Not a directory (os error 20)
-[2025-11-20T01:23:10Z INFO  eezo_node::consensus_runner] consensus: committed height=1350
-[2025-11-20T01:23:16Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=1376: Not a directory (os error 20)
-[2025-11-20T01:23:21Z INFO  eezo_node::consensus_runner] consensus: committed height=1400  
-
+warning: failed to register eezo_block_e2e_latency_seconds: Duplicate metrics collector registration attempted (using unregistered fallback histogram)
+[2025-11-21T15:49:56Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:56Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:56Z INFO  eezo_ledger::consensus] propose_block: height=2 drained 0 mempool candidates
+[2025-11-21T15:49:56Z INFO  eezo_ledger::block] assemble_block: height=2 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:56Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:56Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:56Z INFO  eezo_ledger::consensus] propose_block: height=3 drained 0 mempool candidates
+[2025-11-21T15:49:56Z INFO  eezo_ledger::block] assemble_block: height=3 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:56Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:56Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:56Z INFO  eezo_ledger::consensus] propose_block: height=4 drained 0 mempool candidates
+[2025-11-21T15:49:56Z INFO  eezo_ledger::block] assemble_block: height=4 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:56Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:56Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:56Z INFO  eezo_ledger::consensus] propose_block: height=5 drained 0 mempool candidates
+[2025-11-21T15:49:56Z INFO  eezo_ledger::block] assemble_block: height=5 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:56Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:56Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:56Z INFO  eezo_ledger::consensus] propose_block: height=6 drained 0 mempool candidates
+[2025-11-21T15:49:56Z INFO  eezo_ledger::block] assemble_block: height=6 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:57Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:57Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:57Z INFO  eezo_ledger::consensus] propose_block: height=7 drained 0 mempool candidates
+[2025-11-21T15:49:57Z INFO  eezo_ledger::block] assemble_block: height=7 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:57Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:57Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:57Z INFO  eezo_ledger::consensus] propose_block: height=8 drained 0 mempool candidates
+[2025-11-21T15:49:57Z INFO  eezo_ledger::block] assemble_block: height=8 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:57Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:57Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:57Z INFO  eezo_ledger::consensus] propose_block: height=9 drained 0 mempool candidates
+[2025-11-21T15:49:57Z INFO  eezo_ledger::block] assemble_block: height=9 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:57Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:57Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:57Z INFO  eezo_ledger::consensus] propose_block: height=10 drained 0 mempool candidates
+[2025-11-21T15:49:57Z INFO  eezo_ledger::block] assemble_block: height=10 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:57Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:57Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:57Z INFO  eezo_ledger::consensus] propose_block: height=11 drained 0 mempool candidates
+[2025-11-21T15:49:57Z INFO  eezo_ledger::block] assemble_block: height=11 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::consensus] propose_block: height=12 drained 0 mempool candidates
+[2025-11-21T15:49:58Z INFO  eezo_ledger::block] assemble_block: height=12 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::consensus] propose_block: height=13 drained 0 mempool candidates
+[2025-11-21T15:49:58Z INFO  eezo_ledger::block] assemble_block: height=13 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:58Z WARN  eezo_ledger::mempool] dev-mode: skipping signature verification for tx (nonce=0 pubkey_len=20)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] ledger-mempool: admitted tx sender=Address([17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34]) nonce=0 (queue now has 1 tx(s))
+[2025-11-21T15:49:58Z WARN  eezo_ledger::mempool] dev-mode: skipping signature verification for tx (nonce=1 pubkey_len=20)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] ledger-mempool: admitted tx sender=Address([17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34]) nonce=1 (queue now has 2 tx(s))
+[2025-11-21T15:49:58Z WARN  eezo_ledger::mempool] dev-mode: skipping signature verification for tx (nonce=2 pubkey_len=20)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] ledger-mempool: admitted tx sender=Address([17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34]) nonce=2 (queue now has 3 tx(s))
+[2025-11-21T15:49:58Z WARN  eezo_ledger::mempool] dev-mode: skipping signature verification for tx (nonce=3 pubkey_len=20)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] ledger-mempool: admitted tx sender=Address([17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34]) nonce=3 (queue now has 4 tx(s))
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 1 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] mempool: drained 4 transaction(s) for block (used 356 bytes)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::consensus] propose_block: height=14 drained 4 mempool candidates
+[2025-11-21T15:49:58Z WARN  eezo_ledger::block] assemble_block: tx[0] nonce=0 rejected: invalid signature
+[2025-11-21T15:49:58Z WARN  eezo_ledger::block] assemble_block: tx[1] nonce=1 rejected: invalid signature
+[2025-11-21T15:49:58Z WARN  eezo_ledger::block] assemble_block: tx[2] nonce=2 rejected: invalid signature
+[2025-11-21T15:49:58Z WARN  eezo_ledger::block] assemble_block: tx[3] nonce=3 rejected: invalid signature
+[2025-11-21T15:49:58Z INFO  eezo_ledger::block] assemble_block: height=14 finished - picked 0 tx(s) from 4 candidate(s)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::consensus] propose_block: height=15 drained 0 mempool candidates
+[2025-11-21T15:49:58Z INFO  eezo_ledger::block] assemble_block: height=15 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:58Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:58Z INFO  eezo_ledger::consensus] propose_block: height=16 drained 0 mempool candidates
+[2025-11-21T15:49:58Z INFO  eezo_ledger::block] assemble_block: height=16 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:59Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:59Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:59Z INFO  eezo_ledger::consensus] propose_block: height=17 drained 0 mempool candidates
+[2025-11-21T15:49:59Z INFO  eezo_ledger::block] assemble_block: height=17 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:59Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:59Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:59Z INFO  eezo_ledger::consensus] propose_block: height=18 drained 0 mempool candidates
+[2025-11-21T15:49:59Z INFO  eezo_ledger::block] assemble_block: height=18 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:59Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:59Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:59Z INFO  eezo_ledger::consensus] propose_block: height=19 drained 0 mempool candidates
+[2025-11-21T15:49:59Z INFO  eezo_ledger::block] assemble_block: height=19 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:59Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:59Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:59Z INFO  eezo_ledger::consensus] propose_block: height=20 drained 0 mempool candidates
+[2025-11-21T15:49:59Z INFO  eezo_ledger::block] assemble_block: height=20 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:49:59Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:49:59Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:49:59Z INFO  eezo_ledger::consensus] propose_block: height=21 drained 0 mempool candidates
+[2025-11-21T15:49:59Z INFO  eezo_ledger::block] assemble_block: height=21 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:00Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:00Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:00Z INFO  eezo_ledger::consensus] propose_block: height=22 drained 0 mempool candidates
+[2025-11-21T15:50:00Z INFO  eezo_ledger::block] assemble_block: height=22 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:00Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:00Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:00Z INFO  eezo_ledger::consensus] propose_block: height=23 drained 0 mempool candidates
+[2025-11-21T15:50:00Z INFO  eezo_ledger::block] assemble_block: height=23 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:00Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:00Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:00Z INFO  eezo_ledger::consensus] propose_block: height=24 drained 0 mempool candidates
+[2025-11-21T15:50:00Z INFO  eezo_ledger::block] assemble_block: height=24 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:00Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:00Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:00Z INFO  eezo_ledger::consensus] propose_block: height=25 drained 0 mempool candidates
+[2025-11-21T15:50:00Z INFO  eezo_ledger::block] assemble_block: height=25 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:00Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:00Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:00Z INFO  eezo_ledger::consensus] propose_block: height=26 drained 0 mempool candidates
+[2025-11-21T15:50:00Z INFO  eezo_ledger::block] assemble_block: height=26 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:01Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:01Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:01Z INFO  eezo_ledger::consensus] propose_block: height=27 drained 0 mempool candidates
+[2025-11-21T15:50:01Z INFO  eezo_ledger::block] assemble_block: height=27 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:01Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:01Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:01Z INFO  eezo_ledger::consensus] propose_block: height=28 drained 0 mempool candidates
+[2025-11-21T15:50:01Z INFO  eezo_ledger::block] assemble_block: height=28 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:01Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:01Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:01Z INFO  eezo_ledger::consensus] propose_block: height=29 drained 0 mempool candidates
+[2025-11-21T15:50:01Z INFO  eezo_ledger::block] assemble_block: height=29 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:01Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:01Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:01Z INFO  eezo_ledger::consensus] propose_block: height=30 drained 0 mempool candidates
+[2025-11-21T15:50:01Z INFO  eezo_ledger::block] assemble_block: height=30 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:01Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:01Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:01Z INFO  eezo_ledger::consensus] propose_block: height=31 drained 0 mempool candidates
+[2025-11-21T15:50:01Z INFO  eezo_ledger::block] assemble_block: height=31 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:02Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:02Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:02Z INFO  eezo_ledger::consensus] propose_block: height=32 drained 0 mempool candidates
+[2025-11-21T15:50:02Z INFO  eezo_ledger::block] assemble_block: height=32 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:02Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=32: Not a directory (os error 20)
+[2025-11-21T15:50:02Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:02Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:02Z INFO  eezo_ledger::consensus] propose_block: height=33 drained 0 mempool candidates
+[2025-11-21T15:50:02Z INFO  eezo_ledger::block] assemble_block: height=33 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:02Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:02Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:02Z INFO  eezo_ledger::consensus] propose_block: height=34 drained 0 mempool candidates
+[2025-11-21T15:50:02Z INFO  eezo_ledger::block] assemble_block: height=34 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:02Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:02Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:02Z INFO  eezo_ledger::consensus] propose_block: height=35 drained 0 mempool candidates
+[2025-11-21T15:50:02Z INFO  eezo_ledger::block] assemble_block: height=35 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:02Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:02Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:02Z INFO  eezo_ledger::consensus] propose_block: height=36 drained 0 mempool candidates
+[2025-11-21T15:50:02Z INFO  eezo_ledger::block] assemble_block: height=36 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:03Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:03Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:03Z INFO  eezo_ledger::consensus] propose_block: height=37 drained 0 mempool candidates
+[2025-11-21T15:50:03Z INFO  eezo_ledger::block] assemble_block: height=37 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:03Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:03Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:03Z INFO  eezo_ledger::consensus] propose_block: height=38 drained 0 mempool candidates
+[2025-11-21T15:50:03Z INFO  eezo_ledger::block] assemble_block: height=38 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:03Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:03Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:03Z INFO  eezo_ledger::consensus] propose_block: height=39 drained 0 mempool candidates
+[2025-11-21T15:50:03Z INFO  eezo_ledger::block] assemble_block: height=39 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:03Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:03Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:03Z INFO  eezo_ledger::consensus] propose_block: height=40 drained 0 mempool candidates
+[2025-11-21T15:50:03Z INFO  eezo_ledger::block] assemble_block: height=40 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:03Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:03Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:03Z INFO  eezo_ledger::consensus] propose_block: height=41 drained 0 mempool candidates
+[2025-11-21T15:50:03Z INFO  eezo_ledger::block] assemble_block: height=41 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:04Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:04Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:04Z INFO  eezo_ledger::consensus] propose_block: height=42 drained 0 mempool candidates
+[2025-11-21T15:50:04Z INFO  eezo_ledger::block] assemble_block: height=42 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:04Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:04Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:04Z INFO  eezo_ledger::consensus] propose_block: height=43 drained 0 mempool candidates
+[2025-11-21T15:50:04Z INFO  eezo_ledger::block] assemble_block: height=43 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:04Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:04Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:04Z INFO  eezo_ledger::consensus] propose_block: height=44 drained 0 mempool candidates
+[2025-11-21T15:50:04Z INFO  eezo_ledger::block] assemble_block: height=44 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:04Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:04Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:04Z INFO  eezo_ledger::consensus] propose_block: height=45 drained 0 mempool candidates
+[2025-11-21T15:50:04Z INFO  eezo_ledger::block] assemble_block: height=45 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:04Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:04Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:04Z INFO  eezo_ledger::consensus] propose_block: height=46 drained 0 mempool candidates
+[2025-11-21T15:50:04Z INFO  eezo_ledger::block] assemble_block: height=46 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:05Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:05Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:05Z INFO  eezo_ledger::consensus] propose_block: height=47 drained 0 mempool candidates
+[2025-11-21T15:50:05Z INFO  eezo_ledger::block] assemble_block: height=47 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:05Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:05Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:05Z INFO  eezo_ledger::consensus] propose_block: height=48 drained 0 mempool candidates
+[2025-11-21T15:50:05Z INFO  eezo_ledger::block] assemble_block: height=48 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:05Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:05Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:05Z INFO  eezo_ledger::consensus] propose_block: height=49 drained 0 mempool candidates
+[2025-11-21T15:50:05Z INFO  eezo_ledger::block] assemble_block: height=49 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:05Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:05Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:05Z INFO  eezo_ledger::consensus] propose_block: height=50 drained 0 mempool candidates
+[2025-11-21T15:50:05Z INFO  eezo_ledger::block] assemble_block: height=50 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:05Z INFO  eezo_node::consensus_runner] consensus: committed height=50
+[2025-11-21T15:50:05Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:05Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:05Z INFO  eezo_ledger::consensus] propose_block: height=51 drained 0 mempool candidates
+[2025-11-21T15:50:05Z INFO  eezo_ledger::block] assemble_block: height=51 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:06Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:06Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:06Z INFO  eezo_ledger::consensus] propose_block: height=52 drained 0 mempool candidates
+[2025-11-21T15:50:06Z INFO  eezo_ledger::block] assemble_block: height=52 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:06Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:06Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:06Z INFO  eezo_ledger::consensus] propose_block: height=53 drained 0 mempool candidates
+[2025-11-21T15:50:06Z INFO  eezo_ledger::block] assemble_block: height=53 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:06Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:06Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:06Z INFO  eezo_ledger::consensus] propose_block: height=54 drained 0 mempool candidates
+[2025-11-21T15:50:06Z INFO  eezo_ledger::block] assemble_block: height=54 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:06Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:06Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:06Z INFO  eezo_ledger::consensus] propose_block: height=55 drained 0 mempool candidates
+[2025-11-21T15:50:06Z INFO  eezo_ledger::block] assemble_block: height=55 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:06Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:06Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:06Z INFO  eezo_ledger::consensus] propose_block: height=56 drained 0 mempool candidates
+[2025-11-21T15:50:06Z INFO  eezo_ledger::block] assemble_block: height=56 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:07Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:07Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:07Z INFO  eezo_ledger::consensus] propose_block: height=57 drained 0 mempool candidates
+[2025-11-21T15:50:07Z INFO  eezo_ledger::block] assemble_block: height=57 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:07Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:07Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:07Z INFO  eezo_ledger::consensus] propose_block: height=58 drained 0 mempool candidates
+[2025-11-21T15:50:07Z INFO  eezo_ledger::block] assemble_block: height=58 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:07Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:07Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:07Z INFO  eezo_ledger::consensus] propose_block: height=59 drained 0 mempool candidates
+[2025-11-21T15:50:07Z INFO  eezo_ledger::block] assemble_block: height=59 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:07Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:07Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:07Z INFO  eezo_ledger::consensus] propose_block: height=60 drained 0 mempool candidates
+[2025-11-21T15:50:07Z INFO  eezo_ledger::block] assemble_block: height=60 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:07Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:07Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:07Z INFO  eezo_ledger::consensus] propose_block: height=61 drained 0 mempool candidates
+[2025-11-21T15:50:07Z INFO  eezo_ledger::block] assemble_block: height=61 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:08Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:08Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:08Z INFO  eezo_ledger::consensus] propose_block: height=62 drained 0 mempool candidates
+[2025-11-21T15:50:08Z INFO  eezo_ledger::block] assemble_block: height=62 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:08Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:08Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:08Z INFO  eezo_ledger::consensus] propose_block: height=63 drained 0 mempool candidates
+[2025-11-21T15:50:08Z INFO  eezo_ledger::block] assemble_block: height=63 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:08Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:08Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:08Z INFO  eezo_ledger::consensus] propose_block: height=64 drained 0 mempool candidates
+[2025-11-21T15:50:08Z INFO  eezo_ledger::block] assemble_block: height=64 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:08Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=64: Not a directory (os error 20)
+[2025-11-21T15:50:08Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:08Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:08Z INFO  eezo_ledger::consensus] propose_block: height=65 drained 0 mempool candidates
+[2025-11-21T15:50:08Z INFO  eezo_ledger::block] assemble_block: height=65 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:08Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:08Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:08Z INFO  eezo_ledger::consensus] propose_block: height=66 drained 0 mempool candidates
+[2025-11-21T15:50:08Z INFO  eezo_ledger::block] assemble_block: height=66 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:09Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:09Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:09Z INFO  eezo_ledger::consensus] propose_block: height=67 drained 0 mempool candidates
+[2025-11-21T15:50:09Z INFO  eezo_ledger::block] assemble_block: height=67 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:09Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:09Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:09Z INFO  eezo_ledger::consensus] propose_block: height=68 drained 0 mempool candidates
+[2025-11-21T15:50:09Z INFO  eezo_ledger::block] assemble_block: height=68 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:09Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:09Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:09Z INFO  eezo_ledger::consensus] propose_block: height=69 drained 0 mempool candidates
+[2025-11-21T15:50:09Z INFO  eezo_ledger::block] assemble_block: height=69 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:09Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:09Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:09Z INFO  eezo_ledger::consensus] propose_block: height=70 drained 0 mempool candidates
+[2025-11-21T15:50:09Z INFO  eezo_ledger::block] assemble_block: height=70 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:09Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:09Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:09Z INFO  eezo_ledger::consensus] propose_block: height=71 drained 0 mempool candidates
+[2025-11-21T15:50:09Z INFO  eezo_ledger::block] assemble_block: height=71 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:10Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:10Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:10Z INFO  eezo_ledger::consensus] propose_block: height=72 drained 0 mempool candidates
+[2025-11-21T15:50:10Z INFO  eezo_ledger::block] assemble_block: height=72 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:10Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:10Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:10Z INFO  eezo_ledger::consensus] propose_block: height=73 drained 0 mempool candidates
+[2025-11-21T15:50:10Z INFO  eezo_ledger::block] assemble_block: height=73 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:10Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:10Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:10Z INFO  eezo_ledger::consensus] propose_block: height=74 drained 0 mempool candidates
+[2025-11-21T15:50:10Z INFO  eezo_ledger::block] assemble_block: height=74 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:10Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:10Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:10Z INFO  eezo_ledger::consensus] propose_block: height=75 drained 0 mempool candidates
+[2025-11-21T15:50:10Z INFO  eezo_ledger::block] assemble_block: height=75 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:10Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:10Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:10Z INFO  eezo_ledger::consensus] propose_block: height=76 drained 0 mempool candidates
+[2025-11-21T15:50:10Z INFO  eezo_ledger::block] assemble_block: height=76 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:11Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:11Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:11Z INFO  eezo_ledger::consensus] propose_block: height=77 drained 0 mempool candidates
+[2025-11-21T15:50:11Z INFO  eezo_ledger::block] assemble_block: height=77 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:11Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:11Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:11Z INFO  eezo_ledger::consensus] propose_block: height=78 drained 0 mempool candidates
+[2025-11-21T15:50:11Z INFO  eezo_ledger::block] assemble_block: height=78 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:11Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:11Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:11Z INFO  eezo_ledger::consensus] propose_block: height=79 drained 0 mempool candidates
+[2025-11-21T15:50:11Z INFO  eezo_ledger::block] assemble_block: height=79 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:11Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:11Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:11Z INFO  eezo_ledger::consensus] propose_block: height=80 drained 0 mempool candidates
+[2025-11-21T15:50:11Z INFO  eezo_ledger::block] assemble_block: height=80 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:11Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:11Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:11Z INFO  eezo_ledger::consensus] propose_block: height=81 drained 0 mempool candidates
+[2025-11-21T15:50:11Z INFO  eezo_ledger::block] assemble_block: height=81 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:12Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:12Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:12Z INFO  eezo_ledger::consensus] propose_block: height=82 drained 0 mempool candidates
+[2025-11-21T15:50:12Z INFO  eezo_ledger::block] assemble_block: height=82 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:12Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:12Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:12Z INFO  eezo_ledger::consensus] propose_block: height=83 drained 0 mempool candidates
+[2025-11-21T15:50:12Z INFO  eezo_ledger::block] assemble_block: height=83 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:12Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:12Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:12Z INFO  eezo_ledger::consensus] propose_block: height=84 drained 0 mempool candidates
+[2025-11-21T15:50:12Z INFO  eezo_ledger::block] assemble_block: height=84 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:12Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:12Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:12Z INFO  eezo_ledger::consensus] propose_block: height=85 drained 0 mempool candidates
+[2025-11-21T15:50:12Z INFO  eezo_ledger::block] assemble_block: height=85 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:12Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:12Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:12Z INFO  eezo_ledger::consensus] propose_block: height=86 drained 0 mempool candidates
+[2025-11-21T15:50:12Z INFO  eezo_ledger::block] assemble_block: height=86 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:13Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:13Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:13Z INFO  eezo_ledger::consensus] propose_block: height=87 drained 0 mempool candidates
+[2025-11-21T15:50:13Z INFO  eezo_ledger::block] assemble_block: height=87 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:13Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:13Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:13Z INFO  eezo_ledger::consensus] propose_block: height=88 drained 0 mempool candidates
+[2025-11-21T15:50:13Z INFO  eezo_ledger::block] assemble_block: height=88 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:13Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:13Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:13Z INFO  eezo_ledger::consensus] propose_block: height=89 drained 0 mempool candidates
+[2025-11-21T15:50:13Z INFO  eezo_ledger::block] assemble_block: height=89 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:13Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:13Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:13Z INFO  eezo_ledger::consensus] propose_block: height=90 drained 0 mempool candidates
+[2025-11-21T15:50:13Z INFO  eezo_ledger::block] assemble_block: height=90 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:13Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:13Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:13Z INFO  eezo_ledger::consensus] propose_block: height=91 drained 0 mempool candidates
+[2025-11-21T15:50:13Z INFO  eezo_ledger::block] assemble_block: height=91 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:14Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:14Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:14Z INFO  eezo_ledger::consensus] propose_block: height=92 drained 0 mempool candidates
+[2025-11-21T15:50:14Z INFO  eezo_ledger::block] assemble_block: height=92 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:14Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:14Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:14Z INFO  eezo_ledger::consensus] propose_block: height=93 drained 0 mempool candidates
+[2025-11-21T15:50:14Z INFO  eezo_ledger::block] assemble_block: height=93 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:14Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:14Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:14Z INFO  eezo_ledger::consensus] propose_block: height=94 drained 0 mempool candidates
+[2025-11-21T15:50:14Z INFO  eezo_ledger::block] assemble_block: height=94 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:14Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:14Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:14Z INFO  eezo_ledger::consensus] propose_block: height=95 drained 0 mempool candidates
+[2025-11-21T15:50:14Z INFO  eezo_ledger::block] assemble_block: height=95 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:14Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:14Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:14Z INFO  eezo_ledger::consensus] propose_block: height=96 drained 0 mempool candidates
+[2025-11-21T15:50:14Z INFO  eezo_ledger::block] assemble_block: height=96 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:14Z WARN  eezo_node::consensus_runner] checkpoint: write failed at h=96: Not a directory (os error 20)
+[2025-11-21T15:50:15Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:15Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:15Z INFO  eezo_ledger::consensus] propose_block: height=97 drained 0 mempool candidates
+[2025-11-21T15:50:15Z INFO  eezo_ledger::block] assemble_block: height=97 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:15Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:15Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:15Z INFO  eezo_ledger::consensus] propose_block: height=98 drained 0 mempool candidates
+[2025-11-21T15:50:15Z INFO  eezo_ledger::block] assemble_block: height=98 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:15Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:15Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:15Z INFO  eezo_ledger::consensus] propose_block: height=99 drained 0 mempool candidates
+[2025-11-21T15:50:15Z INFO  eezo_ledger::block] assemble_block: height=99 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:15Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:15Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:15Z INFO  eezo_ledger::consensus] propose_block: height=100 drained 0 mempool candidates
+[2025-11-21T15:50:15Z INFO  eezo_ledger::block] assemble_block: height=100 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:15Z INFO  eezo_node::consensus_runner] consensus: committed height=100
+[2025-11-21T15:50:15Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:15Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:15Z INFO  eezo_ledger::consensus] propose_block: height=101 drained 0 mempool candidates
+[2025-11-21T15:50:15Z INFO  eezo_ledger::block] assemble_block: height=101 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:16Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:16Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:16Z INFO  eezo_ledger::consensus] propose_block: height=102 drained 0 mempool candidates
+[2025-11-21T15:50:16Z INFO  eezo_ledger::block] assemble_block: height=102 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:16Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:16Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:16Z INFO  eezo_ledger::consensus] propose_block: height=103 drained 0 mempool candidates
+[2025-11-21T15:50:16Z INFO  eezo_ledger::block] assemble_block: height=103 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:16Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:16Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:16Z INFO  eezo_ledger::consensus] propose_block: height=104 drained 0 mempool candidates
+[2025-11-21T15:50:16Z INFO  eezo_ledger::block] assemble_block: height=104 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:16Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:16Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:16Z INFO  eezo_ledger::consensus] propose_block: height=105 drained 0 mempool candidates
+[2025-11-21T15:50:16Z INFO  eezo_ledger::block] assemble_block: height=105 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:16Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:16Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:16Z INFO  eezo_ledger::consensus] propose_block: height=106 drained 0 mempool candidates
+[2025-11-21T15:50:16Z INFO  eezo_ledger::block] assemble_block: height=106 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:17Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:17Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:17Z INFO  eezo_ledger::consensus] propose_block: height=107 drained 0 mempool candidates
+[2025-11-21T15:50:17Z INFO  eezo_ledger::block] assemble_block: height=107 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:17Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:17Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:17Z INFO  eezo_ledger::consensus] propose_block: height=108 drained 0 mempool candidates
+[2025-11-21T15:50:17Z INFO  eezo_ledger::block] assemble_block: height=108 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:17Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:17Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:17Z INFO  eezo_ledger::consensus] propose_block: height=109 drained 0 mempool candidates
+[2025-11-21T15:50:17Z INFO  eezo_ledger::block] assemble_block: height=109 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:17Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:17Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:17Z INFO  eezo_ledger::consensus] propose_block: height=110 drained 0 mempool candidates
+[2025-11-21T15:50:17Z INFO  eezo_ledger::block] assemble_block: height=110 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:17Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:17Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:17Z INFO  eezo_ledger::consensus] propose_block: height=111 drained 0 mempool candidates
+[2025-11-21T15:50:17Z INFO  eezo_ledger::block] assemble_block: height=111 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:18Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:18Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:18Z INFO  eezo_ledger::consensus] propose_block: height=112 drained 0 mempool candidates
+[2025-11-21T15:50:18Z INFO  eezo_ledger::block] assemble_block: height=112 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:18Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:18Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:18Z INFO  eezo_ledger::consensus] propose_block: height=113 drained 0 mempool candidates
+[2025-11-21T15:50:18Z INFO  eezo_ledger::block] assemble_block: height=113 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:18Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:18Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:18Z INFO  eezo_ledger::consensus] propose_block: height=114 drained 0 mempool candidates
+[2025-11-21T15:50:18Z INFO  eezo_ledger::block] assemble_block: height=114 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:18Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:18Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:18Z INFO  eezo_ledger::consensus] propose_block: height=115 drained 0 mempool candidates
+[2025-11-21T15:50:18Z INFO  eezo_ledger::block] assemble_block: height=115 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:18Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:18Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:18Z INFO  eezo_ledger::consensus] propose_block: height=116 drained 0 mempool candidates
+[2025-11-21T15:50:18Z INFO  eezo_ledger::block] assemble_block: height=116 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:19Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:19Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:19Z INFO  eezo_ledger::consensus] propose_block: height=117 drained 0 mempool candidates
+[2025-11-21T15:50:19Z INFO  eezo_ledger::block] assemble_block: height=117 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:19Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:19Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:19Z INFO  eezo_ledger::consensus] propose_block: height=118 drained 0 mempool candidates
+[2025-11-21T15:50:19Z INFO  eezo_ledger::block] assemble_block: height=118 finished - picked 0 tx(s) from 0 candidate(s)
+[2025-11-21T15:50:19Z INFO  eezo_ledger::mempool] mempool: drain_for_block called, 0 senders with pending txs, max_bytes=1048576
+[2025-11-21T15:50:19Z INFO  eezo_ledger::mempool] mempool: drained 0 transaction(s) for block (used 0 bytes)
+[2025-11-21T15:50:19Z INFO  eezo_ledger::consensus] propose_block: height=119 drained 0 mempool candidates
+[2025-11-21T15:50:19Z INFO  eezo_ledger::block] assemble_block: height=119 finished - picked 0 tx(s) from 0 candidate(s)
+^C[2025-11-21T15:50:19Z INFO  eezo_node] signal: Ctrl-C received; shutting down...
+[2025-11-21T15:50:19Z INFO  eezo_node] stopping consensus runner...
+[2025-11-21T15:50:19Z INFO  eezo_node] consensus runner stopped
+🛑 Server shutdown gracefully
+saeed@DESKTOP-T3Q3B29:~/Block/eezo$  
 
 terminal 2:
-saeed@DESKTOP-T3Q3B29:~$ cd ~/Block/eezo
-NODE="http://127.0.0.1:8080"
-
-ADDR_FROM="0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+saeed@DESKTOP-T3Q3B29:~/Block/eezo$ PUBKEY_HEX="1111111111111111111122222222222222222222"
+ADDR_FROM="0x$(echo -n $PUBKEY_HEX | head -c 40)"
 ADDR_TO="0xcafebabecafebabecafebabecafebabecafebabe"
 
-curl -s -X POST "$NODE/faucet" \
+curl -s -X POST http://127.0.0.1:8080/faucet \
   -H "Content-Type: application/json" \
-  -d "{\"to\":\"$ADDR_FROM\",\"amount\":\"100000000\"}" > /dev/null
+  -d '{"to":"'"$ADDR_FROM"'","amount":"1000000000"}'
 
-curl -s "$NODE/account/${ADDR_FROM}"
-echo
-{"balance":"100000000","nonce":"0"}
-saeed@DESKTOP-T3Q3B29:~/Block/eezo$
-
-terminal 3:
-saeed@DESKTOP-T3Q3B29:~$ cd ~/Block/eezo
-scripts/spam_tps.sh 10000
-[spam] using NODE=http://127.0.0.1:8080 COUNT=10000
-[spam] account = {"balance":"100000000","nonce":"0"}
-[spam] starting nonce = 0
-[spam] submitted 10000 tx
-saeed@DESKTOP-T3Q3B29:~/Block/eezo$ curl -s http://127.0.0.1:9898/metrics | rg 'eezo_txs_included_total|eezo_mempool_'
-# HELP eezo_mempool_bytes_gauge Current bytes in mempool
-# TYPE eezo_mempool_bytes_gauge gauge
-eezo_mempool_bytes_gauge 382884
-# HELP eezo_mempool_len Current mempool length
-# TYPE eezo_mempool_len gauge
-eezo_mempool_len 2189
-# HELP eezo_txs_included_total Transactions included in committed blocks (node view)
-# TYPE eezo_txs_included_total counter
-eezo_txs_included_total 74
-saeed@DESKTOP-T3Q3B29:~/Block/eezo$
+for i in $(seq 0 3); do
+  curl -s -X POST http://127.0.0.1:8080/tx \
+    -H "Content-Type: application/json" \
+    -d '{
+      "tx": {
+        "from": "'"$ADDR_FROM"'",
+        "to":   "'"$ADDR_TO"'",
+        "amount": "1",
+        "fee": "1",
+        "nonce": "'$i'",
+        "chain_id": "0x01"
+      },
+      "pubkey": "'"$PUBKEY_HEX"'",
+      "sig":    "00"
+    }'
+  echo
+done
+{"balance":"1000000000","nonce":"0","to":"0x1111111111111111111122222222222222222222"}{"hash":"0xf69d7649cabf5599aa7bbb7c8d5ae675f31c2946e90b25577f8389339d98d93b"}
+{"hash":"0x3be17ea26ec8c7bd502c3a4446c3ef3da42615c148fbb40a144ec28140d175d7"}
+{"hash":"0xb20f6fc365569a78c010ff00d3c619adecf5d11da15dd063c024f94065f81854"}
+{"hash":"0x46705317d8aafaea966e26c1a7e6a8ea18849d72ec2e9e91046b3c64e3fae93b"}
+saeed@DESKTOP-T3Q3B29:~/Block/eezo$ curl -s http://127.0.0.1:8080/account/$ADDR_FROM
+{"balance":"1000000000","nonce":"0"}saeed@DESKTOP-T3Q3B29:~/Block/eezo$

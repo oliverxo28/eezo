@@ -182,6 +182,19 @@ pub fn apply_tx(
     sender: Address,
     core: &TxCore,
 ) -> Result<(), TxStateError> {
+    // Log before validation - accounts.get() always returns a valid Account (zero balance if new)
+    let sender_before = accts.get(&sender);
+    log::info!(
+        "apply_tx: sender={:?} nonce={} (current_nonce={}, balance={}) amount={} fee={} to={:?}",
+        sender,
+        core.nonce,
+        sender_before.nonce,
+        sender_before.balance,
+        core.amount,
+        core.fee,
+        core.to
+    );
+    
     validate_tx_stateful(accts, sender, core)?;
 
     let need = core.amount.saturating_add(core.fee);
@@ -190,7 +203,7 @@ pub fn apply_tx(
     let mut s = accts.get(&sender);
     s.balance = s.balance.saturating_sub(need);
     s.nonce = s.nonce.saturating_add(1);
-    accts.put(sender, s);
+    accts.put(sender, s.clone());
 
     // credit receiver
     let mut r = accts.get(&core.to);
@@ -199,6 +212,14 @@ pub fn apply_tx(
 
     // For now: burn the fee (operator policy; can redirect to reward pool later)
     supply.apply_burn(core.fee);
+
+    // Log after application - use the saved sender state to avoid redundant lookup
+    log::info!(
+        "apply_tx: ✅ success, sender={:?} new_nonce={} new_balance={}",
+        sender,
+        s.nonce,
+        s.balance
+    );
 
     Ok(())
 }

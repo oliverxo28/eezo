@@ -362,6 +362,7 @@ pub fn assemble_block(
 
     // Establish the single, canonical transaction order.
     let ordered_candidates = canonical_tx_order(candidates);
+    let candidate_count = ordered_candidates.len();
 
     let mut picked = Vec::new();
     let mut used = header_base_bytes();
@@ -372,36 +373,56 @@ pub fn assemble_block(
     let mut shadow_supply = Supply::default();
 
     // Greedily pick transactions from the canonical list that are valid and fit the budget.
-    for tx in ordered_candidates.into_iter() {
+    for (idx, tx) in ordered_candidates.into_iter().enumerate() {
         let size = tx_budget_bytes(&tx);
         if used + size > max_u64 {
+            log::debug!("assemble_block: tx[{}] nonce={} rejected: exceeds byte budget", idx, tx.core.nonce);
             continue;
         }
         // Re-check sig (skip in tests and when skip-sig-verify is on)
         #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
         if !verify_signed_tx(chain_id, &tx) {
+            log::warn!("assemble_block: tx[{}] nonce={} rejected: invalid signature", idx, tx.core.nonce);
             continue;
         }
         if validate_tx_shape(&tx.core).is_err() {
+            log::warn!("assemble_block: tx[{}] nonce={} rejected: invalid shape", idx, tx.core.nonce);
             continue;
         }
         // --- Stateful validation (on shadow) to filter gap/replay/insufficient funds
         let Some(sender) = sender_from_pubkey_first20(&tx) else {
+            log::warn!("assemble_block: tx[{}] nonce={} rejected: cannot resolve sender", idx, tx.core.nonce);
             continue; // cannot resolve sender -> skip
         };
-        if let Err(_e) = validate_tx_stateful(&shadow_accounts, sender, &tx.core) {
+        
+        // Log the validation attempt
+        let shadow_acct = shadow_accounts.get(&sender);
+        if let Err(e) = validate_tx_stateful(&shadow_accounts, sender, &tx.core) {
+            log::info!(
+                "assemble_block: tx[{}] sender={:?} nonce={} rejected: stateful validation failed: {:?} (shadow nonce={}, balance={})",
+                idx, sender, tx.core.nonce, e, shadow_acct.nonce, shadow_acct.balance
+            );
             continue; // e.g., BadNonce { expected: .., got: .. } or insufficient funds
         }
         // Advance shadow state so the next tx sees updated nonce/balance
-        if let Err(_e) = apply_tx(&mut shadow_accounts, &mut shadow_supply, sender, &tx.core) {
+        if let Err(e) = apply_tx(&mut shadow_accounts, &mut shadow_supply, sender, &tx.core) {
+            log::warn!("assemble_block: tx[{}] nonce={} rejected: shadow apply failed: {:?}", idx, tx.core.nonce, e);
             continue;
         }
 
+        log::info!("assemble_block: tx[{}] sender={:?} nonce={} INCLUDED in block", idx, sender, tx.core.nonce);
         picked.push(tx);
         used += size;
     }
 
     // Allow empty blocks for liveness. tx_root over empty set is [0u8; 32].
+    log::info!(
+        "assemble_block: height={} finished - picked {} tx(s) from {} candidate(s)",
+        height,
+        picked.len(),
+        candidate_count
+    );
+    
     let tx_root = txs_root(&picked);
     let fee_total: u128 = picked.iter().map(|t| t.core.fee).sum();
 
