@@ -1100,9 +1100,9 @@ async fn get_account(
     State(state): State<AppState>,
     AxumPath(addr): AxumPath<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // Parse and normalize the address using the new helper
-    let normalized_addr = match parse_account_addr(&addr) {
-        Some(addr) => format!("0x{}", hex::encode(addr.as_bytes())),
+    // First parse into a canonical ledger address
+    let ledger_addr = match parse_account_addr(&addr) {
+        Some(a) => a,
         None => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -1110,13 +1110,36 @@ async fn get_account(
             )
         }
     };
+
+    // On pq44-runtime, prefer the ledger as the source of truth
+    #[cfg(feature = "pq44-runtime")]
+    {
+        if let Some(core_runner) = &state.core_runner {
+            let (bal, nonce) = core_runner
+                .with_node(|node| {
+                    let acct = node.accounts.get(&ledger_addr);
+                    (acct.balance, acct.nonce)
+                })
+                .await;
+
+            let view = AccountView {
+                balance: bal.to_string(),
+                nonce: nonce.to_string(),
+            };
+            return (StatusCode::OK, Json(serde_json::json!(view)));
+        }
+    }
+
+    // Fallback: node-level accounts (non-pq44-runtime or if core_runner not available)
+    let normalized_addr = format!("0x{}", hex::encode(ledger_addr.as_bytes()));
     let (bal, nonce) = state.accounts.get(&normalized_addr).await;
     let view = AccountView {
         balance: bal.to_string(),
-        nonce: nonce.to_string()
+        nonce: nonce.to_string(),
     };
     (StatusCode::OK, Json(serde_json::json!(view)))
 }
+
 
 // Update the post_faucet handler
 async fn post_faucet(
@@ -1125,26 +1148,48 @@ async fn post_faucet(
 ) -> (StatusCode, Json<serde_json::Value>) {
     // DEV ONLY: optional toggle
     if std::env::var("EEZO_DEVNET_FAUCET").ok().as_deref() == Some("off") {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"faucet disabled"})));
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error":"faucet disabled"})),
+        );
     }
 
     let Ok(amount) = req.amount.parse::<u64>() else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"amount must be u64"})));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"amount must be u64"})),
+        );
     };
 
-    // Parse and normalize the address using the new helper
-    let normalized_addr = match parse_account_addr(&req.to) {
-        Some(addr) => format!("0x{}", hex::encode(addr.as_bytes())),
+    // Parse once into a canonical ledger address
+    let ledger_addr = match parse_account_addr(&req.to) {
+        Some(a) => a,
         None => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "invalid address format"})),
-            )
+            );
         }
     };
 
+    // For pq44-runtime: credit the real ledger accounts (used by tx validation)
+    #[cfg(feature = "pq44-runtime")]
+    {
+        if let Some(core_runner) = &state.core_runner {
+            let addr_copy = ledger_addr;
+            core_runner
+                .with_node(move |node| {
+                    node.dev_faucet_credit(addr_copy, amount as u128);
+                })
+                .await;
+        }
+    }
+
+    // Also update node-level accounts for backward compatibility with /account endpoint
+    let normalized_addr = format!("0x{}", hex::encode(ledger_addr.as_bytes()));
     state.accounts.mint(&normalized_addr, amount).await;
     let (bal, nonce) = state.accounts.get(&normalized_addr).await;
+
     // Return the original address in the response for user convenience
     (StatusCode::OK, Json(serde_json::json!({
         "to": req.to,

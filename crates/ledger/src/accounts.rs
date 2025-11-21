@@ -32,6 +32,13 @@ impl Accounts {
     fn ensure_mut(&mut self, who: Address) -> &mut Account {
         self.inner.entry(who).or_default()
     }
+	
+	/// Dev-only faucet helper: used by the node in EEZO_DEV mode to
+	/// credit ledger accounts directly from /faucet.
+	#[inline]
+	pub fn dev_faucet_credit(&mut self, who: Address, amount: u128) {
+		self.credit(who, amount);
+	}
 
     /// +balance (saturating)
     pub fn credit(&mut self, who: Address, amount: u128) {

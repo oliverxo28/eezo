@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use crate::Address;
 
 // === T27: HotStuff-like pipeline (uses new message module) ===
 use crate::block::BlockId;
@@ -941,6 +942,10 @@ impl SingleNode {
 				Err(SubmitError::MempoolFull)
 			}
 		}
+	}
+	/// CREDIT FUNDS (dev faucet only)
+	pub fn dev_faucet_credit(&mut self, addr: Address, amount: u128) {
+		self.accounts.dev_faucet_credit(addr, amount);
 	}
 
     // ────────────────────────────────────────────────────────────────────────
