@@ -1,32 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ADDR_FROM="0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-ADDR_TO="0xcafebabecafebabecafebabecafebabecafebabe"
-COUNT="${1:-1000}"
-
-METRICS="http://127.0.0.1:9898/metrics"
-NODE="http://127.0.0.1:8080"
-
-echo "[spam] using NODE=$NODE COUNT=$COUNT"
-
-# 1) Get starting nonce from /account
-ACC_JSON=$(curl -s "$NODE/account/${ADDR_FROM}")
-echo "[spam] account = $ACC_JSON"
-
-START_NONCE=$(echo "$ACC_JSON" | jq -r '.nonce')
-if [ -z "$START_NONCE" ] || [ "$START_NONCE" = "null" ]; then
-  START_NONCE=0
+if [ "$#" -ne 4 ]; then
+  echo "usage: $0 <count> <base_url> <from_addr> <to_addr>" >&2
+  exit 1
 fi
 
-echo "[spam] starting nonce = $START_NONCE"
+COUNT="$1"
+BASE_URL="$2"
+FROM="$3"
+TO="$4"
+
+echo "[spam] using BASE_URL=$BASE_URL COUNT=$COUNT FROM=$FROM TO=$TO"
+
+# fetch account for correct starting nonce
+ACC_JSON=$(curl -s "$BASE_URL/account/${FROM}")
+START_NONCE=$(echo "$ACC_JSON" | jq -r '.nonce')
+
+echo "[spam] starting from nonce=$START_NONCE"
 
 for i in $(seq 0 $((COUNT-1))); do
   NONCE=$((START_NONCE + i))
 
   BODY=$(jq -n \
-    --arg from "$ADDR_FROM" \
-    --arg to "$ADDR_TO" \
+    --arg from "$FROM" \
+    --arg to "$TO" \
     --arg amount "1" \
     --arg nonce "$NONCE" \
     --arg fee "0" \
@@ -44,10 +42,17 @@ for i in $(seq 0 $((COUNT-1))); do
       sig: $sig
     }')
 
-  curl -s -X POST "$NODE/tx" \
-    -H "Content-Type: application/json" \
-    -d "$BODY"  
+  # print first 3 responses for debugging
+  if [ "$i" -lt 3 ]; then
+    echo "[spam] sending tx i=$i nonce=$NONCE"
+    curl -s -w " [http_code=%{http_code}]\n" -X POST "$BASE_URL/tx" \
+      -H "Content-Type: application/json" \
+      -d "$BODY"
+  else
+    curl -s -o /dev/null -X POST "$BASE_URL/tx" \
+      -H "Content-Type: application/json" \
+      -d "$BODY"
+  fi
 done
 
-wait
 echo "[spam] submitted $COUNT tx"

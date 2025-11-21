@@ -86,7 +86,7 @@ pub static BLOCK_APPLIED_TOTAL: Lazy<IntCounter> =
 
 /// Total transactions included across all applied (or proposed) blocks.
 pub static TXS_INCLUDED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("txs_included_total", "Transactions included in blocks").unwrap()
+    register_int_counter!("eezo_txs_included_total", "Transactions included in blocks").unwrap()
 });
 
 /// Sum of fees collected across all blocks (atoms / smallest unit).
@@ -111,10 +111,20 @@ pub static BLOCK_BYTES_WASTED: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Current block transaction count (last assembled block).
+pub static BLOCK_TX_COUNT: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_block_tx_count",
+        "Number of transactions included in the last built block"
+    )
+    .unwrap()
+});
+
 /// Convenience: call when a block has been assembled/proposed (before apply).
 #[inline]
 pub fn observe_block_proposed(tx_count: u32, fee_total_atoms: u64) {
     BLOCK_PROPOSED_TOTAL.inc();
+    BLOCK_TX_COUNT.set(tx_count as i64);
     TXS_INCLUDED_TOTAL.inc_by(tx_count as u64);
     FEES_COLLECTED_TOTAL.inc_by(fee_total_atoms);
 }
@@ -545,4 +555,8 @@ pub fn register_t32_metrics() {
     let _ = &*EEZO_STATE_SYNC_PAGES_APPLIED_TOTAL;
     let _ = &*EEZO_CHECKPOINT_APPLY_SECONDS;
     let _ = &*EEZO_CHECKPOINTS_WRITTEN_TOTAL;
+    
+    // T51 metrics: tx inclusion and block tx count
+    let _ = &*TXS_INCLUDED_TOTAL;
+    let _ = &*BLOCK_TX_COUNT;
 }

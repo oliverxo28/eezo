@@ -160,24 +160,18 @@ impl CoreRunnerHandle {
                         };
                         
                         // --- T51.5a/T51.5c block batching + inclusion metrics ---
+                        // NOTE: eezo_txs_included_total and eezo_block_tx_count are updated
+                        // automatically by the ledger via observe_block_proposed() during block assembly.
+                        // We only need to update the node-specific fullness metrics here.
                         #[cfg(feature = "metrics")]
                         {
                             use crate::metrics::{
-                                EEZO_BLOCK_TX_COUNT,
                                 EEZO_BLOCK_FULL_TOTAL,
                                 EEZO_BLOCK_UNDERFILLED_TOTAL,
-                                txs_included_inc,
                             };
 
                             if let Some(ref blk) = blk_opt {
                                 let tx_count = blk.txs.len();
-                                EEZO_BLOCK_TX_COUNT.set(tx_count as i64);
-
-                                // T51.5c: bump global included-tx counter for this committed block.
-                                if tx_count > 0 {
-                                    log::debug!("metrics: incrementing txs_included_total by {} (height={})", tx_count, height);
-                                    txs_included_inc(tx_count as u64);
-                                }
 
                                 // Use pre-read block_max_tx for fullness stats.
                                 if tx_count == block_max_tx {
@@ -185,8 +179,6 @@ impl CoreRunnerHandle {
                                 } else if tx_count > 0 {
                                     EEZO_BLOCK_UNDERFILLED_TOTAL.inc();
                                 }
-                            } else {
-                                log::debug!("metrics: blk_opt is None at height={}, cannot update tx metrics", height);
                             }
                         }
                         // --- END METRICS ---
@@ -607,17 +599,16 @@ impl CoreRunnerHandle {
                         };
                         
                         // --- T51.5a block batching metrics (MOVED HERE) ---
+                        // NOTE: eezo_block_tx_count is updated by ledger via observe_block_proposed()
                         #[cfg(feature = "metrics")]
                         {
                             use crate::metrics::{
-                                EEZO_BLOCK_TX_COUNT,
                                 EEZO_BLOCK_FULL_TOTAL,
                                 EEZO_BLOCK_UNDERFILLED_TOTAL,
                             };
 
                             if let Some(ref blk) = blk_opt {
                                 let tx_count = blk.txs.len();
-                                EEZO_BLOCK_TX_COUNT.set(tx_count as i64);
 
                                 // Use pre-read block_max_tx
                                 if tx_count == block_max_tx {

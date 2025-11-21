@@ -3383,7 +3383,7 @@ async fn main() -> anyhow::Result<()> {
                     #[cfg(feature = "metrics")] 
 					{
                         TX_ACCEPTED_TOTAL.inc();
-						crate::metrics::txs_included_inc(1);
+						// NOTE: txs_included metric is updated by ledger via observe_block_proposed()
                     }
                     block_hashes.push(format!("0x{}", hex::encode(entry.hash)));
                 }

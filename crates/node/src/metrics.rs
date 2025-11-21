@@ -101,28 +101,19 @@ pub static STATE_SYNC_ANCHOR_UNSIGNED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 // --- Existing metrics ---
+#[cfg(feature = "metrics")]
 pub static EEZO_MEMPOOL_LEN: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!("eezo_mempool_len", "Current mempool length").unwrap()
 });
 
+#[cfg(feature = "metrics")]
 pub static EEZO_MEMPOOL_BYTES: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!("eezo_mempool_bytes_gauge", "Current bytes in mempool").unwrap()
 });
 
-// T51.4 – total transactions included in committed blocks (node view).
-// In single-node devnet we treat "accepted into a block" as "included".
-pub static EEZO_TXS_INCLUDED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "eezo_txs_included_total",
-        "Transactions included in committed blocks (node view)"
-    )
-    .expect("metric registered")
-});
-
-#[inline]
-pub fn txs_included_inc(n: u64) {
-    EEZO_TXS_INCLUDED_TOTAL.inc_by(n);
-}
+// NOTE: eezo_txs_included_total and eezo_block_tx_count metrics are defined
+// in the ledger crate (crates/ledger/src/metrics.rs) and automatically updated
+// via observe_block_proposed() when blocks are assembled.
 
 // T51.4.d – labeled transaction rejection metrics
 pub static EEZO_TX_REJECTED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -514,10 +505,13 @@ pub fn register_ledger_consensus_metrics() {
     let _ = &*eezo_ledger::metrics::CONSENSUS_COMMIT_HEIGHT;
 	// T32 metrics (ensure presence on /metrics even before first observation)
 	eezo_ledger::metrics::register_t32_metrics();
-	// T51 metrics: force initialization of tx inclusion and mempool metrics
-	let _ = &*EEZO_TXS_INCLUDED_TOTAL;
-	let _ = &*EEZO_MEMPOOL_LEN;
-	let _ = &*EEZO_MEMPOOL_BYTES;
+	// T51 metrics: force initialization of mempool metrics
+	// (tx inclusion metrics are in ledger and initialized via register_t32_metrics)
+	#[cfg(feature = "metrics")]
+	{
+		let _ = &*EEZO_MEMPOOL_LEN;
+		let _ = &*EEZO_MEMPOOL_BYTES;
+	}
 }
  // Eagerly register T33 Bridge metrics so they appear on /metrics immediately.
 #[cfg(feature = "metrics")]
@@ -902,14 +896,7 @@ pub fn suite_rotation_inc() {
 // T51.5a — TPS / block builder metrics
 // -----------------------------------------------------------------------------
 
-/// Gauge: number of transactions included in the most recently built block.
-pub static EEZO_BLOCK_TX_COUNT: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!(
-        "eezo_block_tx_count",
-        "Number of transactions included in the last built block"
-    )
-    .unwrap()
-});
+// NOTE: EEZO_BLOCK_TX_COUNT is defined in the ledger crate and updated automatically
 
 /// Counter: blocks that reached the configured EEZO_BLOCK_MAX_TX (i.e. fully packed).
 pub static EEZO_BLOCK_FULL_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
