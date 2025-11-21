@@ -18,6 +18,17 @@ use crate::SignedTx;
 #[cfg(all(feature = "pq44-runtime", not(feature = "skip-sig-verify"), not(feature = "testing")))]
 use crate::tx_sig::verify_signed_tx;
 
+// --- FIX START: Helper for Dev Mode ---
+fn dev_allow_unsigned_tx() -> bool {
+    match std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {
+        Ok(v) => {
+            let v = v.to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        }
+        Err(_) => false,
+    }
+}
+// --- FIX END ---
 
 /// Minimal transaction witness container.
 /// Flesh out later when we wire real tx verification.
@@ -208,9 +219,11 @@ pub fn apply_signed_tx(
     // 2) Signature verification (domain-binds to chain_id) — skip in tests/skip-sig-verify.
     #[cfg(all(feature = "pq44-runtime", not(feature = "skip-sig-verify"), not(feature = "testing")))]
     {
-        if !verify_signed_tx(chain_id, stx) {
+        // --- FIX START: Skip verification if env var is set ---
+        if !dev_allow_unsigned_tx() && !verify_signed_tx(chain_id, stx) {
             return Err(TxApplyError::BadSignature);
         }
+        // --- FIX END ---
     }
     // silence unused param in testing/skip builds
     #[cfg(any(feature = "skip-sig-verify", feature = "testing"))]
@@ -235,9 +248,11 @@ pub fn precheck_tx(accts: &Accounts, chain_id: [u8;20], stx: &SignedTx) -> Resul
     let sender = sender_from_pubkey_first20(stx).ok_or(PrecheckErr::InvalidSender)?;
     #[cfg(all(feature = "pq44-runtime", not(feature = "skip-sig-verify"), not(feature = "testing")))]
     {
-        if !verify_signed_tx(chain_id, stx) {
+        // --- FIX START: Skip verification if env var is set ---
+        if !dev_allow_unsigned_tx() && !verify_signed_tx(chain_id, stx) {
             return Err(PrecheckErr::BadSignature);
         }
+        // --- FIX END ---
     }
     #[cfg(any(feature = "skip-sig-verify", feature = "testing"))]
     let _ = chain_id;

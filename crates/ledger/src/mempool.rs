@@ -217,7 +217,6 @@ impl Mempool {
                 }
             }
             None => {
-                // This is the important line for your current issue.
                 log::warn!(
                     "ledger-mempool: dropping tx with invalid pubkey (len={})",
                     tx.pubkey.len()
@@ -370,8 +369,9 @@ pub fn admit_signed_tx(
         );
     }
 
-    // 3) derive sender from pubkey using BLAKE3
-    let sender = crate::tx_types::sender_from_pubkey(&tx.pubkey);
+    // 3) derive sender from pubkey (First 20 bytes logic)
+    // usage: must match tx.rs::apply_signed_tx logic
+    let sender = sender_from_pubkey_first20(tx).ok_or(RejectReason::InvalidSender)?;
 
     // 4) stateful checks (nonce, funds, etc.) ALWAYS enforced
     match validate_tx_stateful(accts, sender, &tx.core) {
@@ -380,7 +380,15 @@ pub fn admit_signed_tx(
             core: tx.core.clone(),
         }),
         Err(TxStateError::BadNonce { expected, got }) => {
-            Err(RejectReason::BadNonce { expected, got })
+            if got > expected {
+                // Allow future nonces (gaps) for burst submissions
+                Ok(AdmissionOk {
+                    sender,
+                    core: tx.core.clone(),
+                })
+            } else {
+                Err(RejectReason::BadNonce { expected, got })
+            }
         }
         Err(TxStateError::InsufficientFunds { have, need }) => {
             Err(RejectReason::InsufficientFunds { have, need })
