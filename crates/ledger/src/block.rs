@@ -11,6 +11,16 @@ use sha3::{Digest, Sha3_256};
 use crate::tx_sig::verify_signed_tx;
 use std::collections::HashMap;
 
+fn dev_allow_unsigned_tx() -> bool {
+    match std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {
+        Ok(v) => {
+            let v = v.to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(feature = "pq44-runtime")]
 type MaybeVerifyCache<'a> = Option<&'a crate::verify_cache::VerifyCache>;
 #[cfg(not(feature = "pq44-runtime"))]
@@ -372,6 +382,14 @@ pub fn assemble_block(
     // Using a fresh supply for the assembly dry-run is fine; header.fee_total is computed from txs.
     let mut shadow_supply = Supply::default();
 
+    // Cache dev mode check to avoid repeated environment variable lookups
+    #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
+    let dev_mode = dev_allow_unsigned_tx();
+    #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
+    if dev_mode {
+        log::info!("assemble_block: height={} dev-mode enabled, skipping signature verification for all transactions", height);
+    }
+
     // Greedily pick transactions from the canonical list that are valid and fit the budget.
     for (idx, tx) in ordered_candidates.into_iter().enumerate() {
         let size = tx_budget_bytes(&tx);
@@ -379,11 +397,13 @@ pub fn assemble_block(
             log::debug!("assemble_block: tx[{}] nonce={} rejected: exceeds byte budget", idx, tx.core.nonce);
             continue;
         }
-        // Re-check sig (skip in tests and when skip-sig-verify is on)
+        // Re-check sig (skip in tests, when skip-sig-verify is on, or in dev mode with EEZO_DEV_ALLOW_UNSIGNED_TX)
         #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
-        if !verify_signed_tx(chain_id, &tx) {
-            log::warn!("assemble_block: tx[{}] nonce={} rejected: invalid signature", idx, tx.core.nonce);
-            continue;
+        {
+            if !dev_mode && !verify_signed_tx(chain_id, &tx) {
+                log::warn!("assemble_block: tx[{}] nonce={} rejected: invalid signature", idx, tx.core.nonce);
+                continue;
+            }
         }
         if validate_tx_shape(&tx.core).is_err() {
             log::warn!("assemble_block: tx[{}] nonce={} rejected: invalid shape", idx, tx.core.nonce);
@@ -506,16 +526,26 @@ pub fn validate_block(
     let mut shadow_accounts = accounts.clone();
     let mut shadow_supply = supply.clone();
 
+    // Cache dev mode check to avoid repeated environment variable lookups
+    #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
+    let dev_mode = dev_allow_unsigned_tx();
+    #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
+    if dev_mode {
+        log::info!("validate_block: height={} dev-mode enabled, skipping signature verification for all transactions", blk.header.height);
+    }
+
     // Tx-by-tx checks (stateless + stateful dry-run)
     for (i, tx) in blk.txs.iter().enumerate() {
         if let Err(err) = validate_tx_shape(&tx.core) {
             return Err(BlockValidationError::Shape { idx: i, err });
         }
 
-        // Re-check sig (skip in tests and when skip-sig-verify is on)
+        // Re-check sig (skip in tests, when skip-sig-verify is on, or in dev mode with EEZO_DEV_ALLOW_UNSIGNED_TX)
         #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
-        if !verify_signed_tx(chain_id, tx) {
-            return Err(BlockValidationError::BadSignature { idx: i });
+        {
+            if !dev_mode && !verify_signed_tx(chain_id, tx) {
+                return Err(BlockValidationError::BadSignature { idx: i });
+            }
         }
 
         let sender =

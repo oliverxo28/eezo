@@ -514,6 +514,10 @@ pub fn register_ledger_consensus_metrics() {
     let _ = &*eezo_ledger::metrics::CONSENSUS_COMMIT_HEIGHT;
 	// T32 metrics (ensure presence on /metrics even before first observation)
 	eezo_ledger::metrics::register_t32_metrics();
+	// T51 metrics: force initialization of tx inclusion and mempool metrics
+	let _ = &*EEZO_TXS_INCLUDED_TOTAL;
+	let _ = &*EEZO_MEMPOOL_LEN;
+	let _ = &*EEZO_MEMPOOL_BYTES;
 }
  // Eagerly register T33 Bridge metrics so they appear on /metrics immediately.
 #[cfg(feature = "metrics")]

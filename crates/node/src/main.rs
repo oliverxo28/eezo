@@ -992,10 +992,18 @@ async fn post_tx(
             );
         };
 
-        // the closure returns (), so with_node::<_, ()>(...) is fine
+        // Submit transaction and update mempool metrics
         core_runner
             .with_node(|node| {
                 let _ = node.submit_signed_tx(stx);
+                
+                #[cfg(feature = "metrics")]
+                {
+                    let mempool_len = node.mempool.len();
+                    let mempool_bytes = node.mempool.bytes_used();
+                    crate::metrics::EEZO_MEMPOOL_LEN.set(mempool_len as i64);
+                    crate::metrics::EEZO_MEMPOOL_BYTES.set(mempool_bytes as i64);
+                }
             })
             .await;
 

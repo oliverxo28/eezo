@@ -359,6 +359,14 @@ impl Mempool {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    pub fn bytes_used(&self) -> usize {
+        self.per_sender
+            .values()
+            .flat_map(|q| q.pending.values())
+            .map(|entry| entry.size_bytes)
+            .sum()
+    }
 }
 
 /// Stateless → signature → sender → stateful checks.

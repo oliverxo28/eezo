@@ -175,6 +175,7 @@ impl CoreRunnerHandle {
 
                                 // T51.5c: bump global included-tx counter for this committed block.
                                 if tx_count > 0 {
+                                    log::debug!("metrics: incrementing txs_included_total by {} (height={})", tx_count, height);
                                     txs_included_inc(tx_count as u64);
                                 }
 
@@ -184,13 +185,24 @@ impl CoreRunnerHandle {
                                 } else if tx_count > 0 {
                                     EEZO_BLOCK_UNDERFILLED_TOTAL.inc();
                                 }
+                            } else {
+                                log::debug!("metrics: blk_opt is None at height={}, cannot update tx metrics", height);
                             }
                         }
                         // --- END METRICS ---
-                        // update committed height gauge
+                        // update committed height gauge and mempool metrics
                         #[cfg(feature = "metrics")]
                         {
                             crate::metrics::EEZO_BLOCK_HEIGHT.set(height as i64);
+                            
+                            // Update ledger mempool metrics after block commit
+                            let node_guard = node_c.lock().await;
+                            let mempool_len = node_guard.mempool.len();
+                            let mempool_bytes = node_guard.mempool.bytes_used();
+                            drop(node_guard);
+                            
+                            crate::metrics::EEZO_MEMPOOL_LEN.set(mempool_len as i64);
+                            crate::metrics::EEZO_MEMPOOL_BYTES.set(mempool_bytes as i64);
                         }
 
                         // capture the committed header hash once, reuse later for checkpoint
