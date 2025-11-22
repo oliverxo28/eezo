@@ -89,6 +89,16 @@ pub static TXS_INCLUDED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!("eezo_txs_included_total", "Transactions included in blocks").unwrap()
 });
 
+/// Transactions rejected during assembly/validation (ledger-side).
+/// Kept separate from node/executor metrics to avoid name collisions.
+pub static TXS_REJECTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_ledger_txs_rejected_total",
+        "Transactions rejected during ledger assembly/validation"
+    )
+    .unwrap()
+});
+
 /// Sum of fees collected across all blocks (atoms / smallest unit).
 pub static FEES_COLLECTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!("fees_collected_total", "Total fees collected (atoms)").unwrap()
@@ -127,6 +137,12 @@ pub fn observe_block_proposed(tx_count: u32, fee_total_atoms: u64) {
     BLOCK_TX_COUNT.set(tx_count as i64);
     TXS_INCLUDED_TOTAL.inc_by(tx_count as u64);
     FEES_COLLECTED_TOTAL.inc_by(fee_total_atoms);
+}
+
+/// Convenience: bump rejected txs (call from assembly/validation paths as needed).
+#[inline]
+pub fn inc_txs_rejected(count: u64) {
+    TXS_REJECTED_TOTAL.inc_by(count);
 }
 
 /// Convenience: call after a block has been successfully applied to state.
@@ -558,5 +574,6 @@ pub fn register_t32_metrics() {
     
     // T51 metrics: tx inclusion and block tx count
     let _ = &*TXS_INCLUDED_TOTAL;
+	let _ = &*TXS_REJECTED_TOTAL;
     let _ = &*BLOCK_TX_COUNT;
 }

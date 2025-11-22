@@ -368,7 +368,13 @@ pub fn assemble_block(
     }
 
     // reject oversized transactions (basic DoS guard)
+    let before = candidates.len();
     candidates.retain(|tx| bincode::serialized_size(tx).unwrap_or(u64::MAX) <= 1_000_000);
+    let dropped = before - candidates.len();
+    if dropped > 0 {
+        #[cfg(feature = "metrics")]
+        crate::metrics::TXS_REJECTED_TOTAL.inc_by(dropped as u64);
+    }
 
     // Establish the single, canonical transaction order.
     let ordered_candidates = canonical_tx_order(candidates);
@@ -394,6 +400,8 @@ pub fn assemble_block(
     for (idx, tx) in ordered_candidates.into_iter().enumerate() {
         let size = tx_budget_bytes(&tx);
         if used + size > max_u64 {
+            #[cfg(feature = "metrics")]
+            crate::metrics::TXS_REJECTED_TOTAL.inc_by(1);
             log::debug!("assemble_block: tx[{}] nonce={} rejected: exceeds byte budget", idx, tx.core.nonce);
             continue;
         }
@@ -401,16 +409,22 @@ pub fn assemble_block(
         #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
         {
             if !dev_mode && !verify_signed_tx(chain_id, &tx) {
+                #[cfg(feature = "metrics")]
+                crate::metrics::TXS_REJECTED_TOTAL.inc_by(1);
                 log::warn!("assemble_block: tx[{}] nonce={} rejected: invalid signature", idx, tx.core.nonce);
                 continue;
             }
         }
         if validate_tx_shape(&tx.core).is_err() {
+            #[cfg(feature = "metrics")]
+            crate::metrics::TXS_REJECTED_TOTAL.inc_by(1);
             log::warn!("assemble_block: tx[{}] nonce={} rejected: invalid shape", idx, tx.core.nonce);
             continue;
         }
         // --- Stateful validation (on shadow) to filter gap/replay/insufficient funds
         let Some(sender) = sender_from_pubkey_first20(&tx) else {
+            #[cfg(feature = "metrics")]
+            crate::metrics::TXS_REJECTED_TOTAL.inc_by(1);
             log::warn!("assemble_block: tx[{}] nonce={} rejected: cannot resolve sender", idx, tx.core.nonce);
             continue; // cannot resolve sender -> skip
         };
@@ -418,6 +432,8 @@ pub fn assemble_block(
         // Log the validation attempt
         let shadow_acct = shadow_accounts.get(&sender);
         if let Err(e) = validate_tx_stateful(&shadow_accounts, sender, &tx.core) {
+            #[cfg(feature = "metrics")]
+            crate::metrics::TXS_REJECTED_TOTAL.inc_by(1);
             log::info!(
                 "assemble_block: tx[{}] sender={:?} nonce={} rejected: stateful validation failed: {:?} (shadow nonce={}, balance={})",
                 idx, sender, tx.core.nonce, e, shadow_acct.nonce, shadow_acct.balance
@@ -426,6 +442,8 @@ pub fn assemble_block(
         }
         // Advance shadow state so the next tx sees updated nonce/balance
         if let Err(e) = apply_tx(&mut shadow_accounts, &mut shadow_supply, sender, &tx.core) {
+            #[cfg(feature = "metrics")]
+            crate::metrics::TXS_REJECTED_TOTAL.inc_by(1);
             log::warn!("assemble_block: tx[{}] nonce={} rejected: shadow apply failed: {:?}", idx, tx.core.nonce, e);
             continue;
         }
@@ -697,4 +715,117 @@ pub fn validate_header(
 
     // Non-PQ builds: hash/replay still enforced; signature skipped.
     Ok(h)
+}
+
+// =======================================================================
+// T54 — BlockBuildContext (Parallel Executor support)
+// =======================================================================
+
+/// A temporary per-block state context used by the parallel executor.
+/// All state mutation happens under a single Mutex (called from parallel.rs).
+pub struct BlockBuildContext {
+    accounts: Accounts,
+    supply: Supply,
+    prev_hash: [u8; 32],
+    height: u64,
+    timestamp_ms: u64,
+    collected: Vec<SignedTx>,
+    fee_total: u128,
+    error_flag: Option<TxStateError>,
+}
+
+impl BlockBuildContext {
+    /// Create a new block-building context using explicit inputs.
+    /// (Decoupled from SingleNode to keep `ledger` independent of node APIs.)
+    pub fn start(
+        prev_hash: [u8; 32],
+        height: u64,
+        timestamp_ms: u64,
+        accounts: Accounts,
+        supply: Supply,
+    ) -> Self {
+        Self {
+            accounts,
+            supply,
+            prev_hash,
+            height,
+            timestamp_ms,
+            collected: Vec::new(),
+            fee_total: 0,
+            error_flag: None,
+        }
+    }
+    /// Core mutation entrypoint used by the parallel executor.
+    /// MUST be called inside a Mutex guard.
+    pub fn apply_tx_parallel_safe(
+        &mut self,
+        stx: &SignedTx,
+    ) -> Result<(), TxStateError> {
+        if let Some(err) = &self.error_flag {
+            return Err(err.clone());
+        }
+
+        let sender = match crate::sender_from_pubkey_first20(stx) {
+            Some(a) => a,
+            None => {
+                let err = TxStateError::InvalidSender;
+                self.error_flag = Some(err.clone());
+                return Err(err);
+            }
+        };
+
+        crate::tx::validate_tx_stateful(&self.accounts, sender, &stx.core)
+            .map_err(|e| {
+                self.error_flag = Some(e.clone());
+                e
+            })?;
+
+        crate::tx::apply_tx(
+            &mut self.accounts,
+            &mut self.supply,
+            sender,
+            &stx.core,
+        )
+        .map_err(|e| {
+            self.error_flag = Some(e.clone());
+            e
+        })?;
+
+        self.fee_total += stx.core.fee;
+        self.collected.push(stx.clone());
+        Ok(())
+    }
+
+    pub fn flag_error(&mut self, err: TxStateError) {
+        if self.error_flag.is_none() {
+            self.error_flag = Some(err);
+        }
+    }
+
+    pub fn has_error(&self) -> bool {
+        self.error_flag.is_some()
+    }
+
+    /// Build the final Block from the accumulated state and transactions.
+    pub fn finish(&self) -> Block {
+        let tx_root = txs_root(&self.collected);
+
+        #[cfg(feature = "eth-ssz")]
+        let tx_root_v2 = crate::eth_ssz::txs_root_v2(&self.collected);
+
+        let header = BlockHeader {
+            height: self.height,
+            prev_hash: self.prev_hash,
+            tx_root,
+            #[cfg(feature = "eth-ssz")]
+            tx_root_v2,
+            fee_total: self.fee_total,
+            tx_count: self.collected.len() as u32,
+            timestamp_ms: self.timestamp_ms,
+            #[cfg(feature = "checkpoints")]
+            qc_hash: [0u8; 32],
+        };
+
+        Block { header, txs: self.collected.clone() }
+    }
 }

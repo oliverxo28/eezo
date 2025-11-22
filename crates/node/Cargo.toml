@@ -43,6 +43,11 @@ anyhow = "1.0"
 chrono = "0.4"
 url = "2.5"
 
+# T54 FIX: Add Rayon and num_cpus for parallel executor
+rayon = "1.10"
+num_cpus = "1.16"
+
+
 # Metrics / logging
 prometheus = "0.13"
 lazy_static = "1.5"
@@ -115,4 +120,3 @@ tempfile = "3.10"
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
 pqcrypto-traits = { version = "0.3.5", package = "pqcrypto-traits" }
 hyper = "0.14"
-

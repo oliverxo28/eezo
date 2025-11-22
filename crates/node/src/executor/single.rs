@@ -1,14 +1,9 @@
 //! executor/single.rs
 //!
-//! Single-threaded executor implementation for T52.1.
-//!
-//! This is a thin wrapper around `eezo_ledger::consensus_api::run_one_slot` that:
-//!   - measures how long the slot took
-//!   - reconstructs the committed `Block` (header + txs) when applicable
-//!   - reports tx_count for metrics
-//!
-//! Later (T52.2+) we can introduce parallel or pipelined executors that
-//! implement the same `BlockExecutor` trait.
+//! Single-threaded executor (serial fallback for T54).
+//! Still delegates to `eezo_ledger::consensus_api::run_one_slot` and maps the
+//! result into the new T54 `ExecOutcome` shape. This keeps the code buildable
+//! before we introduce `parallel.rs` (step 4).
 
 use std::time::Instant;
 
@@ -23,38 +18,40 @@ use crate::metrics::{
     EEZO_EXECUTOR_TPS_INFERRED,
 };
 
-use super::{BlockExecutor, ExecutorOutcome, ExecutorRequest};
+use super::{Executor, ExecInput, ExecOutcome};
 
 /// Simple single-threaded executor that directly calls into the ledger.
-pub struct SingleThreadExecutor;
+pub struct SingleExecutor;
 
-impl SingleThreadExecutor {
+impl SingleExecutor {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Default for SingleThreadExecutor {
+impl Default for SingleExecutor {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl BlockExecutor for SingleThreadExecutor {
-    fn execute_slot(
+impl Executor for SingleExecutor {
+    fn execute_block(
         &self,
         node: &mut SingleNode,
-        req: ExecutorRequest,
-    ) -> ExecutorOutcome {
+        input: ExecInput,
+    ) -> ExecOutcome {
         let start = Instant::now();
 
         // Delegate to the existing consensus+execution function.
-        let outcome: Result<SlotOutcome, ConsensusError> =
-            run_one_slot(node, req.rollback_on_error);
+        // (T54 note) For the serial fallback we still rely on the ledger's slot runner.
+        // The provided `input.txs` batch is not used here; in `parallel.rs` we'll
+        // execute that batch directly via the block context wrapper (step 5).
+        let outcome: Result<SlotOutcome, ConsensusError> = run_one_slot(node, /*rollback_on_error=*/ true);
 
         let elapsed = start.elapsed();
-        let mut block_opt = None;
-        let mut tx_count = 0usize;
+        let mut block_opt: Option<Block> = None;
+        let mut tx_count: usize = 0;
 
         // If a block was committed, reconstruct it from the node’s view.
         if let Ok(SlotOutcome::Committed { .. }) = &outcome {
@@ -74,7 +71,7 @@ impl BlockExecutor for SingleThreadExecutor {
             }
         }
 
-        // Record executor timing metrics (T52.1).
+        // Record executor timing metrics.
         #[cfg(feature = "metrics")]
         {
             let sec = elapsed.as_secs_f64().max(0.0);
@@ -95,11 +92,21 @@ impl BlockExecutor for SingleThreadExecutor {
             }
         }
 
-        ExecutorOutcome {
-            outcome,
-            block: block_opt,
-            elapsed,
-            tx_count,
-        }
+        // Map legacy slot outcome → T54 ExecOutcome shape.
+        let result: Result<Block, String> = match outcome {
+            Ok(SlotOutcome::Committed { .. }) => {
+                match block_opt {
+                    Some(b) => Ok(b),
+                    // Return Err(String)
+                    None => Err("executor: committed slot but block missing".into()),
+                }
+            }
+            // Return Err(String)
+            Ok(SlotOutcome::Skipped { .. }) => Err("executor: slot skipped".into()),
+            // Convert ConsensusError to String
+            Err(e) => Err(format!("{}", e)),
+        };
+
+        ExecOutcome { result, elapsed, tx_count }
     }
 }

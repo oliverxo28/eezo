@@ -18,6 +18,30 @@ use crate::SignedTx;
 #[cfg(all(feature = "pq44-runtime", not(feature = "skip-sig-verify"), not(feature = "testing")))]
 use crate::tx_sig::verify_signed_tx;
 
+// ====== PARALLEL EXECUTOR: ACCESS LIST TYPES ======
+/// What piece of state a tx touches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AccessTarget {
+    /// An account (sender/receiver), keyed by address.
+    Account(Address),
+    /// Global supply bucket (fee burn currently writes here).
+    Supply,
+}
+
+/// Whether a target is read or written. We conservatively mark writes for safety.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AccessKind {
+    Read,
+    Write,
+}
+
+/// One access entry used by the executor for conflict detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Access {
+    pub target: AccessTarget,
+    pub kind: AccessKind,
+}
+
 // --- FIX START: Helper for Dev Mode ---
 fn dev_allow_unsigned_tx() -> bool {
     match std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {
@@ -264,6 +288,36 @@ pub enum PrecheckErr {
     InsufficientFunds { have: u128, need: u128 },
 }
 
+// ====== PARALLEL EXECUTOR: SIGNED TX ACCESS LIST ======
+impl SignedTx {
+    /// Returns a conservative access list used by the parallel executor.
+    ///
+    /// Current model (safe over-approximation for conflict detection):
+    /// - **Writes** sender account (nonce+balance)
+    /// - **Writes** receiver account (balance)
+    /// - **Writes** global supply (fee burn)
+    ///
+    /// If the sender address cannot be derived (invalid pubkey), we omit it here;
+    /// such txs should be rejected during precheck before scheduling.
+    pub fn access_list(&self) -> Vec<Access> {
+        let mut v = Vec::with_capacity(3);
+        if let Some(sender) = sender_from_pubkey_first20(self) {
+            v.push(Access {
+                target: AccessTarget::Account(sender),
+                kind: AccessKind::Write,
+            });
+        }
+        v.push(Access {
+            target: AccessTarget::Account(self.core.to),
+            kind: AccessKind::Write,
+        });
+        v.push(Access {
+            target: AccessTarget::Supply,
+            kind: AccessKind::Write,
+        });
+        v
+    }
+}
 
 pub fn precheck_tx(accts: &Accounts, chain_id: [u8;20], stx: &SignedTx) -> Result<(), PrecheckErr> {
     let sender = sender_from_pubkey_first20(stx).ok_or(PrecheckErr::InvalidSender)?;

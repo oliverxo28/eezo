@@ -1,13 +1,15 @@
 //! executor/mod.rs
 //!
-//! Entry point for the node-side block execution layer (T52.1).
+//! Entry point for the node-side block execution layer (T54).
 //! This module provides:
-//!   - BlockExecutor trait
-//!   - ExecutorRequest / ExecutorOutcome types
-//!   - SingleThreadExecutor implementation
+//!   - `Executor` trait
+//!   - `ExecInput` / `ExecOutcome` types
+//!   - `SingleExecutor` implementation (serial fallback)
 
 mod types;
 mod single;
+pub mod parallel;
 
-pub use types::{ExecutorRequest, ExecutorOutcome, BlockExecutor};
-pub use single::SingleThreadExecutor;
+pub use types::{Executor, ExecInput, ExecOutcome};
+pub use single::SingleExecutor;
+pub use parallel::ParallelExecutor;

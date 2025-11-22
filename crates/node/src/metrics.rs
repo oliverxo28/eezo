@@ -7,6 +7,12 @@ use prometheus::{
 // only needed when `state-sync` metrics are compiled
 #[cfg(feature = "state-sync")]
 use prometheus::register_histogram;
+
+// T54: Import Histogram for parallel metrics
+#[cfg(feature = "metrics")]
+use prometheus::{register_histogram, Histogram};
+
+
 // --- Remove AtomicU64 imports if they are now unused ---
 // use std::sync::atomic::{AtomicU64, Ordering};
 // T37.1 — bring in KEMTLS resumption metrics from eezo-net
@@ -978,6 +984,35 @@ pub static EEZO_EXECUTOR_TPS_INFERRED: Lazy<IntGauge> = Lazy::new(|| {
     })
 });
 
+// -----------------------------------------------------------------------------
+// T54 — Parallel executor metrics (non-colliding names) <-- START PATCH A
+// -----------------------------------------------------------------------------
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_PARALLEL_WAVES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_exec_parallel_waves_total",
+        "Total number of parallel executor waves per block"
+    )
+    .unwrap()
+});
+
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_PARALLEL_WAVE_LEN: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_parallel_wave_len",
+        "Histogram of wave sizes (txs executed in each parallel wave)"
+    )
+    .unwrap()
+});
+
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_PARALLEL_APPLY_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_parallel_apply_seconds",
+        "Time spent executing a single wave in parallel executor (seconds)"
+    )
+    .unwrap()
+});
 // -----------------------------------------------------------------------------
 // T51.5a — sigpool metrics
 // -----------------------------------------------------------------------------

@@ -21,6 +21,10 @@ use eezo_ledger::consensus_api::{run_one_slot, SlotOutcome};
 
 // --- FIX: Import Block ---
 use eezo_ledger::Block; // Keep this import, as we'll need it to reconstruct the Block
+// --- T54 executor wiring ---
+use crate::executor::{Executor, ExecInput, ExecOutcome};
+use crate::executor::{SingleExecutor};
+use crate::executor::ParallelExecutor;
 
 // T36.6 metrics hooks
 #[cfg(feature = "metrics")]
@@ -96,6 +100,21 @@ impl CoreRunnerHandle {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(usize::MAX);
             
+        // T54: choose executor mode/threads from env (parallel vs single)
+        let exec_threads = std::env::var("EEZO_EXECUTOR_THREADS")
+            .ok().and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(num_cpus::get);
+        let exec_mode_parallel = std::env::var("EEZO_EXECUTOR_MODE")
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "parallel" | "p"))
+            .unwrap_or(true);
+        let exec: Box<dyn Executor> = if exec_mode_parallel {
+            log::info!("executor: mode=parallel threads={}", exec_threads);
+            Box::new(ParallelExecutor::new(exec_threads))
+        } else {
+            log::info!("executor: mode=single");
+            Box::new(SingleExecutor::new())
+        };
+
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
 			// expose T36.6 bridge metrics on /metrics immediately
@@ -131,7 +150,10 @@ impl CoreRunnerHandle {
                 ticker.tick().await;
                 #[cfg(feature = "metrics")]
                 let slot_start = std::time::Instant::now();
-                // run exactly one slot - assuming run_one_slot is sync based on teacher feedback
+                // T54 NOTE:
+                // We still drive consensus via run_one_slot (commit path unchanged).
+                // Executor is fully wired and selectable; parallel execution is used by
+                // block assembly in upcoming steps without changing this loop shape.
                 let outcome = {
                     let mut guard = node_c.lock().await;
                     // FIX: Removed extraneous closing parenthesis ')' here.
@@ -548,6 +570,21 @@ impl CoreRunnerHandle {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(usize::MAX);
+
+        // T54: choose executor mode/threads from env (parallel vs single)
+        let exec_threads = std::env::var("EEZO_EXECUTOR_THREADS")
+            .ok().and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(num_cpus::get);
+        let exec_mode_parallel = std::env::var("EEZO_EXECUTOR_MODE")
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "parallel" | "p"))
+            .unwrap_or(true);
+        let exec: Box<dyn Executor> = if exec_mode_parallel {
+            log::info!("executor: mode=parallel threads={}", exec_threads);
+            Box::new(ParallelExecutor::new(exec_threads))
+        } else {
+            log::info!("executor: mode=single");
+            Box::new(SingleExecutor::new())
+        };
 
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
