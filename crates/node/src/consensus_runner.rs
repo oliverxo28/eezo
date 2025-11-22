@@ -13,13 +13,13 @@ use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 use std::env;
 use std::io::ErrorKind; // <--- ADDED IMPORT
+use std::mem; // <--- ADDED IMPORT for mem::take
 
 use eezo_ledger::consensus::SingleNode;
 // --- UPDATED: Make sure consensus_api imports are correct ---
-use eezo_ledger::consensus_api::{run_one_slot, SlotOutcome};
-// --- END UPDATE ---
-
-// --- FIX: Import Block ---
+use eezo_ledger::consensus_api::{run_one_slot, SlotOutcome, NoOpReason};
+// --- END UPDATE ---\
+// --- FIX: Import Block ---\
 use eezo_ledger::Block; // Keep this import, as we'll need it to reconstruct the Block
 // --- T54 executor wiring ---
 use crate::executor::{Executor, ExecInput, ExecOutcome};
@@ -30,6 +30,12 @@ use crate::executor::ParallelExecutor;
 #[cfg(feature = "metrics")]
 use crate::metrics::{bridge_emitted_inc, bridge_latest_set, register_t36_bridge_metrics};
 
+// 1) Add the imports (top of file, with other use lines) - PATCH A
+#[cfg(feature = "metrics")]
+use eezo_ledger::metrics::{
+    observe_block_applied as ledger_observe_block_applied,
+    observe_supply as ledger_observe_supply,
+};
 
 // checkpoints light helpers (exist behind `checkpoints`)
 #[cfg(feature = "checkpoints")]
@@ -150,15 +156,113 @@ impl CoreRunnerHandle {
                 ticker.tick().await;
                 #[cfg(feature = "metrics")]
                 let slot_start = std::time::Instant::now();
-                // T54 NOTE:
-                // We still drive consensus via run_one_slot (commit path unchanged).
-                // Executor is fully wired and selectable; parallel execution is used by
-                // block assembly in upcoming steps without changing this loop shape.
-                let outcome = {
+                
+                // T54 Step 9: Use the executor instead of run_one_slot
+                let outcome: Result<SlotOutcome, eezo_ledger::ConsensusError> = {
                     let mut guard = node_c.lock().await;
-                    // FIX: Removed extraneous closing parenthesis ')' here.
-                    run_one_slot(&mut guard, rollback_on_error)
+                    
+                    // Save snapshot for potential rollback
+                    let snapshot = if rollback_on_error {
+                        Some((
+                            guard.accounts.clone(),
+                            guard.supply.clone(),
+                            guard.height,
+                            guard.prev_hash,
+                        ))
+                    } else {
+                        None
+                    };
+                    
+                    // 1. Drain transactions from mempool
+                    let block_byte_budget = guard.cfg.block_byte_budget;
+                    let candidates = guard.mempool.drain_for_block(block_byte_budget);
+                    
+                    // 2. Apply max_tx cap if configured
+                    let mut txs = candidates;
+                    if block_max_tx < usize::MAX && txs.len() > block_max_tx {
+                        let dropped = txs.split_off(block_max_tx);
+                        for tx in dropped {
+                            guard.mempool.enqueue_tx(tx);
+                        }
+                    }
+                    
+                    let next_height = guard.height + 1;
+                    
+                    // 3. Create executor input
+                    let exec_input = ExecInput::new(txs, next_height);
+                    
+                    // 4. Execute block using the executor
+                    let exec_outcome = exec.execute_block(&mut guard, exec_input);
+                    
+                    // 5. Process outcome
+                    match exec_outcome.result {
+                        Ok(blk) => {
+                            // Apply the block to update node state
+                            use eezo_ledger::block::apply_block;
+                            let chain_id = guard.cfg.chain_id;
+
+                            // take ownership of the state fields (avoid double &mut borrows through the guard)
+                            let mut accounts = mem::take(&mut guard.accounts);
+                            let mut supply   = mem::take(&mut guard.supply);
+
+                            // apply to the owned values
+                            let res = apply_block(chain_id, &mut accounts, &mut supply, &blk);
+
+                            match res {
+                                Ok(()) => {
+                                    // put the fields back on success
+                                    guard.accounts = accounts;
+                                    guard.supply   = supply;
+
+                                    // 2) After successful apply — bump ledger metrics - PATCH B
+                                    #[cfg(feature = "metrics")]
+                                    {
+                                        // Make legacy ledger metrics move (eezo_txs_included_total, etc.)
+                                        ledger_observe_block_applied();
+                                        ledger_observe_supply(&guard.supply);
+                                    }
+
+                                    // Update node pointers
+                                    let curr_hash = blk.header.hash();
+                                    guard.height = blk.header.height;
+                                    guard.prev_hash = curr_hash;
+                                    guard.last_header = Some(blk.header.clone());
+                                    guard.last_txs = Some(blk.txs.clone());
+
+                                    Ok(SlotOutcome::Committed { height: blk.header.height })
+                                }
+                                Err(e) => {
+                                    // rollback if needed
+                                    if let Some((acc, sup, h, ph)) = snapshot {
+                                        guard.accounts = acc;
+                                        guard.supply = sup;
+                                        guard.height = h;
+                                        guard.prev_hash = ph;
+                                    } else {
+                                        // even without snapshot, restore moved-out fields (no state change applied)
+                                        guard.accounts = accounts;
+                                        guard.supply   = supply;
+                                    }
+                                    log::warn!("executor: block apply failed: {:?}", e);
+                                    Ok(SlotOutcome::Skipped(NoOpReason::Unknown))
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Rollback if needed
+                            if let Some((acc, sup, h, ph)) = snapshot {
+                                guard.accounts = acc;
+                                guard.supply = sup;
+                                guard.height = h;
+                                guard.prev_hash = ph;
+                            }
+                            // Convert the executor's internal String error to a ConsensusError
+                            log::warn!("executor: block execution failed: {}", e);
+                            Ok(SlotOutcome::Skipped(NoOpReason::Unknown))
+                        }
+                    }
                 };
+                
                 #[cfg(feature = "metrics")]
                 // FIX: Revert pattern match for time metric to match only height or ignore all fields
                 if let Ok(SlotOutcome::Committed { height: _ }) = outcome {
@@ -250,7 +354,7 @@ impl CoreRunnerHandle {
                                     // 1. Construct the full block
                                     let block = Block { header: hdr.clone(), txs };
 
-                                    last_commit_hash_opt = Some(block.header.hash());
+                                    _last_commit_hash_opt = Some(block.header.hash());
 
                                     // 2. Save the full block AND header
                                     if let Err(e) = db_handle.put_header_and_block(height, &block.header, &block) {
@@ -606,12 +710,109 @@ impl CoreRunnerHandle {
                 #[cfg(feature = "metrics")]
                 let slot_start = std::time::Instant::now();				
 
-
-                // Assuming run_one_slot is sync
-                let outcome = {
+                // T54 Step 9: Use the executor instead of run_one_slot
+                let outcome: Result<SlotOutcome, eezo_ledger::ConsensusError> = {
                     let mut guard = node_c.lock().await;
-                    // FIX: Removed extraneous closing parenthesis ')' here.
-                    run_one_slot(&mut guard, rollback_on_error)
+                    
+                    // Save snapshot for potential rollback
+                    let snapshot = if rollback_on_error {
+                        Some((
+                            guard.accounts.clone(),
+                            guard.supply.clone(),
+                            guard.height,
+                            guard.prev_hash,
+                        ))
+                    } else {
+                        None
+                    };
+                    
+                    // 1. Drain transactions from mempool
+                    let block_byte_budget = guard.cfg.block_byte_budget;
+                    let candidates = guard.mempool.drain_for_block(block_byte_budget);
+                    
+                    // 2. Apply max_tx cap if configured
+                    let mut txs = candidates;
+                    if block_max_tx < usize::MAX && txs.len() > block_max_tx {
+                        let dropped = txs.split_off(block_max_tx);
+                        for tx in dropped {
+                            guard.mempool.enqueue_tx(tx);
+                        }
+                    }
+                    
+                    let next_height = guard.height + 1;
+                    
+                    // 3. Create executor input
+                    let exec_input = ExecInput::new(txs, next_height);
+                    
+                    // 4. Execute block using the executor
+                    let exec_outcome = exec.execute_block(&mut guard, exec_input);
+                    
+                    // 5. Process outcome
+                    match exec_outcome.result {
+                        Ok(blk) => {
+                            // Apply the block to update node state
+                            use eezo_ledger::block::apply_block;
+                            let chain_id = guard.cfg.chain_id;
+
+                            // take ownership first (prevents double &mut borrows through guard)
+                            let mut accounts = mem::take(&mut guard.accounts);
+                            let mut supply   = mem::take(&mut guard.supply);
+
+                            let apply_result = apply_block(chain_id, &mut accounts, &mut supply, &blk);
+
+                            match apply_result {
+                                Ok(()) => {
+                                    // put the fields back on success
+                                    guard.accounts = accounts;
+                                    guard.supply   = supply;
+                                    
+                                    // 2) After successful apply — bump ledger metrics - PATCH C
+                                    #[cfg(feature = "metrics")]
+                                    {
+                                        // Make legacy ledger metrics move (eezo_txs_included_total, etc.)
+                                        ledger_observe_block_applied();
+                                        ledger_observe_supply(&guard.supply);
+                                    }
+
+                                    // Update node pointers
+                                    let curr_hash = blk.header.hash();
+                                    guard.height = blk.header.height;
+                                    guard.prev_hash = curr_hash;
+                                    guard.last_header = Some(blk.header.clone());
+                                    guard.last_txs = Some(blk.txs.clone());
+
+                                    Ok(SlotOutcome::Committed { height: blk.header.height })
+                                }
+                                Err(e) => {
+                                    // rollback if needed
+                                    if let Some((acc, sup, h, ph)) = snapshot {
+                                        guard.accounts = acc;
+                                        guard.supply = sup;
+                                        guard.height = h;
+                                        guard.prev_hash = ph;
+                                    } else {
+                                        // restore moved-out fields even if no snapshot (no state change applied)
+                                        guard.accounts = accounts;
+                                        guard.supply   = supply;
+                                    }
+                                    log::warn!("executor: block apply failed: {:?}", e);
+                                    Ok(SlotOutcome::Skipped(NoOpReason::Unknown))
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Rollback if needed
+                            if let Some((acc, sup, h, ph)) = snapshot {
+                                guard.accounts = acc;
+                                guard.supply = sup;
+                                guard.height = h;
+                                guard.prev_hash = ph;
+                            }
+                            // Convert the executor's internal String error to a ConsensusError
+                            log::warn!("executor: block execution failed: {}", e);
+                            Ok(SlotOutcome::Skipped(NoOpReason::Unknown))
+                        }
+                    }
                 };
 
                 #[cfg(feature = "metrics")]
@@ -953,5 +1154,3 @@ impl CoreRunnerHandle {
         f(&mut g)
     }
 }
-
-// (T36.5 removed local stub emitter; runner emits directly.)

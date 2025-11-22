@@ -559,9 +559,9 @@ pub struct SingleNode {
     #[cfg(feature = "checkpoints")]
     checkpoint_interval: u64,
 	/// Header of the most recently applied block (cached for runner persistence)
-	last_header: Option<BlockHeader>,
+	pub last_header: Option<BlockHeader>,
 	/// Transactions of the most recently applied block (for persistence of full blocks)
-	last_txs: Option<Vec<SignedTx>>,	
+	pub last_txs: Option<Vec<SignedTx>>,	
 }
 
 impl SingleNode {
