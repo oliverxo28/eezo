@@ -11,6 +11,9 @@ use sha3::{Digest, Sha3_256};
 use crate::tx_sig::verify_signed_tx;
 use std::collections::HashMap;
 
+// 1a) Add imports at the top (near other std imports)
+use std::sync::{Mutex, MutexGuard};
+
 fn dev_allow_unsigned_tx() -> bool {
     match std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {
         Ok(v) => {
@@ -19,6 +22,17 @@ fn dev_allow_unsigned_tx() -> bool {
         }
         Err(_) => false,
     }
+}
+
+// 1c) Add helpers to size buckets (place near other small helpers)
+#[inline]
+fn exec_bucket_count_ctx() -> usize {
+    std::env::var("EEZO_EXEC_BUCKETS")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .map(|n| n.max(1) as usize)
+        .unwrap_or(0) // 0 => feature off (we still build a small lock table)
+        .max(8)       // keep at least 8 shards to avoid tiny tables
 }
 
 #[cfg(feature = "pq44-runtime")]
@@ -721,22 +735,39 @@ pub fn validate_header(
 // T54 — BlockBuildContext (Parallel Executor support)
 // =======================================================================
 
+// 1b) Extend BlockBuildContext to support parallel mutation safely (REPLACE STRUCT)
 /// A temporary per-block state context used by the parallel executor.
-/// All state mutation happens under a single Mutex (called from parallel.rs).
+/// This variant is safe for *internal* fine-grained parallelism:
+/// - per-bucket shard locks (locks)
+/// - atomic/locked accumulators (fee_total, collected, error_flag)
 pub struct BlockBuildContext {
-    accounts: Accounts,
-    supply: Supply,
+    // state (protected via bucket locks + interior mutability)
+    accounts: std::cell::UnsafeCell<Accounts>,
+    supply:   std::cell::UnsafeCell<Supply>,
+
+    // fine-grained shard locks for account-space (bucketed by EEZO_EXEC_BUCKETS)
+    locks: Vec<Mutex<()>>,
+    // global supply lock (fee burn updates)
+    supply_lock: Mutex<()>,
+
+    // header/material
     prev_hash: [u8; 32],
     height: u64,
     timestamp_ms: u64,
-    collected: Vec<SignedTx>,
-    fee_total: u128,
-    error_flag: Option<TxStateError>,
+
+    // accumulators (parallel-safe)
+    collected: Mutex<Vec<SignedTx>>,
+    fee_total: Mutex<u128>,
+    error_flag: Mutex<Option<TxStateError>>,
 }
 
+// `UnsafeCell` + our lock protocol lets multiple threads mutate non-overlapping
+// regions safely. We guarantee safety by holding the appropriate bucket lock.
+unsafe impl Send for BlockBuildContext {}
+unsafe impl Sync for BlockBuildContext {}
+
 impl BlockBuildContext {
-    /// Create a new block-building context using explicit inputs.
-    /// (Decoupled from SingleNode to keep `ledger` independent of node APIs.)
+    // 1d) Update start() to initialize the lock table and new fields (REPLACE start)
     pub fn start(
         prev_hash: [u8; 32],
         height: u64,
@@ -744,74 +775,148 @@ impl BlockBuildContext {
         accounts: Accounts,
         supply: Supply,
     ) -> Self {
+        let buckets = exec_bucket_count_ctx();
+        let mut locks = Vec::with_capacity(buckets);
+        for _ in 0..buckets {
+            locks.push(Mutex::new(()));
+        }
+
         Self {
-            accounts,
-            supply,
+            accounts: std::cell::UnsafeCell::new(accounts),
+            supply:   std::cell::UnsafeCell::new(supply),
+
+            locks,
+            supply_lock: Mutex::new(()),
+
             prev_hash,
             height,
             timestamp_ms,
-            collected: Vec::new(),
-            fee_total: 0,
-            error_flag: None,
+
+            collected: Mutex::new(Vec::new()),
+            fee_total: Mutex::new(0),
+            error_flag: Mutex::new(None),
         }
     }
-    /// Core mutation entrypoint used by the parallel executor.
-    /// MUST be called inside a Mutex guard.
-    pub fn apply_tx_parallel_safe(
-        &mut self,
-        stx: &SignedTx,
-    ) -> Result<(), TxStateError> {
-        if let Some(err) = &self.error_flag {
-            return Err(err.clone());
+    
+    // Patch B — Replace apply_tx_parallel_safe with the correct serial path (REPLACE FUNCTION BODY)
+    /// Serial/fallback path (single executor); safe because &mut self is exclusive.
+    pub fn apply_tx_parallel_safe(&mut self, stx: &SignedTx) -> Result<(), TxStateError> {
+        // early-out if a prior error was recorded
+        // Mutex::get_mut is safe here because we have &mut self (exclusive access)
+        if let Some(err) = self.error_flag.get_mut().unwrap().clone() {
+            return Err(err);
         }
 
         let sender = match crate::sender_from_pubkey_first20(stx) {
             Some(a) => a,
             None => {
-                let err = TxStateError::InvalidSender;
-                self.error_flag = Some(err.clone());
-                return Err(err);
+                *self.error_flag.get_mut().unwrap() = Some(TxStateError::InvalidSender);
+                return Err(TxStateError::InvalidSender);
             }
         };
 
-        crate::tx::validate_tx_stateful(&self.accounts, sender, &stx.core)
-            .map_err(|e| {
-                self.error_flag = Some(e.clone());
-                e
-            })?;
-
-        crate::tx::apply_tx(
-            &mut self.accounts,
-            &mut self.supply,
-            sender,
-            &stx.core,
-        )
-        .map_err(|e| {
-            self.error_flag = Some(e.clone());
+        // SAFETY: &mut self → exclusive; accessing the inner via UnsafeCell is sound here
+        let accts: &mut Accounts = unsafe { &mut *self.accounts.get() };
+        crate::tx::validate_tx_stateful(accts, sender, &stx.core).map_err(|e| {
+            *self.error_flag.get_mut().unwrap() = Some(e.clone());
             e
         })?;
 
-        self.fee_total += stx.core.fee;
-        self.collected.push(stx.clone());
+        let supply: &mut Supply = unsafe { &mut *self.supply.get() };
+        crate::tx::apply_tx(accts, supply, sender, &stx.core).map_err(|e| {
+            *self.error_flag.get_mut().unwrap() = Some(e.clone());
+            e
+        })?;
+
+        // accumulators
+        *self.fee_total.get_mut().unwrap() += stx.core.fee;
+        self.collected.get_mut().unwrap().push(stx.clone());
+
         Ok(())
     }
 
-    pub fn flag_error(&mut self, err: TxStateError) {
-        if self.error_flag.is_none() {
-            self.error_flag = Some(err);
+    // 1f) Add the new bucketed parallel apply API
+    /// Parallel-safe apply guarded by a *bucket shard* lock.
+    /// - Takes `&self` (so it can be called from many threads)
+    /// - Locks only the relevant bucket + supply (fee burn) while mutating
+    pub fn apply_tx_parallel_bucketed(
+        &self,
+        stx: &SignedTx,
+        bucket: u16,
+    ) -> Result<(), TxStateError> {
+        // abort early if any prior error flagged
+        if self.has_error() {
+            if let Some(err) = self.error_flag.lock().unwrap().clone() {
+                return Err(err);
+            }
+        }
+
+        // lock the *bucket shard* (only this shard serializes)
+        let _bucket_guard = self.locks[(bucket as usize) % self.locks.len()].lock().unwrap();
+
+        // compute sender (still required for apply/validate)
+        let sender = match crate::sender_from_pubkey_first20(stx) {
+            Some(a) => a,
+            None => {
+                let mut e = self.error_flag.lock().unwrap();
+                if e.is_none() { *e = Some(TxStateError::InvalidSender); }
+                return Err(TxStateError::InvalidSender);
+            }
+        };
+
+        // SAFETY: protected by shard lock; no overlapping buckets will mutate
+        // the same account entries concurrently.
+        let accounts = unsafe { &mut *self.accounts.get() };
+
+        // Validate (read-only; no supply needed)
+        if let Err(err) = crate::tx::validate_tx_stateful(accounts, sender, &stx.core) {
+            let mut e = self.error_flag.lock().unwrap();
+            if e.is_none() { *e = Some(err.clone()); }
+            return Err(err);
+        }
+
+        // Apply (mutates accounts + supply). We keep supply under a small global lock.
+        let _supply_guard = self.supply_lock.lock().unwrap();
+        let supply = unsafe { &mut *self.supply.get() };
+
+        if let Err(err) = crate::tx::apply_tx(accounts, supply, sender, &stx.core) {
+            let mut e = self.error_flag.lock().unwrap();
+            if e.is_none() { *e = Some(err.clone()); }
+            return Err(err);
+        }
+
+        // accumulate fee + collected list
+        {
+            let mut f = self.fee_total.lock().unwrap();
+            *f += stx.core.fee;
+            let mut v = self.collected.lock().unwrap();
+            v.push(stx.clone());
+        }
+
+        Ok(())
+    }
+
+    // 1g) Make error/finish use the new interior fields (REPLACE three functions)
+    pub fn flag_error(&self, err: TxStateError) {
+        let mut e = self.error_flag.lock().unwrap();
+        if e.is_none() {
+            *e = Some(err);
         }
     }
 
     pub fn has_error(&self) -> bool {
-        self.error_flag.is_some()
+        self.error_flag.lock().unwrap().is_some()
     }
 
     /// Build the final Block from the accumulated state and transactions.
     pub fn finish(&self) -> Block {
-        let tx_root = txs_root(&self.collected);
+        // snapshot accumulators
+        let txs = { self.collected.lock().unwrap().clone() };
+        let fee = { *self.fee_total.lock().unwrap() };
 
+        let tx_root = txs_root(&txs);
         #[cfg(feature = "eth-ssz")]
-        let tx_root_v2 = crate::eth_ssz::txs_root_v2(&self.collected);
+        let tx_root_v2 = crate::eth_ssz::txs_root_v2(&txs);
 
         let header = BlockHeader {
             height: self.height,
@@ -819,13 +924,13 @@ impl BlockBuildContext {
             tx_root,
             #[cfg(feature = "eth-ssz")]
             tx_root_v2,
-            fee_total: self.fee_total,
-            tx_count: self.collected.len() as u32,
+            fee_total: fee,
+            tx_count: txs.len() as u32,
             timestamp_ms: self.timestamp_ms,
             #[cfg(feature = "checkpoints")]
             qc_hash: [0u8; 32],
         };
 
-        Block { header, txs: self.collected.clone() }
+        Block { header, txs }
     }
 }

@@ -985,7 +985,7 @@ pub static EEZO_EXECUTOR_TPS_INFERRED: Lazy<IntGauge> = Lazy::new(|| {
 });
 
 // -----------------------------------------------------------------------------
-// T54 — Parallel executor metrics (non-colliding names) <-- START PATCH A
+// T54 — Parallel executor metrics (non-colliding names)
 // -----------------------------------------------------------------------------
 #[cfg(feature = "metrics")]
 pub static EEZO_EXEC_PARALLEL_WAVES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
@@ -1010,6 +1010,36 @@ pub static EEZO_EXEC_PARALLEL_APPLY_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "eezo_exec_parallel_apply_seconds",
         "Time spent executing a single wave in parallel executor (seconds)"
+    )
+    .unwrap()
+});
+
+// -----------------------------------------------------------------------------
+// T54.6 — Prefetch + small-wave fusion metrics
+// -----------------------------------------------------------------------------
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_PREFETCH_MS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_prefetch_ms",
+        "Milliseconds spent prefetching access-lists / metadata per block"
+    )
+    .unwrap()
+});
+
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_WAVE_FUSE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_exec_wave_fuse_total",
+        "Number of small waves fused into previous waves (prefix-only)"
+    )
+    .unwrap()
+});
+
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_WAVE_FUSED_LEN: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_wave_fused_len",
+        "Histogram of tx count of waves that were fused"
     )
     .unwrap()
 });
