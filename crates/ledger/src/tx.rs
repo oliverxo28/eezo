@@ -26,6 +26,8 @@ pub enum AccessTarget {
     Account(Address),
     /// Global supply bucket (fee burn currently writes here).
     Supply,
+    /// Deterministic bucket derived from an address (sharding signal).
+    Bucket(u16),
 }
 
 /// Whether a target is read or written. We conservatively mark writes for safety.
@@ -53,6 +55,27 @@ fn dev_allow_unsigned_tx() -> bool {
     }
 }
 // --- FIX END ---
+
+/// Parse optional bucket count from env (`EEZO_EXEC_BUCKETS`). 0 or unset disables buckets.
+fn exec_bucket_count() -> u16 {
+    std::env::var("EEZO_EXEC_BUCKETS")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0)
+}
+
+/// A tiny, deterministic 16-bit mix over an Address to pick a bucket in [0, buckets).
+#[inline]
+fn bucket_for(addr: &Address, buckets: u16) -> u16 {
+    if buckets == 0 { return 0; }
+    // simple portable mixer (no new deps)
+    let mut acc: u32 = 0x9E37_79B9;
+    for b in addr.0 {
+        acc ^= b as u32;
+        acc = acc.rotate_left(5).wrapping_mul(0x85EB_CA6B);
+    }
+    (acc as u16) % buckets.max(1)
+}
 
 /// Minimal transaction witness container.
 /// Flesh out later when we wire real tx verification.
@@ -296,11 +319,14 @@ impl SignedTx {
     /// - **Writes** sender account (nonce+balance)
     /// - **Writes** receiver account (balance)
     /// - **Writes** global supply (fee burn)
+    /// - **Writes** optional deterministic buckets (when EEZO_EXEC_BUCKETS > 0)
     ///
     /// If the sender address cannot be derived (invalid pubkey), we omit it here;
     /// such txs should be rejected during precheck before scheduling.
     pub fn access_list(&self) -> Vec<Access> {
-        let mut v = Vec::with_capacity(3);
+        let mut v = Vec::with_capacity(5);
+
+        // core per-tx accesses (conservative writes for safety)
         if let Some(sender) = sender_from_pubkey_first20(self) {
             v.push(Access {
                 target: AccessTarget::Account(sender),
@@ -315,6 +341,24 @@ impl SignedTx {
             target: AccessTarget::Supply,
             kind: AccessKind::Write,
         });
+
+        // optional deterministic buckets (future sharded executor; off by default)
+        let buckets = exec_bucket_count();
+        if buckets > 0 {
+            if let Some(sender) = sender_from_pubkey_first20(self) {
+                let sb = bucket_for(&sender, buckets);
+                v.push(Access {
+                    target: AccessTarget::Bucket(sb),
+                    kind: AccessKind::Write,
+                });
+            }
+            let rb = bucket_for(&self.core.to, buckets);
+            v.push(Access {
+                target: AccessTarget::Bucket(rb),
+                kind: AccessKind::Write,
+            });
+        }
+
         v
     }
 }

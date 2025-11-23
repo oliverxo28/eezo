@@ -34,6 +34,7 @@ use crate::metrics::{bridge_emitted_inc, bridge_latest_set, register_t36_bridge_
 #[cfg(feature = "metrics")]
 use eezo_ledger::metrics::{
     observe_block_applied as ledger_observe_block_applied,
+    observe_block_proposed as ledger_observe_block_proposed,
     observe_supply as ledger_observe_supply,
 };
 
@@ -217,7 +218,14 @@ impl CoreRunnerHandle {
                                     // 2) After successful apply — bump ledger metrics - PATCH B
                                     #[cfg(feature = "metrics")]
                                     {
-                                        // Make legacy ledger metrics move (eezo_txs_included_total, etc.)
+                                        // Emit block proposal metrics (tx count, fees, etc.)
+                                        // This increments eezo_txs_included_total and other legacy counters
+                                        // Note: fee_total is u128 but cast to u64 for Prometheus (matches consensus.rs behavior)
+                                        ledger_observe_block_proposed(
+                                            blk.header.tx_count,
+                                            blk.header.fee_total as u64
+                                        );
+                                        // Emit block applied and supply metrics
                                         ledger_observe_block_applied();
                                         ledger_observe_supply(&guard.supply);
                                     }
@@ -769,7 +777,14 @@ impl CoreRunnerHandle {
                                     // 2) After successful apply — bump ledger metrics - PATCH C
                                     #[cfg(feature = "metrics")]
                                     {
-                                        // Make legacy ledger metrics move (eezo_txs_included_total, etc.)
+                                        // Emit block proposal metrics (tx count, fees, etc.)
+                                        // This increments eezo_txs_included_total and other legacy counters
+                                        // Note: fee_total is u128 but cast to u64 for Prometheus (matches consensus.rs behavior)
+                                        ledger_observe_block_proposed(
+                                            blk.header.tx_count,
+                                            blk.header.fee_total as u64
+                                        );
+                                        // Emit block applied and supply metrics
                                         ledger_observe_block_applied();
                                         ledger_observe_supply(&guard.supply);
                                     }
