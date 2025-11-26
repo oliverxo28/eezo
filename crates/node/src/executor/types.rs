@@ -9,8 +9,7 @@
 
 use std::time::Duration;
 
-use eezo_ledger::{Block, ConsensusError, SignedTx};
-use eezo_ledger::consensus_api::SlotOutcome;
+use eezo_ledger::{Block, SignedTx};
 
 // =======================================================================
 // T54 — PARALLEL EXECUTOR CORE TYPES

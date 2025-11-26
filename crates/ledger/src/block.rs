@@ -12,7 +12,7 @@ use crate::tx_sig::verify_signed_tx;
 use std::collections::HashMap;
 
 // 1a) Add imports at the top (near other std imports)
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 
 fn dev_allow_unsigned_tx() -> bool {
     match std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {

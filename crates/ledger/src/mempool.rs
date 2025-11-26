@@ -181,7 +181,7 @@ impl Mempool {
     ///
     /// This is sender/nonce-aware: for each sender we maintain a map keyed
     /// by nonce, and only the smallest nonce for that sender is considered
-    /// "ready" during draining. Higher nonces are kept as futures and will
+    /// ready during draining. Higher nonces are kept as futures and will
     /// be proposed only after the lower ones have been taken.
     pub fn enqueue_tx(&mut self, tx: SignedTx) {
         let size_bytes = tx_size_bytes(&tx);
@@ -195,10 +195,12 @@ impl Mempool {
                 let nonce = tx.core.nonce;
                 let entry = MempoolEntry { tx, size_bytes };
 
+                // Fix 1: Use or_default() instead of or_insert_with(SenderQueue::default)
+                // and pass sender by move instead of clone.
                 let q = self
                     .per_sender
-                    .entry(sender.clone())
-                    .or_insert_with(SenderQueue::default);
+                    .entry(sender)
+                    .or_default();
 
                 let existed = q.pending.contains_key(&nonce);
                 if !existed {
@@ -231,11 +233,13 @@ impl Mempool {
     pub fn enqueue_admitted(&mut self, ok: AdmissionOk, signed: SignedTx) {
         let size_bytes = tx_size_bytes(&signed);
 
+        // Fix 2: Use or_default() instead of or_insert_with(SenderQueue::default)
+        // and pass ok.sender by move instead of clone.
         // Insert into per-sender queue under the admitted nonce
         let q = self
             .per_sender
-            .entry(ok.sender.clone())
-            .or_insert_with(SenderQueue::default);
+            .entry(ok.sender)
+            .or_default();
 
         let existed = q.pending.contains_key(&ok.core.nonce);
         if !existed {
@@ -291,6 +295,7 @@ impl Mempool {
 
         loop {
             // Collect the current "ready" candidate (lowest nonce) for each sender.
+            // Fix 3: Use *sender instead of sender.clone() to avoid cloning Address (which is Copy)
             let mut candidates: Vec<(Address, u64, &MempoolEntry)> = self
                 .per_sender
                 .iter()
@@ -298,7 +303,7 @@ impl Mempool {
                     q.pending
                         .iter()
                         .next()
-                        .map(|(nonce, entry)| (sender.clone(), *nonce, entry))
+                        .map(|(nonce, entry)| (*sender, *nonce, entry))
                 })
                 .collect();
 

@@ -39,7 +39,7 @@ impl Executor for SingleExecutor {
     fn execute_block(
         &self,
         node: &mut SingleNode,
-        input: ExecInput,
+        _input: ExecInput,
     ) -> ExecOutcome {
         let start = Instant::now();
 

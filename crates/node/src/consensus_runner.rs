@@ -17,12 +17,12 @@ use std::mem; // <--- ADDED IMPORT for mem::take
 
 use eezo_ledger::consensus::SingleNode;
 // --- UPDATED: Make sure consensus_api imports are correct ---
-use eezo_ledger::consensus_api::{run_one_slot, SlotOutcome, NoOpReason};
+use eezo_ledger::consensus_api::{SlotOutcome, NoOpReason};
 // --- END UPDATE ---\
 // --- FIX: Import Block ---\
 use eezo_ledger::Block; // Keep this import, as we'll need it to reconstruct the Block
 // --- T54 executor wiring ---
-use crate::executor::{Executor, ExecInput, ExecOutcome};
+use crate::executor::{Executor, ExecInput};
 use crate::executor::{SingleExecutor};
 use crate::executor::ParallelExecutor;
 
@@ -332,7 +332,7 @@ impl CoreRunnerHandle {
                         }
 
                         // capture the committed header hash once, reuse later for checkpoint
-                        let mut _last_commit_hash_opt: Option<[u8;32]> = None;
+                        let mut last_commit_hash_opt: Option<[u8;32]> = None;
                         // log every Nth commit to avoid console spam
                         if log_every == 0 || height % log_every == 0 {
                             log::info!("consensus: committed height={}", height);

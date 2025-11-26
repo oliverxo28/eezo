@@ -1,17 +1,9 @@
 //crates/node/src/metrics.rs
 use once_cell::sync::Lazy;
 use prometheus::{
-    register_histogram_vec, register_int_counter, register_int_counter_vec,
-    register_int_gauge, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
+    register_int_gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
 };
-// only needed when `state-sync` metrics are compiled
-#[cfg(feature = "state-sync")]
-use prometheus::register_histogram;
-
-// T54: Import Histogram for parallel metrics
-#[cfg(feature = "metrics")]
-use prometheus::{register_histogram, Histogram};
-
 
 // --- Remove AtomicU64 imports if they are now unused ---
 // use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,14 +25,14 @@ pub static HTTP_REQS: Lazy<IntCounterVec> = Lazy::new(|| {
 
 #[inline]
 pub fn http_inc(route: &str, status: u16) {
+    #[cfg(not(feature = "metrics"))]
+    { let _ = (route, status); }
     #[cfg(feature = "metrics")]
     {
         HTTP_REQS
             .with_label_values(&[route, &status.to_string()])
             .inc();
     }
-    #[cfg(not(feature = "metrics"))]
-    { let _ = (route, status); }
 }
 
 // ===================== T29.9: State-sync security metrics =====================
@@ -747,19 +739,21 @@ pub fn bridge_emitted_inc() {
 /// Helper: increment served counter with a specific route label.
 #[inline]
 pub fn bridge_served_inc(route: &str) {
+    #[cfg(not(feature = "metrics"))]
+    { let _ = route; }
     #[cfg(feature = "metrics")]
     {
         EEZO_BRIDGE_HEADERS_SERVED_TOTAL
             .with_label_values(&[route])
             .inc();
     }
-    #[cfg(not(feature = "metrics"))]
-    { let _ = route; }
 }
 
 /// Helper: set last-served gauge *monotonically* (T37).
 #[inline]
 pub fn bridge_last_served_set(h: u64) {
+    #[cfg(not(feature = "metrics"))]
+    { let _ = h; }
     #[cfg(feature = "metrics")]
     {
         let cur = EEZO_BRIDGE_LAST_SERVED_HEIGHT.get();
@@ -770,8 +764,6 @@ pub fn bridge_last_served_set(h: u64) {
         // keep node lag in sync whenever last-served moves
         bridge_update_node_lag();
     }
-    #[cfg(not(feature = "metrics"))]
-    { let _ = h; }
 }
 
 /// Helper: increment /bridge/index query counter.
@@ -813,6 +805,8 @@ pub fn bridge_summary_query_inc() {
 /// Helper: set latest checkpoint height gauge *monotonically* (Teacher's simpler version).
 #[inline]
 pub fn bridge_latest_height_set(h: u64) {
+    #[cfg(not(feature = "metrics"))]
+    { let _ = h; } // Avoid unused warning
     #[cfg(feature = "metrics")]
     {
         let cur = EEZO_BRIDGE_LATEST_HEIGHT.get();
@@ -827,9 +821,8 @@ pub fn bridge_latest_height_set(h: u64) {
         }
         // If next <= cur, we do nothing.
     }
-    #[cfg(not(feature = "metrics"))]
-    { let _ = h; } // Avoid unused warning
 }
+
 /// Helper (T36.8): set latest checkpoint height gauge (name used by bridge.rs).
 /// This now correctly calls the monotonic version.
 #[inline]
@@ -837,6 +830,7 @@ pub fn bridge_latest_set(height: u64) {
     // Call the monotonic version directly
     bridge_latest_height_set(height);
 }
+
 /// Helper (T37): recompute and set node lag = latest_emitted - last_served (>= 0).
 #[inline]
 pub fn bridge_update_node_lag() {

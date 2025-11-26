@@ -46,6 +46,8 @@ url = "2.5"
 # T54 FIX: Add Rayon and num_cpus for parallel executor
 rayon = "1.10"
 num_cpus = "1.16"
+# T54.6 FIX: SmallVec for efficient PreparedTx access lists
+smallvec = "1.13"
 
 
 # Metrics / logging

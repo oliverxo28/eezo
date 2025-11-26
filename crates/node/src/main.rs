@@ -74,7 +74,6 @@ use std::sync::{
     Arc,
 };
 use std::time::Duration;
-use tokio::time::interval;
 
 mod metrics;
 mod peers;

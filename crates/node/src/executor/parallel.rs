@@ -12,12 +12,11 @@
 
 use std::collections::HashSet;
 use std::env;
-use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
 use rayon::prelude::*;
+use smallvec::SmallVec;
 
-use eezo_ledger::{ConsensusError, SignedTx, SingleNode};
+use eezo_ledger::{SignedTx, SingleNode};
 use eezo_ledger::Block;
 use crate::executor::{ExecInput, ExecOutcome, Executor};
 use eezo_ledger::tx::{Access, AccessTarget};
@@ -28,34 +27,72 @@ use crate::metrics::{
     EEZO_EXEC_PARALLEL_WAVES_TOTAL,
     EEZO_EXEC_PARALLEL_WAVE_LEN,
     EEZO_EXEC_PARALLEL_APPLY_SECONDS,
-    // T54.6 new metrics
-    EEZO_EXEC_PREFETCH_MS,
     EEZO_EXEC_WAVE_FUSE_TOTAL,
     EEZO_EXEC_WAVE_FUSED_LEN,
 };
 
-#[derive(Debug)]
-struct TxMeta<'a> {
+/// PreparedTx: Precomputed transaction metadata to avoid redundant access_list() calls.
+/// 
+/// T54.6 FIX: Instead of calling access_list() 5+ times per transaction, we compute it
+/// once and store the result along with the precomputed bucket.
+/// 
+/// Using SmallVec<[Access; 4]> avoids heap allocation for most transactions (typical access
+/// list has 2-3 entries: sender, receiver, supply, maybe 1-2 buckets).
+#[derive(Debug, Clone)]
+struct PreparedTx<'a> {
+    /// Reference to the original signed transaction
     tx: &'a SignedTx,
-    access: Vec<eezo_ledger::tx::Access>,
+    /// Precomputed access list (cached result of tx.access_list())
+    access: SmallVec<[Access; 4]>,
+    /// Precomputed sender bucket for parallel execution
+    bucket: u16,
 }
 
-/// T54.1: Greedy deterministic wave builder
+impl<'a> PreparedTx<'a> {
+    /// Create a PreparedTx from a SignedTx by computing access list and bucket once.
+    fn from_tx(tx: &'a SignedTx) -> Self {
+        let access: SmallVec<[Access; 4]> = SmallVec::from_iter(tx.access_list());
+        
+        // Compute bucket: prefer explicit Bucket target, else hash sender
+        let bucket = access
+            .iter()
+            .find_map(|a| match a.target {
+                AccessTarget::Bucket(b) => Some(b),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                // Fallback: hash sender deterministically to get bucket
+                let mut acc: u32 = 0x9E37_79B9;
+                if let Some(sender) = eezo_ledger::sender_from_pubkey_first20(tx) {
+                    for b in sender.0 {
+                        acc ^= b as u32;
+                        acc = acc.rotate_left(5).wrapping_mul(0x85EB_CA6B);
+                    }
+                }
+                acc as u16
+            });
+        
+        Self { tx, access, bucket }
+    }
+}
+
+/// T54.1: Greedy deterministic wave builder using PreparedTx
 /// Build wide, conflict-free waves in a single forward pass:
 /// - Same order in, same order preserved within each wave
 /// - A tx conflicts if ANY of its access targets is already used in the current wave
 /// - When conflict appears, we seal the wave and start a new one
-fn build_waves_greedy<'a>(batch: &[&'a eezo_ledger::SignedTx]) -> Vec<Vec<&'a eezo_ledger::SignedTx>> {
-    let mut waves: Vec<Vec<&eezo_ledger::SignedTx>> = Vec::new();
+///
+/// T54.6 FIX: Uses PreparedTx which has precomputed access lists - no redundant calls.
+fn build_waves_greedy<'a>(prepared: &'a [PreparedTx<'a>]) -> Vec<Vec<&'a PreparedTx<'a>>> {
+    let mut waves: Vec<Vec<&PreparedTx>> = Vec::new();
     let mut used: HashSet<AccessTarget> = HashSet::new();
-    let mut current: Vec<&eezo_ledger::SignedTx> = Vec::new();
+    let mut current: Vec<&PreparedTx> = Vec::new();
 
-    for stx in batch.iter().copied() {
-        // pull access targets for this tx
-        let access: Vec<Access> = stx.access_list();
+    for ptx in prepared.iter() {
         let mut conflict = false;
 
-        for a in &access {
+        // Check for conflicts using precomputed access list
+        for a in ptx.access.iter() {
             if used.contains(&a.target) {
                 conflict = true;
                 break;
@@ -71,11 +108,11 @@ fn build_waves_greedy<'a>(batch: &[&'a eezo_ledger::SignedTx]) -> Vec<Vec<&'a ee
             }
         }
 
-        // add tx to current wave and mark its keys
-        for a in &access {
+        // add tx to current wave and mark its access targets
+        for a in ptx.access.iter() {
             used.insert(a.target);
         }
-        current.push(stx);
+        current.push(ptx);
     }
 
     if !current.is_empty() {
@@ -91,10 +128,10 @@ fn wave_compact_enabled() -> bool {
     env::var("EEZO_EXEC_WAVE_COMPACT").map(|v| v != "0").unwrap_or(true)
 }
 
-/// fill `used` with all access targets touched by `wave`
-fn fill_used_for_wave(wave: &[&eezo_ledger::SignedTx], used: &mut HashSet<AccessTarget>) {
-    for stx in wave {
-        for a in stx.access_list() {
+/// fill `used` with all access targets touched by `wave` using precomputed access lists
+fn fill_used_for_wave<'a>(wave: &[&'a PreparedTx<'a>], used: &mut HashSet<AccessTarget>) {
+    for ptx in wave {
+        for a in ptx.access.iter() {
             used.insert(a.target);
         }
     }
@@ -103,14 +140,14 @@ fn fill_used_for_wave(wave: &[&eezo_ledger::SignedTx], used: &mut HashSet<Access
 /// Try to move a **non-conflicting prefix** of `next_wave` into `curr_wave`.
 /// Preserves order and determinism. Returns how many txs were moved.
 fn merge_prefix_if_clean<'a>(
-    curr_wave: &mut Vec<&'a eezo_ledger::SignedTx>,
-    next_wave: &mut Vec<&'a eezo_ledger::SignedTx>,
+    curr_wave: &mut Vec<&'a PreparedTx<'a>>,
+    next_wave: &mut Vec<&'a PreparedTx<'a>>,
     used: &mut HashSet<AccessTarget>,
 ) -> usize {
     let mut k = 0usize;
-    'scan: for stx in next_wave.iter() {
-        // conflict check for this tx
-        for a in stx.access_list() {
+    'scan: for ptx in next_wave.iter() {
+        // conflict check using precomputed access list
+        for a in ptx.access.iter() {
             if used.contains(&a.target) {
                 break 'scan;
             }
@@ -118,7 +155,7 @@ fn merge_prefix_if_clean<'a>(
         // no conflict → extend tentative prefix
         k += 1;
         // and remember these keys to keep checking cumulatively
-        for a in stx.access_list() {
+        for a in ptx.access.iter() {
             used.insert(a.target);
         }
     }
@@ -134,7 +171,9 @@ fn merge_prefix_if_clean<'a>(
 /// T54.3: compact adjacent waves by greedily absorbing clean prefixes from followers.
 /// Example:
 ///   [AAA][BB][C]  →  [AAAB][BC] → [AAABC]    (only when conflict-free)
-fn compact_waves_prefix(waves: Vec<Vec<&eezo_ledger::SignedTx>>) -> Vec<Vec<&eezo_ledger::SignedTx>> {
+fn compact_waves_prefix<'a>(
+    waves: Vec<Vec<&'a PreparedTx<'a>>>
+) -> Vec<Vec<&'a PreparedTx<'a>>> {
     if waves.len() <= 1 { return waves; }
 
     let mut waves = waves;
@@ -203,10 +242,10 @@ fn hybrid_min_slice() -> usize {
 /// Split one oversized wave into contiguous, deterministic subwaves.
 /// Preserves tx order. Slices count is bounded by `lanes` and `min_slice`.
 fn slice_wave_contiguous<'a>(
-    wave: Vec<&'a eezo_ledger::SignedTx>,
+    wave: Vec<&'a PreparedTx<'a>>,
     lanes: usize,
     min_slice: usize,
-) -> Vec<Vec<&'a eezo_ledger::SignedTx>> {
+) -> Vec<Vec<&'a PreparedTx<'a>>> {
     let n = wave.len();
     if n <= min_slice || lanes <= 1 {
         return vec![wave];
@@ -229,10 +268,10 @@ fn slice_wave_contiguous<'a>(
 /// Apply hybrid balancing: after greedy build + compaction,
 /// split waves that are too large relative to the batch.
 fn apply_hybrid_balancing<'a>(
-    mut waves: Vec<Vec<&'a eezo_ledger::SignedTx>>,
+    waves: Vec<Vec<&'a PreparedTx<'a>>>,
     lanes: usize,
     batch_len: usize,
-) -> Vec<Vec<&'a eezo_ledger::SignedTx>> {
+) -> Vec<Vec<&'a PreparedTx<'a>>> {
     if !hybrid_enabled() || lanes <= 1 || waves.is_empty() {
         return waves;
     }
@@ -272,32 +311,32 @@ impl Executor for ParallelExecutor {
     ) -> ExecOutcome {
         let start = Instant::now();
 
-        // 1) gather access lists (conflict detection data)
-        let batch: Vec<&SignedTx> = input.txs.iter().collect();
-
-        // T54.1: build wide deterministic waves from the batch
-        let mut waves: Vec<Vec<&eezo_ledger::SignedTx>> = build_waves_greedy(&batch);
-        let built = waves.len();
-
-        // T54.6 (Patch B, step 1): Prefetch all access lists
-        // This warms the metadata cache, avoiding repeated access_list() calls.
-        #[cfg(feature = "metrics")]
-        let pf_start = std::time::Instant::now();
-        let _prefetched: Vec<_> = batch
-            .iter()
-            .map(|stx| stx.access_list())
+        // T54.6 FIX: Prepare all transactions ONCE - compute access lists and buckets upfront
+        // This eliminates 5+ redundant access_list() calls per transaction
+        // CRITICAL: Use par_iter to parallelize preparation across all CPUs
+        let prepare_start = Instant::now();
+        let prepared: Vec<PreparedTx> = input.txs
+            .par_iter()  // PARALLEL iteration - huge speedup for large batches
+            .map(|tx| PreparedTx::from_tx(tx))
             .collect();
-        #[cfg(feature = "metrics")]
-        EEZO_EXEC_PREFETCH_MS.observe(
-            pf_start.elapsed().as_millis() as f64
-        );
+        let prepare_elapsed = prepare_start.elapsed();
 
+        // T54.1: build wide deterministic waves using prepared transactions
+        let wave_build_start = Instant::now();
+        let mut waves = build_waves_greedy(&prepared);
+        let built = waves.len();
+        let wave_build_elapsed = wave_build_start.elapsed();
+
+        // T54.3: compact adjacent waves
+        let compact_start = Instant::now();
         if wave_compact_enabled() {
             waves = compact_waves_prefix(waves);
         }
         let compacted_out = built.saturating_sub(waves.len());
+        let compact_elapsed = compact_start.elapsed();
 
-        // T54.6 (Patch B, step 2): small-wave fusion (prefix-only), deterministic
+        // T54.6: small-wave fusion using precomputed access lists (no redundant calls)
+        let fusion_start = Instant::now();
         let small_limit = std::env::var("EEZO_EXEC_SMALL_FUSE")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -306,19 +345,19 @@ impl Executor for ParallelExecutor {
         let mut i = 0usize;
         while i + 1 < waves.len() {
             if waves[i + 1].len() <= small_limit {
-                // check conflicts
+                // check conflicts using precomputed access lists
                 let mut used = std::collections::HashSet::new();
                 fill_used_for_wave(&waves[i], &mut used);
 
                 let mut k = 0usize;
-                'scan2: for stx in waves[i + 1].iter() {
-                    for a in stx.access_list() {
+                'scan2: for ptx in waves[i + 1].iter() {
+                    for a in ptx.access.iter() {
                         if used.contains(&a.target) {
                             break 'scan2;
                         }
                     }
                     // mark cumulative
-                    for a in stx.access_list() {
+                    for a in ptx.access.iter() {
                         used.insert(a.target);
                     }
                     k += 1;
@@ -351,24 +390,32 @@ impl Executor for ParallelExecutor {
             }
             i += 1;
         }
+        let fusion_elapsed = fusion_start.elapsed();
 
         // T54.4: split oversized waves deterministically to improve CPU balance
+        let slice_start = Instant::now();
         let lanes = self.threads.max(1);
         let before_slice = waves.len();
-        waves = apply_hybrid_balancing(waves, lanes, batch.len());
+        waves = apply_hybrid_balancing(waves, lanes, prepared.len());
         let sliced_out = waves.len().saturating_sub(before_slice);
+        let slice_elapsed = slice_start.elapsed();
 
         let first = waves.get(0).map(|w| w.len()).unwrap_or(0);
         log::info!(
-            "executor: waves built={}, compacted -{} → {}; sliced +{} → {}; first_wave={}, batch={}, lanes={}",
+            "executor: waves built={}, compacted -{} → {}; sliced +{} → {}; first_wave={}, batch={}, lanes={} | timings: prepare={:.3}ms, build={:.3}ms, compact={:.3}ms, fusion={:.3}ms, slice={:.3}ms",
             built,
             compacted_out,
             before_slice,
             sliced_out,
             waves.len(),
             first,
-            batch.len(),
-            lanes
+            prepared.len(),
+            lanes,
+            prepare_elapsed.as_secs_f64() * 1000.0,
+            wave_build_elapsed.as_secs_f64() * 1000.0,
+            compact_elapsed.as_secs_f64() * 1000.0,
+            fusion_elapsed.as_secs_f64() * 1000.0,
+            slice_elapsed.as_secs_f64() * 1000.0
         );
 
         #[cfg(feature = "metrics")]
@@ -402,54 +449,43 @@ impl Executor for ParallelExecutor {
         ));
 
         // 3) execute waves (T54.5: per-tx bucket-scoped lock)
+        // T54.6 FIX: Use precomputed bucket from PreparedTx - no redundant computation
+        let apply_start = Instant::now();
+        let mut total_wave_time: f64 = 0.0;
+        let mut max_wave_time: f64 = 0.0;
         for wave in waves {
             let wave_start = Instant::now();
 
             // process this wave *in parallel* across buckets
-            // b) Extract bucket for each tx and call apply_tx_parallel_bucketed
-            wave.par_iter().for_each(|stx| {
+            wave.par_iter().for_each(|ptx| {
                 // If a global error was flagged, skip work early
                 if ctx.has_error() {
                     return;
                 }
 
-                // determine bucket (prefer the explicit key from access_list)
-                let bucket: u16 = stx.access_list()
-                    .iter()
-                    .find_map(|a| match a.target {
-                        AccessTarget::Bucket(b) => Some(b),
-                        _ => None,
-                    })
-                    // fallback: hash the sender deterministically (avoid 0 buckets)
-                    .unwrap_or_else(|| {
-                        // cheap, portable 16-bit mix on first 20 bytes of pubkey-as-sender
-                        let mut acc: u32 = 0x9E37_79B9;
-                        if let Some(sender) = eezo_ledger::sender_from_pubkey_first20(stx) {
-                            for b in sender.0 {
-                                acc ^= b as u32;
-                                acc = acc.rotate_left(5).wrapping_mul(0x85EB_CA6B);
-                            }
-                        }
-                        acc as u16
-                    });
-
-                if let Err(e) = ctx.apply_tx_parallel_bucketed(stx, bucket) {
+                // Use precomputed bucket from PreparedTx (already computed in from_tx)
+                if let Err(e) = ctx.apply_tx_parallel_bucketed(ptx.tx, ptx.bucket) {
                     ctx.flag_error(e);
                 }
             });
 
+            let wave_elapsed = wave_start.elapsed().as_secs_f64();
+            total_wave_time += wave_elapsed;
+            max_wave_time = max_wave_time.max(wave_elapsed);
+
             #[cfg(feature = "metrics")]
             {
-                let sec = wave_start.elapsed().as_secs_f64().max(0.0);
-                EEZO_EXEC_PARALLEL_APPLY_SECONDS.observe(sec);
+                EEZO_EXEC_PARALLEL_APPLY_SECONDS.observe(wave_elapsed);
             }
 
             if ctx.has_error() {
                 break;
             }
         }
+        let apply_elapsed = apply_start.elapsed();
 
         // 4) finalize
+        let finalize_start = Instant::now();
         let elapsed = start.elapsed();
         
         // c) Finalize the block (no change in semantics, but simplified call)
@@ -472,6 +508,29 @@ impl Executor for ParallelExecutor {
             Ok(b) => b.txs.len(),
             Err(_) => 0,
         };
+        let finalize_elapsed = finalize_start.elapsed();
+
+        // Comprehensive timing breakdown for performance analysis
+        log::info!(
+            "executor timing: total={:.3}ms | prepare={:.3}ms ({:.1}%), build={:.3}ms ({:.1}%), compact={:.3}ms ({:.1}%), fusion={:.3}ms ({:.1}%), slice={:.3}ms ({:.1}%), apply={:.3}ms ({:.1}%, avg_wave={:.3}ms, max_wave={:.3}ms), finalize={:.3}ms ({:.1}%)",
+            elapsed.as_secs_f64() * 1000.0,
+            prepare_elapsed.as_secs_f64() * 1000.0,
+            (prepare_elapsed.as_secs_f64() / elapsed.as_secs_f64()) * 100.0,
+            wave_build_elapsed.as_secs_f64() * 1000.0,
+            (wave_build_elapsed.as_secs_f64() / elapsed.as_secs_f64()) * 100.0,
+            compact_elapsed.as_secs_f64() * 1000.0,
+            (compact_elapsed.as_secs_f64() / elapsed.as_secs_f64()) * 100.0,
+            fusion_elapsed.as_secs_f64() * 1000.0,
+            (fusion_elapsed.as_secs_f64() / elapsed.as_secs_f64()) * 100.0,
+            slice_elapsed.as_secs_f64() * 1000.0,
+            (slice_elapsed.as_secs_f64() / elapsed.as_secs_f64()) * 100.0,
+            apply_elapsed.as_secs_f64() * 1000.0,
+            (apply_elapsed.as_secs_f64() / elapsed.as_secs_f64()) * 100.0,
+            (total_wave_time / prepared.len().max(1) as f64) * 1000.0,
+            max_wave_time * 1000.0,
+            finalize_elapsed.as_secs_f64() * 1000.0,
+            (finalize_elapsed.as_secs_f64() / elapsed.as_secs_f64()) * 100.0
+        );
 
         ExecOutcome::new(block, elapsed, tx_count)
     }
