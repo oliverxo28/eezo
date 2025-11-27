@@ -3144,9 +3144,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/config", get(config_handler))
         .route("/status", get(status_handler))
         .route("/head", get(head_handler))
-		.route("/status", get(status_handler))
         .route("/dag/status", get(dag_status_handler))
-        .route("/head", get(head_handler))
         // T30 tx endpoints
         .route("/tx", post(post_tx))
         .route("/tx_batch", post(post_tx_batch)) // <-- ADDED
