@@ -125,7 +125,7 @@ fn build_bridge_router() -> axum::Router<AppState> {
 		.route("/bridge/index", _get_bridge_get(_get_bridge_index))
         // put "latest" first so it doesn't get captured by :height
         .route("/bridge/header/latest", _get_bridge_get(_get_bridge_latest))
-        .route("/bridge/header/:height", _get_bridge_get(_get_bridge_by_height))
+        .route("/bridge/header/{height}", _get_bridge_get(_get_bridge_by_height))
 }
 
 #[cfg(not(feature = "checkpoints"))]
@@ -3144,23 +3144,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/config", get(config_handler))
         .route("/status", get(status_handler))
         .route("/head", get(head_handler))
-		.route("/status", get(status_handler))
         .route("/dag/status", get(dag_status_handler))
-        .route("/head", get(head_handler))
         // T30 tx endpoints
         .route("/tx", post(post_tx))
         .route("/tx_batch", post(post_tx_batch)) // <-- ADDED
-        .route("/tx/:hash", get(get_tx))
-        .route("/receipt/:hash", get(get_receipt))
+        .route("/tx/{hash}", get(get_tx))
+        .route("/receipt/{hash}", get(get_receipt))
      
            .route("/txpool", get(txpool_handler))
-        .route("/block/:height", get(block_handler))
-        .route("/account/:addr", get(get_account))
+        .route("/block/{height}", get(block_handler))
+        .route("/account/{addr}", get(get_account))
         .route("/faucet", post(post_faucet))
 		// T33 Bridge Alpha endpoints
 		.route("/bridge/mint", post(bridge::post_bridge_mint))
 		.route("/bridge/outbox", get(bridge::get_outbox))
-		.route("/bridge/outbox/:id", get(bridge::get_outbox_one))
+		.route("/bridge/outbox/{id}", get(bridge::get_outbox_one))
         .route("/_admin/degrade", get(admin_degrade))
         .route("/_admin/restore", get(admin_restore))
         .route("/_admin/peers",get(admin_peers_handler).post(admin_peers_update_handler))
