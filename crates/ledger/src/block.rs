@@ -1,4 +1,4 @@
-use crate::tx::{apply_tx, validate_tx_stateful, TxStateError};
+use crate::tx::{apply_tx, validate_tx_stateful, TxStateError, dev_allow_unsigned_tx}; // <<< MODIFIED
 use crate::tx_types::{validate_tx_shape, TxStatelessError};
 use crate::{sender_from_pubkey_first20, Accounts, SignedTx, Supply};
 use eezo_serde::ssz::encode_bytes;
@@ -12,17 +12,9 @@ use crate::tx_sig::verify_signed_tx;
 use std::collections::HashMap;
 
 // 1a) Add imports at the top (near other std imports)
-use std::sync::Mutex;
+use std::sync::Mutex; // <<< Kept Mutex only, removed MutexGuard
 
-fn dev_allow_unsigned_tx() -> bool {
-    match std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {
-        Ok(v) => {
-            let v = v.to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        }
-        Err(_) => false,
-    }
-}
+// <<< DELETED: Removed duplicate fn dev_allow_unsigned_tx() >>>
 
 // 1c) Add helpers to size buckets (place near other small helpers)
 #[inline]
@@ -404,7 +396,7 @@ pub fn assemble_block(
 
     // Cache dev mode check to avoid repeated environment variable lookups
     #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
-    let dev_mode = dev_allow_unsigned_tx();
+    let dev_mode = dev_allow_unsigned_tx(); // <<< USES IMPORTED HELPER
     #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
     if dev_mode {
         log::info!("assemble_block: height={} dev-mode enabled, skipping signature verification for all transactions", height);
@@ -560,7 +552,7 @@ pub fn validate_block(
 
     // Cache dev mode check to avoid repeated environment variable lookups
     #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
-    let dev_mode = dev_allow_unsigned_tx();
+    let dev_mode = dev_allow_unsigned_tx(); // <<< USES IMPORTED HELPER
     #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
     if dev_mode {
         log::info!("validate_block: height={} dev-mode enabled, skipping signature verification for all transactions", blk.header.height);

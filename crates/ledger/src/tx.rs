@@ -10,7 +10,7 @@ pub type SigBytesCompat = SigBytes;
 #[cfg(not(feature = "pq44-runtime"))]
 pub type SigBytesCompat = Vec<u8>;
 
-use crate::{tx_types::validate_tx_shape, Accounts, Address, Supply, TxCore};
+use crate::{tx_types::{validate_tx_shape, tx_domain_bytes}, Accounts, Address, Supply, TxCore};
 use eezo_serde::ssz::{decode_bytes, encode_bytes};
 use crate::SignedTx;
 
@@ -44,8 +44,10 @@ pub struct Access {
     pub kind: AccessKind,
 }
 
-// --- FIX START: Helper for Dev Mode ---
-fn dev_allow_unsigned_tx() -> bool {
+// Helper for dev-only unsigned transaction mode.
+// This is used by assembly, validation, and precheck to gate signature verification.
+#[inline]
+pub fn dev_allow_unsigned_tx() -> bool {
     match std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {
         Ok(v) => {
             let v = v.to_ascii_lowercase();
@@ -54,7 +56,6 @@ fn dev_allow_unsigned_tx() -> bool {
         Err(_) => false,
     }
 }
-// --- FIX END ---
 
 /// Parse optional bucket count from env (`EEZO_EXEC_BUCKETS`). 0 or unset disables buckets.
 fn exec_bucket_count() -> u16 {
@@ -75,6 +76,38 @@ fn bucket_for(addr: &Address, buckets: u16) -> u16 {
         acc = acc.rotate_left(5).wrapping_mul(0x85EB_CA6B);
     }
     (acc as u16) % buckets.max(1)
+}
+
+/// Helper: produce an ML-DSA signature for a TxCore using the canonical
+/// tx_domain_bytes(chain_id20, &core) message.
+///
+/// This is intended for wallets / tx generators that want to construct
+/// SignedTx objects compatible with the node.
+#[cfg(feature = "pq44-runtime")]
+pub fn sign_tx_core_mldsa(
+    chain_id20: [u8; 20],
+    core: &TxCore,
+    sk_bytes: &[u8],
+) -> anyhow::Result<SigBytesCompat> {
+    use eezo_crypto::sig::ml_dsa::sign_single;
+
+    // 1) Compute the canonical signing message:
+    //    b"EEZO-TX\0" || chain_id(20) || nonce(u64 LE)
+    //    || amount(u128 LE) || fee(u128 LE) || to(20)
+    let msg = tx_domain_bytes(chain_id20, core);
+
+    // 2) Use the crypto helper from T52.PQ1 (returns its own SigBytes wrapper)
+    let sig = sign_single(sk_bytes, &msg)?;
+
+    // 3) Convert into the ledger's SigBytesCompat ([u8; SIG_LEN]).
+    let raw = sig.0;
+    if raw.len() != SIG_LEN {
+        return Err(anyhow::anyhow!("signature length mismatch"));
+    }
+
+    let mut arr = [0u8; SIG_LEN];
+    arr.copy_from_slice(&raw);
+    Ok(SigBytes(arr))
 }
 
 /// Minimal transaction witness container.

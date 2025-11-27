@@ -2260,6 +2260,24 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     };
+    // T55.2: consensus mode knob (currently only "single" is supported).
+    // In the future we will add "dag" here and wire it to a DagRunnerHandle.
+    let consensus_mode = std::env::var("EEZO_CONSENSUS_MODE")
+        .unwrap_or_else(|_| "single".to_string());
+
+    match consensus_mode.as_str() {
+        "single" => {
+            // current behaviour: single-node / hotstuff-like runner
+        }
+        other => {
+            // Be explicit so misconfiguration is obvious.
+            anyhow::bail!(
+                "EEZO_CONSENSUS_MODE='{}' is not supported on this build. \
+                 Use \"single\". DAG mode (\"dag\") will be wired in a future T55.x task.",
+                other
+            );
+        }
+    }	
     println!("🔍 Chain ID (effective): {}", hex::encode(chain_id));
     // Bridge Alpha (optional for T33.1): admin ML-DSA-44 public key (hex)
 	// If EEZO_BRIDGE_ALPHA is set (1/true), the key becomes required.

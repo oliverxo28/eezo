@@ -130,7 +130,7 @@ pub fn verify_single(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<()> {
         if pqcrypto_mldsa::mldsa44::verify_detached_signature(&sig, msg, &pk).is_ok() {
             Ok(())
         } else {
-            // avoid pulling in `bail!` so builds without the runtime feature don’t warn
+            // avoid pulling in `bail!` so builds without the runtime feature don't warn
             Err(anyhow::anyhow!("verify failed"))
         }
     }
@@ -139,6 +139,33 @@ pub fn verify_single(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<()> {
     {
         let _ = (pk, msg, sig);
         Ok(())
+    }
+}
+
+//
+// NEW helper for T52.PQ1
+//
+/// Sign one message with a raw ML-DSA-44 secret key.
+///
+/// This is the signing twin of `verify_single`: it takes raw SecretKey
+/// bytes (as stored by a wallet or test harness) and returns a `SigBytes`
+/// wrapper on success. Callers are expected to supply the same message
+/// bytes that the ledger uses when constructing `SignedTx` digests.
+pub fn sign_single(sk: &[u8], msg: &[u8]) -> Result<SigBytes> {
+    #[cfg(feature = "pq44-runtime")]
+    {
+        use pqcrypto_mldsa::mldsa44::SecretKey;
+        use pqcrypto_traits::sign::SecretKey as _;
+
+        let sk = SecretKey::from_bytes(sk).map_err(|_| anyhow::anyhow!("bad sk"))?;
+        let sig = pqcrypto_mldsa::mldsa44::detached_sign(msg, &sk);
+        Ok(SigBytes(sig.as_bytes().to_vec()))
+    }
+
+    #[cfg(not(feature = "pq44-runtime"))]
+    {
+        let _ = (sk, msg);
+        Ok(SigBytes(Vec::new()))
     }
 }
 
@@ -160,7 +187,7 @@ mod kats {
     use eezo_kats::{MLDsaCorpus, hex_to_bytes};
 
     #[test]
-	#[ignore] // uses dummy vectors; enable when real ML-DSA KATs are wired
+    #[ignore] // uses dummy vectors; enable when real ML-DSA KATs are wired
     fn kats_parity_smoke() {
         // In a real setup, load from file in eezo-kats/vectors/*.json.
         // Here we embed a small sample string for test continuity.
