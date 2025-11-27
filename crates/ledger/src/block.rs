@@ -1,4 +1,4 @@
-use crate::tx::{apply_tx, validate_tx_stateful, TxStateError, dev_allow_unsigned_tx}; // <<< MODIFIED
+use crate::tx::{apply_tx, validate_tx_stateful, TxStateError};
 use crate::tx_types::{validate_tx_shape, TxStatelessError};
 use crate::{sender_from_pubkey_first20, Accounts, SignedTx, Supply};
 use eezo_serde::ssz::encode_bytes;
@@ -9,6 +9,8 @@ use sha3::{Digest, Sha3_256};
 // In non-test builds (unless skip-sig-verify is set), we verify.
 #[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
 use crate::tx_sig::verify_signed_tx;
+#[cfg(all(not(feature = "skip-sig-verify"), not(feature = "testing")))]
+use crate::tx::dev_allow_unsigned_tx;
 use std::collections::HashMap;
 
 // 1a) Add imports at the top (near other std imports)

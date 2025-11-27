@@ -139,7 +139,7 @@ fn build_bridge_router() -> axum::Router<AppState> {
 use crate::consensus_runner::CoreRunnerHandle;
 // 1️⃣ T55.1: Import DagRunnerHandle
 #[cfg(feature = "pq44-runtime")]
-use crate::dag_runner::DagRunnerHandle;
+use crate::dag_runner::{DagRunnerHandle, DagStatus};
 
 // If you compile the adapter/testing path, make it mutually exclusive with pq44-runtime.
 #[cfg(all(feature = "consensus-core-adapter", feature = "consensus-core-testing", not(feature = "pq44-runtime")))]
@@ -361,6 +361,41 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusView> {
         git_sha: state.git_sha.map(|s| s.to_string()),
         node_id: state.identity.node_id.clone(),
         first_seen: state.identity.first_seen,
+    })
+}
+
+#[derive(Serialize)]
+struct DagStatusView {
+    /// Consensus mode requested via EEZO_CONSENSUS_MODE ("hotstuff" or "dag")
+    mode: String,
+    /// Coarse runner status: "running", "disabled", or "absent"
+    runner: String,
+}
+
+#[cfg(feature = "pq44-runtime")]
+async fn dag_status_handler(State(state): State<AppState>) -> Json<DagStatusView> {
+    // Read current consensus mode from env (same helper you already use)
+    let mode = match env_consensus_mode() {
+        ConsensusMode::Hotstuff => "hotstuff".to_string(),
+        ConsensusMode::Dag => "dag".to_string(),
+    };
+
+    // Inspect the optional DAG runner handle in AppState
+    let runner = match state.dag_runner.as_ref().map(|h| h.status()) {
+        Some(DagStatus::Running) => "running".to_string(),
+        Some(DagStatus::Disabled) => "disabled".to_string(),
+        None => "absent".to_string(),
+    };
+
+    Json(DagStatusView { mode, runner })
+}
+
+#[cfg(not(feature = "pq44-runtime"))]
+async fn dag_status_handler() -> Json<DagStatusView> {
+    // When the pq44-runtime path is not compiled, DAG is effectively unsupported.
+    Json(DagStatusView {
+        mode: "none".to_string(),
+        runner: "absent".to_string(),
     })
 }
 
@@ -1041,21 +1076,12 @@ async fn post_tx(
                 })
                 .await;
                 true        
-        } else if let Some(dag_runner) = state.dag_runner.as_ref() { // New check for DagRunner
-             dag_runner
-                .with_node(|node| {
-                    let _ = node.submit_signed_tx(stx);
-                    
-                    #[cfg(feature = "metrics")]
-                    {
-                        let mempool_len = node.mempool.len();
-                        let mempool_bytes = node.mempool.bytes_used();
-                        crate::metrics::EEZO_MEMPOOL_LEN.set(mempool_len as i64);
-                        crate::metrics::EEZO_MEMPOOL_BYTES.set(mempool_bytes as i64);
-                    }
-                })
-                .await;
-                true
+        } else if state.dag_runner.is_some() {
+            // DAG mode does not yet implement with_node; return error for now
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "DAG mode tx submission not yet implemented"})),
+            );
         } else {
             false
         };
@@ -1210,16 +1236,14 @@ async fn post_tx_batch(
             parsed.push(eezo_ledger::SignedTx { core, pubkey: pubkey_bytes, sig: sig_bytes });
         }
 
-        // Check which runner is active and acquire the node lock through it.
-        let runner_arc: Option<Arc<dyn crate::consensus_runner::SingleNodeAccess>> = if let Some(r) = state.core_runner.as_ref().map(|r| r.clone() as Arc<dyn crate::consensus_runner::SingleNodeAccess>) {
-            Some(r)
-        } else if let Some(r) = state.dag_runner.as_ref().map(|r| r.clone() as Arc<dyn crate::consensus_runner::SingleNodeAccess>) {
-            Some(r)
-        } else {
-            None
-        };
-        
-        let Some(runner_arc) = runner_arc else {
+        // Only use CoreRunnerHandle (Hotstuff); DAG mode doesn't support batch tx yet
+        let Some(core_runner) = state.core_runner.as_ref() else {
+            if state.dag_runner.is_some() {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"error":"DAG mode batch tx not yet implemented"})),
+                );
+            }
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({"error":"consensus core not available"})),
@@ -1229,7 +1253,7 @@ async fn post_tx_batch(
         // Submit all to the core in one lock pass; update mempool metrics once.
         let mut accepted: usize = 0;
         
-        runner_arc.with_node(|node| {
+        core_runner.with_node(|node| {
             for stx in parsed {
                 // ignore per-tx error here; inclusion/rejection is decided downstream
                 let _ = node.submit_signed_tx(stx);
@@ -1364,19 +1388,9 @@ async fn get_account(
                 nonce: nonce.to_string(),
             };
             return (StatusCode::OK, Json(serde_json::json!(view)));
-        } else if let Some(dag_runner) = &state.dag_runner { // New check for DagRunner
-            let (bal, nonce) = dag_runner
-                .with_node(|node| {
-                    let acct = node.accounts.get(&ledger_addr);
-                    (acct.balance, acct.nonce)
-                })
-                .await;
-
-            let view = AccountView {
-                balance: bal.to_string(),
-                nonce: nonce.to_string(),
-            };
-            return (StatusCode::OK, Json(serde_json::json!(view)));
+        } else if state.dag_runner.is_some() {
+            // DAG mode: fall through to node-level accounts for now
+            // (DAG runner doesn't expose with_node yet)
         }
         // Fall through to node-level accounts if no runner is present
     }
@@ -1434,13 +1448,9 @@ async fn post_faucet(
                     node.dev_faucet_credit(addr_copy, amount as u128);
                 })
                 .await;
-        } else if let Some(dag_runner) = &state.dag_runner { // New check for DagRunner
-            let addr_copy = ledger_addr;
-            dag_runner
-                .with_node(move |node| {
-                    node.dev_faucet_credit(addr_copy, amount as u128);
-                })
-                .await;
+        } else if state.dag_runner.is_some() {
+            // DAG mode: skip ledger credit for now (not implemented)
+            // The node-level accounts below will still be credited
         }
     }
 
@@ -2551,13 +2561,13 @@ async fn main() -> anyhow::Result<()> {
         // Load (or create in dev) the node keys via wallet (ML-DSA-44)
         let keydir = std::env::var("EEZO_KEYDIR")
 		    .map(std::path::PathBuf::from)
-			.unwrap_or_else(|| {
+			.unwrap_or_else(|_| {
 				let mut p = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
 				p.push(".eezo/keys");
 				p
 			});
         let (pk, sk) = eezo_wallet::node_keys::load_or_create_mldsa44(&keydir, true)
-		    .map_err(|e| anyhow::anyow!("wallet key load failed: {e}"))?;
+		    .map_err(|e| anyhow::anyhow!("wallet key load failed: {e}"))?;
         let single: SingleNode = SingleNode::new(cfg, sk, pk);
 
         // Read consensus mode from env and log it
@@ -3133,6 +3143,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/readyz", get(ready_handler))
         .route("/config", get(config_handler))
         .route("/status", get(status_handler))
+        .route("/head", get(head_handler))
+		.route("/status", get(status_handler))
+        .route("/dag/status", get(dag_status_handler))
         .route("/head", get(head_handler))
         // T30 tx endpoints
         .route("/tx", post(post_tx))

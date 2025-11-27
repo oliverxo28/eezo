@@ -43,12 +43,27 @@ impl DagRunnerHandle {
             // we can reuse this structure to drive real DAG logic.
             let _ = node_c; // avoid unused-variable warning for now
 
+            log::info!("dag: runner task started (placeholder loop)");
+
+            let mut ticks: u64 = 0;
+
             // Later T55.x tasks will replace this with the actual
             // DAG event loop (vertex production, ordering, etc.).
             while !stop_c.load(Ordering::Relaxed) {
-                // Small sleep to avoid a busy loop.
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                ticks = ticks.saturating_add(1);
+
+                // Very light heartbeat: once every 50 ticks (~5s).
+                if ticks % 50 == 0 {
+                    log::debug!(
+                        "dag: runner heartbeat (ticks={}, stop_flag={})",
+                        ticks,
+                        stop_c.load(Ordering::Relaxed)
+                    );
+                }
             }
+
+            log::info!("dag: runner task stopping after {} ticks", ticks);
         });
 
         Arc::new(Self {
@@ -60,6 +75,7 @@ impl DagRunnerHandle {
 
     /// Signal the DAG runner to stop. (Synchronous, returns ())
     pub fn stop(&self) {
+        log::info!("dag: stop() requested");
         self.stop.store(true, Ordering::Relaxed);
     }
 
