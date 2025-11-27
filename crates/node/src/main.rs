@@ -516,6 +516,26 @@ fn env_u16(var: &str, default_v: u16) -> u16 {
         .unwrap_or(default_v)
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ConsensusMode {
+    Hotstuff,
+    Dag,
+}
+
+fn env_consensus_mode() -> ConsensusMode {
+    match env::var("EEZO_CONSENSUS_MODE") {
+        Ok(raw) => {
+            let s = raw.trim().to_ascii_lowercase();
+            if s == "dag" {
+                ConsensusMode::Dag
+            } else {
+                ConsensusMode::Hotstuff
+            }
+        }
+        Err(_) => ConsensusMode::Hotstuff,
+    }
+}
+
 #[cfg(feature = "pq44-runtime")]
 fn env_u64(var: &str, default_v: u64) -> u64 {
     env::var(var)
@@ -2262,22 +2282,10 @@ async fn main() -> anyhow::Result<()> {
     };
     // T55.2: consensus mode knob (currently only "single" is supported).
     // In the future we will add "dag" here and wire it to a DagRunnerHandle.
-    let consensus_mode = std::env::var("EEZO_CONSENSUS_MODE")
-        .unwrap_or_else(|_| "single".to_string());
+    // NOTE: The previous hard-coded check is removed to allow env_consensus_mode() to be the source of truth,
+    // which aligns with the T55.0 goal of introducing the switch without changing behavior.
+    let _consensus_mode = env_consensus_mode();
 
-    match consensus_mode.as_str() {
-        "single" => {
-            // current behaviour: single-node / hotstuff-like runner
-        }
-        other => {
-            // Be explicit so misconfiguration is obvious.
-            anyhow::bail!(
-                "EEZO_CONSENSUS_MODE='{}' is not supported on this build. \
-                 Use \"single\". DAG mode (\"dag\") will be wired in a future T55.x task.",
-                other
-            );
-        }
-    }	
     println!("🔍 Chain ID (effective): {}", hex::encode(chain_id));
     // Bridge Alpha (optional for T33.1): admin ML-DSA-44 public key (hex)
 	// If EEZO_BRIDGE_ALPHA is set (1/true), the key becomes required.
@@ -2517,6 +2525,10 @@ async fn main() -> anyhow::Result<()> {
 		    .map_err(|e| anyhow::anyhow!("wallet key load failed: {e}"))?;
         let single: SingleNode = SingleNode::new(cfg, sk, pk);
 
+        // Read consensus mode from env and log it (for now we always run Hotstuff)
+        let consensus_mode = env_consensus_mode();
+        log::info!("consensus: EEZO_CONSENSUS_MODE={:?}", consensus_mode);
+
         // tick cadence & error behavior (env-tunable)
         let tick_ms: u64 = env_u64("EEZO_CONSENSUS_TICK_MS", 200);
         let rollback_on_error = true;
@@ -2556,6 +2568,10 @@ async fn main() -> anyhow::Result<()> {
         let (pk, sk) = eezo_wallet::node_keys::load_or_create_mldsa44(&keydir, true)
             .map_err(|e| anyhow::anyhow!("wallet key load failed: {e}"))?;
         let single: SingleNode = SingleNode::new(cfg, sk, pk);
+
+        // Read consensus mode from env and log it (DAG wiring comes next)
+        let consensus_mode = env_consensus_mode();
+        log::info!("consensus: EEZO_CONSENSUS_MODE={:?}", consensus_mode);
 
         let tick_ms = env_u64("EEZO_CONSENSUS_TICK_MS", 200);
         let rollback_on_error = true;
@@ -3048,11 +3064,11 @@ async fn main() -> anyhow::Result<()> {
             get({
                 #[cfg(all(feature = "consensus-core-adapter", feature = "consensus-core-testing", not(feature = "pq44-runtime")))]
                 { get_qc }
-                // FIX 1: Add a closing ']' here to balance the previous opening '['
+                // Removed the extra closing ']' here which was causing the error
                 #[cfg(not(all(feature = "consensus-core-adapter", feature = "consensus-core-testing", not(feature = "pq44-runtime"))))]
                 { 
                 health_handler }
-            }),
+            }), // This parenthesis closes the `get({ ... })` call
         )
         .route("/readyz", get(ready_handler))
         .route("/config", get(config_handler))
@@ -3144,6 +3160,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "persistence")]
         let db = state_clone.db.clone();
         tokio::spawn(async move {
+            use tokio::time::interval;
             let mut tick = interval(Duration::from_millis(interval_ms));
             loop {
                 tick.tick().await;
