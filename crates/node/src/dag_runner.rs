@@ -1,15 +1,5 @@
 // crates/node/src/dag_runner.rs
 // T55.3 — minimal DAG runner skeleton on top of HotStuff baseline.
-//
-// This file does NOT implement real DAG consensus yet.
-// It just provides a clean DagRunnerHandle + DagStatus that we can
-// flesh out in later T55.x tasks.
-//
-// Important: this module is not wired into main.rs yet. The node
-// still runs with the existing single-node / hotstuff-like runner.
-//
-// We keep it behind the same `pq44-runtime` feature gate as the
-// rest of the consensus code so it only builds in that mode.
 
 #![cfg(feature = "pq44-runtime")]
 
@@ -23,9 +13,6 @@ use tokio::sync::Mutex;
 use eezo_ledger::consensus::SingleNode;
 
 /// High-level status of the DAG runner.
-///
-/// For now this is just a placeholder. Later we can add more
-/// detailed states (e.g. InitialSync, Working, Backoff, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DagStatus {
     /// DAG consensus is not active / has been stopped.
@@ -35,24 +22,15 @@ pub enum DagStatus {
 }
 
 /// Handle to a background DAG runner task.
-///
-/// In T55.3 this is intentionally minimal: it just owns a stop flag,
-/// a reference to the `SingleNode`, and a Tokio join handle. The
-/// actual DAG logic will be introduced in later T55.x tasks.
 pub struct DagRunnerHandle {
     stop: Arc<AtomicBool>,
     #[allow(dead_code)]
     node: Arc<Mutex<SingleNode>>,
-    join: tokio::task::JoinHandle<()>,
+    join: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl DagRunnerHandle {
     /// Spawn a placeholder DAG runner.
-    ///
-    /// For T55.3 this does not implement ordering or DAG consensus.
-    /// It simply keeps a background task alive until `stop()` is
-    /// called. This lets us wire types and signatures without
-    /// changing behaviour.
     pub fn spawn(node: SingleNode) -> Arc<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let node = Arc::new(Mutex::new(node));
@@ -60,7 +38,7 @@ impl DagRunnerHandle {
         let stop_c = Arc::clone(&stop);
         let node_c = Arc::clone(&node);
 
-        let join = tokio::spawn(async move {
+        let join_handle = tokio::spawn(async move {
             // Placeholder loop: we hold onto `node_c` so that later
             // we can reuse this structure to drive real DAG logic.
             let _ = node_c; // avoid unused-variable warning for now
@@ -73,17 +51,24 @@ impl DagRunnerHandle {
             }
         });
 
-        Arc::new(Self { stop, node, join })
+        Arc::new(Self {
+            stop,
+            node,
+            join: Mutex::new(Some(join_handle)),
+        })
     }
 
-    /// Signal the DAG runner to stop.
+    /// Signal the DAG runner to stop. (Synchronous, returns ())
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
 
     /// Await completion of the background task.
     pub async fn join(self: Arc<Self>) {
-        let _ = self.join.await;
+        // Take the JoinHandle once, then await it
+        if let Some(handle) = self.join.lock().await.take() {
+            let _ = handle.await;
+        }
     }
 
     /// Report the current (coarse) status.

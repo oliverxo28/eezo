@@ -94,6 +94,10 @@ use axum::serve;
 #[cfg(any(feature = "pq44-runtime", feature = "state-sync", feature="consensus-core-adapter"))]
 mod consensus_runner;
 
+// T55.1: Declare DAG runner module
+#[cfg(feature = "pq44-runtime")]
+mod dag_runner;
+
 // T36.6: expose bridge metrics immediately at boot
 // metrics registrars used at boot
 #[cfg(feature = "metrics")]
@@ -133,6 +137,10 @@ fn build_bridge_router() -> axum::Router<AppState> {
 // T36.2: core runner handle (SingleNode path)
 #[cfg(feature = "pq44-runtime")]
 use crate::consensus_runner::CoreRunnerHandle;
+// 1️⃣ T55.1: Import DagRunnerHandle
+#[cfg(feature = "pq44-runtime")]
+use crate::dag_runner::DagRunnerHandle;
+
 // If you compile the adapter/testing path, make it mutually exclusive with pq44-runtime.
 #[cfg(all(feature = "consensus-core-adapter", feature = "consensus-core-testing", not(feature = "pq44-runtime")))]
 use crate::consensus_runner::CoreRunnerHandle;
@@ -728,6 +736,7 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
 }
 
+// 2️⃣ Extend AppState with an optional DAG runner
 #[derive(Clone)]
 struct AppState {
     runtime_config: RuntimeConfigView,
@@ -763,6 +772,11 @@ struct AppState {
     // t36: consensus core runner handle (pq44 SingleNode path)
     #[cfg(feature = "pq44-runtime")]
     core_runner: Option<Arc<CoreRunnerHandle>>,
+
+    // T55.1: DAG runner handle (pq44 SingleNode path)
+    #[cfg(feature = "pq44-runtime")]
+    dag_runner: Option<Arc<DagRunnerHandle>>,
+
     // adapter/testing path (mutually exclusive with pq44-runtime)
     #[cfg(all(feature = "consensus-core-adapter", feature = "consensus-core-testing", not(feature = "pq44-runtime")))]
     core_runner: std::sync::Arc<CoreRunnerHandle>,
@@ -1011,33 +1025,54 @@ async fn post_tx(
         };
 
         // 5) Hand off to the consensus core (SingleNode::submit_signed_tx)
-        let Some(core_runner) = &state.core_runner else {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "consensus core not available"})),
-            );
+        // Check which runner is active and use it for submission
+        let is_submitted = if let Some(core_runner) = state.core_runner.as_ref() {
+             core_runner
+                .with_node(|node| {
+                    let _ = node.submit_signed_tx(stx);
+                    
+                    #[cfg(feature = "metrics")]
+                    {
+                        let mempool_len = node.mempool.len();
+                        let mempool_bytes = node.mempool.bytes_used();
+                        crate::metrics::EEZO_MEMPOOL_LEN.set(mempool_len as i64);
+                        crate::metrics::EEZO_MEMPOOL_BYTES.set(mempool_bytes as i64);
+                    }
+                })
+                .await;
+                true        
+        } else if let Some(dag_runner) = state.dag_runner.as_ref() { // New check for DagRunner
+             dag_runner
+                .with_node(|node| {
+                    let _ = node.submit_signed_tx(stx);
+                    
+                    #[cfg(feature = "metrics")]
+                    {
+                        let mempool_len = node.mempool.len();
+                        let mempool_bytes = node.mempool.bytes_used();
+                        crate::metrics::EEZO_MEMPOOL_LEN.set(mempool_len as i64);
+                        crate::metrics::EEZO_MEMPOOL_BYTES.set(mempool_bytes as i64);
+                    }
+                })
+                .await;
+                true
+        } else {
+            false
         };
 
-        // Submit transaction and update mempool metrics
-        core_runner
-            .with_node(|node| {
-                let _ = node.submit_signed_tx(stx);
-                
-                #[cfg(feature = "metrics")]
-                {
-                    let mempool_len = node.mempool.len();
-                    let mempool_bytes = node.mempool.bytes_used();
-                    crate::metrics::EEZO_MEMPOOL_LEN.set(mempool_len as i64);
-                    crate::metrics::EEZO_MEMPOOL_BYTES.set(mempool_bytes as i64);
-                }
-            })
-            .await;
 
         // For now we just return the hash; metrics are driven by the ledger path.
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!(SubmitTxResp { hash: hash_hex })),
-        );
+        if is_submitted {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!(SubmitTxResp { hash: hash_hex })),
+            );
+        } else {
+             return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "consensus runner not running"})),
+            );
+        }
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -1175,16 +1210,26 @@ async fn post_tx_batch(
             parsed.push(eezo_ledger::SignedTx { core, pubkey: pubkey_bytes, sig: sig_bytes });
         }
 
-        // Submit all to the core in one lock pass; update mempool metrics once.
-        let Some(core_runner) = &state.core_runner else {
+        // Check which runner is active and acquire the node lock through it.
+        let runner_arc: Option<Arc<dyn crate::consensus_runner::SingleNodeAccess>> = if let Some(r) = state.core_runner.as_ref().map(|r| r.clone() as Arc<dyn crate::consensus_runner::SingleNodeAccess>) {
+            Some(r)
+        } else if let Some(r) = state.dag_runner.as_ref().map(|r| r.clone() as Arc<dyn crate::consensus_runner::SingleNodeAccess>) {
+            Some(r)
+        } else {
+            None
+        };
+        
+        let Some(runner_arc) = runner_arc else {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({"error":"consensus core not available"})),
             );
         };
 
+        // Submit all to the core in one lock pass; update mempool metrics once.
         let mut accepted: usize = 0;
-        core_runner.with_node(|node| {
+        
+        runner_arc.with_node(|node| {
             for stx in parsed {
                 // ignore per-tx error here; inclusion/rejection is decided downstream
                 let _ = node.submit_signed_tx(stx);
@@ -1198,7 +1243,7 @@ async fn post_tx_batch(
                 crate::metrics::EEZO_MEMPOOL_BYTES.set(mempool_bytes as i64);
             }
         }).await;
-
+        
         return (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1305,6 +1350,7 @@ async fn get_account(
     // On pq44-runtime, prefer the ledger as the source of truth
     #[cfg(feature = "pq44-runtime")]
     {
+        // Check which runner is active and use it for account lookup
         if let Some(core_runner) = &state.core_runner {
             let (bal, nonce) = core_runner
                 .with_node(|node| {
@@ -1318,10 +1364,24 @@ async fn get_account(
                 nonce: nonce.to_string(),
             };
             return (StatusCode::OK, Json(serde_json::json!(view)));
+        } else if let Some(dag_runner) = &state.dag_runner { // New check for DagRunner
+            let (bal, nonce) = dag_runner
+                .with_node(|node| {
+                    let acct = node.accounts.get(&ledger_addr);
+                    (acct.balance, acct.nonce)
+                })
+                .await;
+
+            let view = AccountView {
+                balance: bal.to_string(),
+                nonce: nonce.to_string(),
+            };
+            return (StatusCode::OK, Json(serde_json::json!(view)));
         }
+        // Fall through to node-level accounts if no runner is present
     }
 
-    // Fallback: node-level accounts (non-pq44-runtime or if core_runner not available)
+    // Fallback: node-level accounts (non-pq44-runtime or if no runner available)
     let normalized_addr = format!("0x{}", hex::encode(ledger_addr.as_bytes()));
     let (bal, nonce) = state.accounts.get(&normalized_addr).await;
     let view = AccountView {
@@ -1366,9 +1426,17 @@ async fn post_faucet(
     // For pq44-runtime: credit the real ledger accounts (used by tx validation)
     #[cfg(feature = "pq44-runtime")]
     {
+        // Check which runner is active and use it to credit the node's ledger
         if let Some(core_runner) = &state.core_runner {
             let addr_copy = ledger_addr;
             core_runner
+                .with_node(move |node| {
+                    node.dev_faucet_credit(addr_copy, amount as u128);
+                })
+                .await;
+        } else if let Some(dag_runner) = &state.dag_runner { // New check for DagRunner
+            let addr_copy = ledger_addr;
+            dag_runner
                 .with_node(move |node| {
                     node.dev_faucet_credit(addr_copy, amount as u128);
                 })
@@ -1841,39 +1909,6 @@ fn write_identity_files(
     std::fs::write(legacy_path, &json).ok();
     Ok(())
 }
-
-// t36: removed legacy demo_propose; HotStuff route is no longer available
-// #[cfg(feature = "pq44-runtime")]
-// async fn demo_propose(State(state): State<AppState>) -> (StatusCode, &'static str) {
-//     // Build a real header timestamp;
-// let now_ms = std::time::SystemTime::now()
-//         .duration_since(std::time::SystemTime::UNIX_EPOCH)
-//         .unwrap_or(std::time::Duration::ZERO)
-//         .as_millis() as u64;
-// let header = BlockHeader {
-//         // required fields (match current ledger struct)
-//         prev_hash:    [0u8; 32],
-//         height:       0,
-//         tx_root:      [0u8; 32],
-//         fee_total:    0,
-//         timestamp_ms: now_ms,
-//         tx_count:     0,
-//         // this field is required by your build;
-// // set zeroes
-//         qc_hash:      [0u8; 32],
-//         // feature-gated extras
-//         #[cfg(feature = "eth-ssz")]
-//         tx_root_v2:   [0u8; 32],
-//     };
-
-//     // Go through the runner helper (keeps the propose path uniform).
-// // consensus_runner::propose_header(
-// //         &state.hs,
-// //         header,
-// //         eezo_ledger::consensus_msg::ValidatorId(0),
-// //     );
-// // (StatusCode::OK, "proposed")
-// // }
 
 // Add the dev-only anchor seeding handler
 #[allow(dead_code)]
@@ -2494,9 +2529,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // T36.2/5: construct SingleNode and start the deterministic slot runner
-    // ── variant A: with persistence → pass DB handle so checkpoints use real roots
+    // 3️⃣a) persistence-enabled variant (Refactored to return (core_runner, dag_runner))
     #[cfg(all(feature = "pq44-runtime", feature = "persistence"))]
-    let core_runner: Option<Arc<CoreRunnerHandle>> = {
+    let (core_runner, dag_runner): (Option<Arc<CoreRunnerHandle>>, Option<Arc<DagRunnerHandle>>) = {
         // Build runtime cfg from env (with safe defaults)
         let mut cfg = SingleNodeCfg {
             chain_id, // already parsed earlier
@@ -2516,16 +2551,16 @@ async fn main() -> anyhow::Result<()> {
         // Load (or create in dev) the node keys via wallet (ML-DSA-44)
         let keydir = std::env::var("EEZO_KEYDIR")
 		    .map(std::path::PathBuf::from)
-			.unwrap_or_else(|_| {
+			.unwrap_or_else(|| {
 				let mut p = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
 				p.push(".eezo/keys");
 				p
 			});
         let (pk, sk) = eezo_wallet::node_keys::load_or_create_mldsa44(&keydir, true)
-		    .map_err(|e| anyhow::anyhow!("wallet key load failed: {e}"))?;
+		    .map_err(|e| anyhow::anyow!("wallet key load failed: {e}"))?;
         let single: SingleNode = SingleNode::new(cfg, sk, pk);
 
-        // Read consensus mode from env and log it (for now we always run Hotstuff)
+        // Read consensus mode from env and log it
         let consensus_mode = env_consensus_mode();
         log::info!("consensus: EEZO_CONSENSUS_MODE={:?}", consensus_mode);
 
@@ -2533,14 +2568,22 @@ async fn main() -> anyhow::Result<()> {
         let tick_ms: u64 = env_u64("EEZO_CONSENSUS_TICK_MS", 200);
         let rollback_on_error = true;
 
-        // NEW: pass the DB (Some(persistence.clone())) so T36.5 can read real roots/timestamp
-        let runner = CoreRunnerHandle::spawn(single, Some(persistence.clone()), tick_ms, rollback_on_error);
-        Some(runner)
+        match consensus_mode {
+            ConsensusMode::Hotstuff => {
+                // NEW: pass the DB (Some(persistence.clone())) so T36.5 can read real roots/timestamp
+                let runner = CoreRunnerHandle::spawn(single, Some(persistence.clone()), tick_ms, rollback_on_error);
+                (Some(runner), None)
+            }
+            ConsensusMode::Dag => {
+                let dag = DagRunnerHandle::spawn(single);
+                (None, Some(dag))
+            }
+        }
     };
 
-    // ── variant B: without persistence → keep the old call signature
+    // 3️⃣b) non-persistence variant (Refactored to return (core_runner, dag_runner))
     #[cfg(all(feature = "pq44-runtime", not(feature = "persistence")))]
-    let core_runner: Option<Arc<CoreRunnerHandle>> = {
+    let (core_runner, dag_runner): (Option<Arc<CoreRunnerHandle>>, Option<Arc<DagRunnerHandle>>) = {
         // Build runtime cfg from env (with safe defaults)
     let mut cfg = SingleNodeCfg {
         chain_id, // already parsed earlier
@@ -2575,9 +2618,22 @@ async fn main() -> anyhow::Result<()> {
 
         let tick_ms = env_u64("EEZO_CONSENSUS_TICK_MS", 200);
         let rollback_on_error = true;
-        let runner = CoreRunnerHandle::spawn(single, tick_ms, rollback_on_error);
-        Some(runner)
+
+        match consensus_mode {
+            ConsensusMode::Hotstuff => {
+                let runner = CoreRunnerHandle::spawn(single, None, tick_ms, rollback_on_error);
+                (Some(runner), None)
+            }
+            ConsensusMode::Dag => {
+                let dag = DagRunnerHandle::spawn(single);
+                (None, Some(dag))
+            }
+        }
     };
+    // 3️⃣c) Fallback for builds without pq44-runtime
+    #[cfg(not(feature = "pq44-runtime"))]
+    let (core_runner, dag_runner): (Option<Arc<CoreRunnerHandle>>, Option<Arc<DagRunnerHandle>>) = (None, None);
+
     // let hs: Arc<Mutex<eezo_ledger::HotStuff<StaticCertStore, consensus_runner::NodeLoopback>>> = {
     //     let certs = Arc::new(StaticCertStore::new());
     // consensus_runner::start_single_node_consensus(chain_id, certs)
@@ -2849,6 +2905,7 @@ async fn main() -> anyhow::Result<()> {
     }));
     let receipts = Arc::new(RwLock::new(HashMap::<String, Receipt>::new()));
 
+    // 4️⃣ Pass both handles into AppState
     let state = AppState {
         runtime_config: runtime_config.clone(),
         ready_flag: ready_flag.clone(),
@@ -2873,6 +2930,9 @@ async fn main() -> anyhow::Result<()> {
         // t36: consensus core runner handle (started in T36.2)
         #[cfg(feature = "pq44-runtime")]
         core_runner,
+        // T55.1: DAG runner handle (started in T55.1)
+        #[cfg(feature = "pq44-runtime")]
+        dag_runner,
         #[cfg(all(feature = "consensus-core-adapter", feature = "consensus-core-testing", not(feature = "pq44-runtime")))]
         core_runner: core_runner.clone(), // Clashes in name if features overlap
         #[cfg(all(feature = "consensus-core-adapter", feature = "consensus-core-testing", not(feature = "pq44-runtime")))]
@@ -3768,10 +3828,19 @@ async fn main() -> anyhow::Result<()> {
             // Stop consensus runner if it exists
             #[cfg(feature = "pq44-runtime")]
             if let Some(r) = state.core_runner.clone() {
-                log::info!("stopping consensus runner...");
+                log::info!("stopping core runner...");
     
                 r.stop().await;
-                log::info!("consensus runner stopped");
+                log::info!("core runner stopped");
+            }
+            // Stop DAG runner if it exists
+            #[cfg(feature = "pq44-runtime")]
+            if let Some(r) = state.dag_runner.clone() {
+                log::info!("stopping DAG runner...");
+    
+                // DagRunnerHandle::stop() is synchronous
+                r.stop();
+                log::info!("DAG runner stopped");
             }
 
             // Add a small delay to ensure cleanup completes
