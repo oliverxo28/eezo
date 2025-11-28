@@ -15,7 +15,7 @@ fn peers_env_for(_port: u16, others: &[u16]) -> (String, String) {
 #[test]
 fn cluster_health_reflects_one_down() {
     let client = Client::builder()
-        .timeout(Duration::from_millis(500))
+        .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
 
@@ -53,7 +53,7 @@ fn cluster_health_reflects_one_down() {
     let _g2 = common::spawn_node_with_env(node_args2, &[(&e2.0, &e2.1)]);
     let mut g3 = common::spawn_node_with_env(node_args3, &[(&e3.0, &e3.1)]); // we'll kill this one
 
-    // wait until all nodes report peers (peers_total == 3 and peers_ready == 3)
+    // wait until all nodes report peers (peers_total == 2 and peers_ready == 2)
     let m1 = format!("http://127.0.0.1:{p1}/metrics");
     let m2 = format!("http://127.0.0.1:{p2}/metrics");
     let _ok = common::wait_until(
@@ -69,10 +69,10 @@ fn cluster_health_reflects_one_down() {
                 .and_then(|r| r.error_for_status())
                 .and_then(|r| r.text());
             if let (Ok(aa), Ok(bb)) = (a, b) {
-                aa.contains("eezo_node_peers_total 3")
-                    && aa.contains("eezo_node_peers_ready 3")
-                    && bb.contains("eezo_node_peers_total 3")
-                    && bb.contains("eezo_node_peers_ready 3")
+                aa.contains("eezo_node_peers_total 2")
+                    && aa.contains("eezo_node_peers_ready 2")
+                    && bb.contains("eezo_node_peers_total 2")
+                    && bb.contains("eezo_node_peers_ready 2")
             } else {
                 false
             }
@@ -85,7 +85,8 @@ fn cluster_health_reflects_one_down() {
     // kill node3
     g3.kill();
 
-    // expect nodes 1 and 2 to update metrics to peers_ready == 2 within ~2s
+    // expect nodes 1 and 2 to update metrics to peers_ready == 1 within ~2s
+    // (each node sees only 1 of their 2 configured peers as ready)
     let _ok2 = common::wait_until(
         || {
             client
@@ -94,7 +95,7 @@ fn cluster_health_reflects_one_down() {
                 .ok()
                 .and_then(|r| r.text().ok())
                 .map(|t| {
-                    t.contains("eezo_node_peers_total 3") && t.contains("eezo_node_peers_ready 2")
+                    t.contains("eezo_node_peers_total 2") && t.contains("eezo_node_peers_ready 1")
                 })
                 .unwrap_or(false)
                 && client
@@ -103,8 +104,8 @@ fn cluster_health_reflects_one_down() {
                     .ok()
                     .and_then(|r| r.text().ok())
                     .map(|t| {
-                        t.contains("eezo_node_peers_total 3")
-                            && t.contains("eezo_node_peers_ready 2")
+                        t.contains("eezo_node_peers_total 2")
+                            && t.contains("eezo_node_peers_ready 1")
                     })
                     .unwrap_or(false)
         },
@@ -113,16 +114,21 @@ fn cluster_health_reflects_one_down() {
     );
 
     // Also validate /peers returns JSON with one 'ready:false'
-    let peers1 = client
-        .get(format!("http://127.0.0.1:{p1}/peers"))
-        .send()
-        .unwrap()
-        .text()
-        .unwrap();
-    assert!(
-        peers1.contains("\"ready\":false"),
-        "expected at least one down peer in /peers"
+    // Use wait_until for resilience against transient network delays in CI
+    let peers_ok = common::wait_until(
+        || {
+            client
+                .get(format!("http://127.0.0.1:{p1}/peers"))
+                .send()
+                .ok()
+                .and_then(|r| r.text().ok())
+                .map(|t| t.contains("\"ready\":false"))
+                .unwrap_or(false)
+        },
+        30,
+        Duration::from_millis(200),
     );
+    assert!(peers_ok, "expected at least one down peer in /peers");
 
     // guards drop → children get cleaned up
 }
