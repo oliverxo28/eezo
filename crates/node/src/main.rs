@@ -2679,7 +2679,7 @@ async fn main() -> anyhow::Result<()> {
 
         match consensus_mode {
             ConsensusMode::Hotstuff => {
-                let runner = CoreRunnerHandle::spawn(single, None, tick_ms, rollback_on_error);
+                let runner = CoreRunnerHandle::spawn(single, tick_ms, rollback_on_error);
                 (Some(runner), None)
             }
             ConsensusMode::Dag => {
