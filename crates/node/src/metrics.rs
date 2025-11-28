@@ -1072,3 +1072,87 @@ pub static EEZO_SIGPOOL_ACTIVE_THREADS: Lazy<IntGauge> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+// -----------------------------------------------------------------------------
+// T55.3 — DAG runner metrics
+// -----------------------------------------------------------------------------
+/// Gauge: DAG runner state
+/// 0 = absent (no DagRunnerHandle attached)
+/// 1 = disabled (stop flag set / runner stopping)
+/// 2 = running (active DAG loop)
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_RUNNER_STATE: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_runner_state",
+        "DAG runner state: 0=absent,1=disabled,2=running"
+    )
+    .unwrap()
+});
+
+/// Counter: how many times we've spawned a DAG runner in this process.
+/// This stays monotonic and helps detect restart loops.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_RUNNER_RESTARTS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_runner_restarts_total",
+        "Total DAG runner spawn() invocations in this process"
+    )
+    .unwrap()
+});
+
+// -----------------------------------------------------------------------------
+// T56.2 — DAG structure metrics
+// -----------------------------------------------------------------------------
+/// Total number of DAG vertices ever created in this process.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_VERTICES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_vertices_total",
+        "Total DAG vertices ever created in this process"
+    )
+    .unwrap()
+});
+
+/// Current number of DAG vertices stored in memory.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_VERTICES_CURRENT: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_vertices_current",
+        "Current number of DAG vertices stored in memory"
+    )
+    .unwrap()
+});
+
+/// Current number of DAG tips (vertices with no children).
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_TIPS_CURRENT: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_tips_current",
+        "Current number of DAG tips (vertices with no children)"
+    )
+    .unwrap()
+});
+// -----------------------------------------------------------------------------
+// T56.3 — DAG round/height observability
+// -----------------------------------------------------------------------------
+/// Gauge: maximum DAG round observed so far (local to this node).
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_ROUND_MAX: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_round_max",
+        "Maximum DAG round observed in this process (local, monotonic)"
+    )
+    .unwrap()
+});
+
+/// Gauge: maximum DAG height observed so far (local ledger height proxy).
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HEIGHT_MAX: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_height_max",
+        "Maximum DAG height observed in this process (local, monotonic)"
+    )
+    .unwrap()
+});
+
+

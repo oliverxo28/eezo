@@ -125,7 +125,7 @@ fn build_bridge_router() -> axum::Router<AppState> {
 		.route("/bridge/index", _get_bridge_get(_get_bridge_index))
         // put "latest" first so it doesn't get captured by :height
         .route("/bridge/header/latest", _get_bridge_get(_get_bridge_latest))
-        .route("/bridge/header/:height", _get_bridge_get(_get_bridge_by_height))
+        .route("/bridge/header/{height}", _get_bridge_get(_get_bridge_by_height))
 }
 
 #[cfg(not(feature = "checkpoints"))]
@@ -343,6 +343,8 @@ struct StatusView {
     git_sha: Option<String>,
     node_id: String,
     first_seen: u64,
+    // T55.3: expose which consensus mode is active ("Hotstuff" or "Dag")
+    consensus_mode: String,	
 }
 
 async fn status_handler(State(state): State<AppState>) -> Json<StatusView> {
@@ -361,6 +363,7 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusView> {
         git_sha: state.git_sha.map(|s| s.to_string()),
         node_id: state.identity.node_id.clone(),
         first_seen: state.identity.first_seen,
+		consensus_mode: format!("{:?}", state.consensus_mode),
     })
 }
 
@@ -396,6 +399,49 @@ async fn dag_status_handler() -> Json<DagStatusView> {
     Json(DagStatusView {
         mode: "none".to_string(),
         runner: "absent".to_string(),
+    })
+}
+
+// T56.1: small debug view of the in-memory DAG.
+#[derive(Serialize)]
+struct DagDebugView {
+    /// Total number of vertices currently stored in the DAG.
+    vertex_count: usize,
+    /// Raw vertex ids of current tips.
+    tips: Vec<u64>,
+    /// T56.3: max round / height observed in this node's DAG.
+    max_round: u64,
+    max_height: u64,
+}
+
+#[cfg(feature = "pq44-runtime")]
+async fn dag_debug_handler(State(state): State<AppState>) -> Json<DagDebugView> {
+    if let Some(runner) = state.dag_runner.as_ref() {
+        let snapshot = runner.debug_snapshot().await;
+        Json(DagDebugView {
+            vertex_count: snapshot.vertex_count,
+            tips: snapshot.tips,
+            max_round: snapshot.max_round,
+            max_height: snapshot.max_height,
+        })
+    } else {
+        // In Hotstuff mode, or if DAG is not wired, we just return an empty view.
+        Json(DagDebugView {
+            vertex_count: 0,
+            tips: Vec::new(),
+            max_round: 0,
+            max_height: 0,
+        })
+    }
+}
+
+#[cfg(not(feature = "pq44-runtime"))]
+async fn dag_debug_handler() -> Json<DagDebugView> {
+    Json(DagDebugView {
+        vertex_count: 0,
+        tips: Vec::new(),
+        max_round: 0,
+        max_height: 0,
     })
 }
 
@@ -817,6 +863,8 @@ struct AppState {
     core_runner: std::sync::Arc<CoreRunnerHandle>,
     #[cfg(all(feature = "consensus-core-adapter", feature = "consensus-core-testing", not(feature = "pq44-runtime")))]
     last_qc: std::sync::Arc<tokio::sync::Mutex<Option<Qc>>>,
+    // T55.3: track effective consensus mode for status/diagnostics
+    consensus_mode: ConsensusMode,	
 	// Bridge Alpha
 	chain_id: [u8; 20],
 	bridge_admin_pubkey: Option<Vec<u8>>,
@@ -2947,6 +2995,8 @@ async fn main() -> anyhow::Result<()> {
         core_runner: core_runner.clone(), // Clashes in name if features overlap
         #[cfg(all(feature = "consensus-core-adapter", feature = "consensus-core-testing", not(feature = "pq44-runtime")))]
         last_qc: last_qc.clone(),
+		// T55.3: record consensus mode in AppState so we can expose it via /status
+		consensus_mode: env_consensus_mode(),
 		// Bridge Alpha
 		chain_id,
 		bridge_admin_pubkey,
@@ -3144,23 +3194,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/config", get(config_handler))
         .route("/status", get(status_handler))
         .route("/head", get(head_handler))
-		.route("/status", get(status_handler))
         .route("/dag/status", get(dag_status_handler))
-        .route("/head", get(head_handler))
+        .route("/dag/debug", get(dag_debug_handler))
         // T30 tx endpoints
         .route("/tx", post(post_tx))
         .route("/tx_batch", post(post_tx_batch)) // <-- ADDED
-        .route("/tx/:hash", get(get_tx))
-        .route("/receipt/:hash", get(get_receipt))
-     
-           .route("/txpool", get(txpool_handler))
-        .route("/block/:height", get(block_handler))
-        .route("/account/:addr", get(get_account))
+        .route("/tx/{hash}", get(get_tx))
+        .route("/receipt/{hash}", get(get_receipt))
+        .route("/txpool", get(txpool_handler))
+        .route("/block/{height}", get(block_handler))
+        .route("/account/{addr}", get(get_account))
         .route("/faucet", post(post_faucet))
 		// T33 Bridge Alpha endpoints
 		.route("/bridge/mint", post(bridge::post_bridge_mint))
 		.route("/bridge/outbox", get(bridge::get_outbox))
-		.route("/bridge/outbox/:id", get(bridge::get_outbox_one))
+		.route("/bridge/outbox/{id}", get(bridge::get_outbox_one))
         .route("/_admin/degrade", get(admin_degrade))
         .route("/_admin/restore", get(admin_restore))
         .route("/_admin/peers",get(admin_peers_handler).post(admin_peers_update_handler))
@@ -3169,7 +3217,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/reload",post(reload_handler).get(reload_from_file_handler))
 		.route("/metrics", get(metrics_handler_any));
 
-    // --- DEV tools: admin surface (feature-gated) ---
 	// --- DEV tools: admin surface (feature-gated) ---
     #[cfg(feature = "dev-tools")]
     let app = app
