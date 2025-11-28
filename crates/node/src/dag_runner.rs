@@ -13,6 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use eezo_ledger::consensus::SingleNode;
+use eezo_ledger::tx_types::HasTxHash;
+use eezo_ledger::SignedTx;
 
 // -----------------------------------------------------------------------------
 // DAG vertex model
@@ -52,15 +54,6 @@ impl DagTxRef {
     pub fn new(hash: [u8; 32]) -> Self {
         Self { hash }
     }
-}
-
-/// T56.5: trait for "things that have a tx hash".
-/// We don't implement this here for any concrete type yet; that will be done
-/// alongside ledger / mempool integration. For now it lets us define a clean
-/// conversion helper from "real tx types" into DAG payloads.
-pub trait HasTxHash {
-    /// Return the canonical 32-byte transaction hash for this value.
-    fn tx_hash_bytes(&self) -> [u8; 32];
 }
 
 /// Structured payload for a DAG vertex.
@@ -110,6 +103,18 @@ impl DagPayload {
             .collect();
         DagPayload::TxHashes(refs)
     }
+}
+/// t56.7: debug-only helper to build a dag payload from real signed txs.
+///
+/// this is not wired into any live path yet (no /tx changes, no mempool
+/// changes, no dag runner behaviour changes). it just gives us a concrete
+/// function we can call later when we start feeding real txs into vertices.
+#[allow(dead_code)]
+pub fn build_dag_payload_from_signed_txs<I>(txs: I) -> DagPayload
+where
+    I: IntoIterator<Item = SignedTx>,
+{
+    DagPayload::from_hashed_txs(txs)
 }
 
 /// A DAG vertex.
@@ -419,3 +424,129 @@ impl DagRunnerHandle {
         self.dag.debug_snapshot().await
     }
 }
+
+// -----------------------------------------------------------------------------
+// tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// basic sanity check: empty store has no vertices or tips.
+    #[tokio::test]
+    async fn dag_store_starts_empty() {
+        let store = DagStore::new();
+
+        assert_eq!(store.len().await, 0);
+        assert!(store.tips().await.is_empty());
+
+        let snapshot = store.debug_snapshot().await;
+        assert_eq!(snapshot.vertex_count, 0);
+        assert!(snapshot.tips.is_empty());
+        assert_eq!(snapshot.max_round, 0);
+        assert_eq!(snapshot.max_height, 0);
+    }
+
+    /// inserting a root and then a child should update tips + max_round/height.
+    #[tokio::test]
+    async fn dag_store_inserts_update_tips_and_snapshot() {
+        let store = DagStore::new();
+
+        // insert a root vertex (no parents) at round=0, height=0
+        let root = store.insert_vertex(Vec::new(), 0, 0).await;
+        assert_eq!(root.meta.id, DagVertexId(0));
+
+        // after first insert: one vertex, tip is {0}
+        assert_eq!(store.len().await, 1);
+        let tips = store.tips().await;
+        assert_eq!(tips, vec![DagVertexId(0)]);
+
+        let snap1 = store.debug_snapshot().await;
+        assert_eq!(snap1.vertex_count, 1);
+        assert_eq!(snap1.tips, vec![0]);
+        assert_eq!(snap1.max_round, 0);
+        assert_eq!(snap1.max_height, 0);
+
+        // insert a child on top of the root at round=1, height=1
+        let child = store.insert_vertex(vec![root.meta.id], 1, 1).await;
+        assert_eq!(child.meta.id, DagVertexId(1));
+
+        // after second insert: two vertices, tip is now {1}
+        assert_eq!(store.len().await, 2);
+        let tips2 = store.tips().await;
+        assert_eq!(tips2, vec![DagVertexId(1)]);
+
+        let snap2 = store.debug_snapshot().await;
+        assert_eq!(snap2.vertex_count, 2);
+        assert_eq!(snap2.tips, vec![1]);
+        assert_eq!(snap2.max_round, 1);
+        assert_eq!(snap2.max_height, 1);
+    }
+
+    /// dag payload helpers should construct TxHashes payload correctly from raw hashes.
+    #[test]
+    fn dag_payload_from_tx_hashes_raw() {
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+
+        let payload = DagPayload::from_tx_hashes_raw(vec![h1, h2]);
+
+        match payload {
+            DagPayload::Empty => panic!("expected TxHashes payload, got Empty"),
+            DagPayload::TxHashes(ref refs) => {
+                assert_eq!(refs.len(), 2);
+                assert_eq!(refs[0].hash, h1);
+                assert_eq!(refs[1].hash, h2);
+            }
+        }
+    }
+
+    /// dag payload helpers should construct TxHashes payload correctly from DagTxRef values.
+    #[test]
+    fn dag_payload_from_tx_refs() {
+        let r1 = DagTxRef::new([3u8; 32]);
+        let r2 = DagTxRef::new([4u8; 32]);
+
+        let payload = DagPayload::from_tx_refs(vec![r1, r2]);
+
+        match payload {
+            DagPayload::Empty => panic!("expected TxHashes payload, got Empty"),
+            DagPayload::TxHashes(ref refs) => {
+                assert_eq!(refs.len(), 2);
+                assert_eq!(refs[0].hash, r1.hash);
+                assert_eq!(refs[1].hash, r2.hash);
+            }
+        }
+    }
+
+    /// dag payload helper should work with any type implementing HasTxHash.
+    #[test]
+    fn dag_payload_from_hashed_txs() {
+        #[derive(Clone)]
+        struct DummyTx {
+            hash: [u8; 32],
+        }
+
+        impl HasTxHash for DummyTx {
+            fn tx_hash_bytes(&self) -> [u8; 32] {
+                self.hash
+            }
+        }
+
+        let t1 = DummyTx { hash: [5u8; 32] };
+        let t2 = DummyTx { hash: [6u8; 32] };
+
+        let payload = DagPayload::from_hashed_txs(vec![t1, t2]);
+
+        match payload {
+            DagPayload::Empty => panic!("expected TxHashes payload, got Empty"),
+            DagPayload::TxHashes(ref refs) => {
+                assert_eq!(refs.len(), 2);
+                assert_eq!(refs[0].hash, [5u8; 32]);
+                assert_eq!(refs[1].hash, [6u8; 32]);
+            }
+        }
+    }
+}
+

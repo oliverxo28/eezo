@@ -54,6 +54,22 @@ impl SignedTx {
         blake3::hash(&self.to_bytes()).into()
     }
 }
+/// Canonical 32-byte transaction hash for DAG / node usage.
+///
+/// This trait is intentionally small and lives in the ledger crate so that
+/// dependents (like eezo-node) can talk about "tx-like things" without
+/// re-defining their own hashing traits.
+pub trait HasTxHash {
+    /// Return the canonical 32-byte hash for this transaction.
+    fn tx_hash_bytes(&self) -> [u8; 32];
+}
+impl HasTxHash for SignedTx {
+    fn tx_hash_bytes(&self) -> [u8; 32] {
+        // IMPORTANT: reuse the existing canonical ledger hash.
+        // Do NOT change the hashing scheme here.
+        self.hash()
+    }
+}
 
 /// Deterministic domain-bound bytes for signing/verifying.
 /// Format: b"EEZO-TX\0" || chain_id(20) || nonce(u64 LE) || amount(u128 LE) || fee(u128 LE) || to(20)
