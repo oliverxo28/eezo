@@ -516,6 +516,43 @@ async fn dag_block_preview_handler() -> Response {
         .into_response()
 }
 
+/// T63.0: GET /dag/block_dry_run
+///
+/// Execute the current DAG candidate in a sandbox (no commit).
+/// Returns per-tx success/failure and whether the entire block would apply cleanly.
+/// This is debug-only and does NOT modify the real chain state.
+#[cfg(feature = "pq44-runtime")]
+async fn dag_block_dry_run_handler(State(state): State<AppState>) -> Response {
+    if let Some(dag) = state.dag_runner.as_ref() {
+        match dag.block_dry_run().await {
+            Some(result) => (StatusCode::OK, Json(result)).into_response(),
+            None => {
+                // No candidate or no txs – return a small "empty" marker
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "status": "empty" })),
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "dag runner not active" })),
+        )
+            .into_response()
+    }
+}
+
+#[cfg(not(feature = "pq44-runtime"))]
+async fn dag_block_dry_run_handler() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({ "error": "pq44-runtime disabled" })),
+    )
+        .into_response()
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct NodeIdentity {
     node_id: String,
@@ -3333,6 +3370,7 @@ async fn main() -> anyhow::Result<()> {
 		.route("/dag/vertex/:id", get(dag_vertex_handler))
 		.route("/dag/candidate", get(dag_candidate_handler))
         .route("/dag/block_preview", get(dag_block_preview_handler))
+        .route("/dag/block_dry_run", get(dag_block_dry_run_handler))
         // T30 tx endpoints
         .route("/tx", post(post_tx))
         .route("/tx_batch", post(post_tx_batch)) // <-- ADDED
