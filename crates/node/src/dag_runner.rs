@@ -715,7 +715,7 @@ mod tests {
 
         // insert a root vertex (no parents) at round=0, height=0
         let root = store
-            .insert_vertex(Vec::new(), 0, 0, DagPayload::Empty)
+            .insert_vertex(Vec::new(), 0, 0)
             .await;
         assert_eq!(root.meta.id, DagVertexId(0));
 
@@ -732,7 +732,7 @@ mod tests {
 
         // insert a child on top of the root at round=1, height=1
         let child = store
-            .insert_vertex(vec![root.meta.id], 1, 1, DagPayload::Empty)
+            .insert_vertex(vec![root.meta.id], 1, 1)
             .await;
         assert_eq!(child.meta.id, DagVertexId(1));
 
