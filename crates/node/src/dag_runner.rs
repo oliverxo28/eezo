@@ -661,11 +661,16 @@ fn parse_signed_tx_from_envelope(bytes: &[u8]) -> Option<SignedTx> {
     let to = Address(to_arr);
 
     // Parse pubkey (hex string, may be empty for devnet)
+    //
+    // DEVNET WORKAROUND: When pubkey is empty (devnet mode), we use the sender's
+    // 'from' address bytes as a pseudo-pubkey. This is NOT cryptographically valid,
+    // but allows sender_from_pubkey_first20() to correctly derive the sender address
+    // for dry-run validation (nonce/balance checks). Signature verification is
+    // skipped in devnet mode via EEZO_DEV_ALLOW_UNSIGNED_TX=1.
     let pubkey: Vec<u8> = if env.pubkey.is_empty() {
-        // For devnet: if pubkey is empty, try to derive from 'from' address
         let from_hex = env.tx.from.strip_prefix("0x").unwrap_or(&env.tx.from);
         let from_bytes = hex::decode(from_hex).ok()?;
-        // Extend from bytes to at least 20 bytes for sender derivation
+        // Use from address bytes as pseudo-pubkey for sender derivation
         if from_bytes.len() >= 20 {
             from_bytes
         } else {
@@ -986,44 +991,26 @@ impl DagRunnerHandle {
             return None;
         }
 
-        // 4) Parse tx bytes into SignedTx structures and decode preview info
-        let mut parsed_txs: Vec<(TxHash, SignedTx, DagBlockPreviewTx)> = Vec::new();
+        // 4) Parse tx bytes and prepare for execution
+        // We use an enum to distinguish parsed txs from parse failures
+        enum ParsedTxOrError {
+            Ok(SignedTx, DagBlockPreviewTx),
+            ParseError(DagBlockPreviewTx),
+        }
+
+        let mut parsed_entries: Vec<ParsedTxOrError> = Vec::new();
         for (hash, bytes) in raw_bytes {
-            // Decode for preview display
+            // Decode for preview display (always works, fills in what it can)
             let preview = decode_tx_for_preview(&hash, &bytes);
 
             // Try to parse into a ledger SignedTx for execution
             match parse_signed_tx_from_envelope(&bytes) {
-                Some(stx) => parsed_txs.push((hash, stx, preview)),
-                None => {
-                    // If parsing fails, we'll report it as a failed tx
-                    parsed_txs.push((
-                        hash,
-                        // Create a dummy SignedTx that will fail validation
-                        SignedTx {
-                            core: TxCore {
-                                to: Address([0u8; 20]),
-                                amount: 0,
-                                fee: 0,
-                                nonce: 0,
-                            },
-                            pubkey: Vec::new(),
-                            sig: Vec::new(),
-                        },
-                        DagBlockPreviewTx {
-                            hash: preview.hash,
-                            from: preview.from,
-                            to: preview.to,
-                            amount: preview.amount,
-                            fee: preview.fee,
-                            nonce: preview.nonce,
-                        },
-                    ));
-                }
+                Some(stx) => parsed_entries.push(ParsedTxOrError::Ok(stx, preview)),
+                None => parsed_entries.push(ParsedTxOrError::ParseError(preview)),
             }
         }
 
-        if parsed_txs.is_empty() {
+        if parsed_entries.is_empty() {
             return None;
         }
 
@@ -1034,24 +1021,38 @@ impl DagRunnerHandle {
         };
 
         // 6) Execute each tx sequentially on the shadow state
-        let mut tx_results: Vec<DagBlockDryRunTxResult> = Vec::with_capacity(parsed_txs.len());
+        let mut tx_results: Vec<DagBlockDryRunTxResult> = Vec::with_capacity(parsed_entries.len());
         let mut txs_ok = 0usize;
         let mut txs_failed = 0usize;
 
-        for (_hash, stx, preview) in parsed_txs {
-            // Try to derive sender from pubkey
-            let sender = sender_from_pubkey_first20(&stx);
+        for entry in parsed_entries {
+            let (success, error, preview) = match entry {
+                // Parse failed - report error immediately without trying to execute
+                ParsedTxOrError::ParseError(preview) => {
+                    txs_failed += 1;
+                    (false, Some("failed to parse transaction envelope".to_string()), preview)
+                }
+                // Parse succeeded - try to validate and apply
+                ParsedTxOrError::Ok(stx, preview) => {
+                    // Try to derive sender from pubkey
+                    let sender = sender_from_pubkey_first20(&stx);
 
-            let (success, error) = match sender {
-                Some(sender_addr) => {
-                    // Validate stateful rules (nonce, balance)
-                    match validate_tx_stateful(&shadow_accounts, sender_addr, &stx.core) {
-                        Ok(()) => {
-                            // Apply to shadow state
-                            match apply_tx(&mut shadow_accounts, &mut shadow_supply, sender_addr, &stx.core) {
+                    let (success, error) = match sender {
+                        Some(sender_addr) => {
+                            // Validate stateful rules (nonce, balance)
+                            match validate_tx_stateful(&shadow_accounts, sender_addr, &stx.core) {
                                 Ok(()) => {
-                                    txs_ok += 1;
-                                    (true, None)
+                                    // Apply to shadow state
+                                    match apply_tx(&mut shadow_accounts, &mut shadow_supply, sender_addr, &stx.core) {
+                                        Ok(()) => {
+                                            txs_ok += 1;
+                                            (true, None)
+                                        }
+                                        Err(e) => {
+                                            txs_failed += 1;
+                                            (false, Some(format!("{}", e)))
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     txs_failed += 1;
@@ -1059,15 +1060,12 @@ impl DagRunnerHandle {
                                 }
                             }
                         }
-                        Err(e) => {
+                        None => {
                             txs_failed += 1;
-                            (false, Some(format!("{}", e)))
+                            (false, Some("invalid sender (cannot derive from pubkey)".to_string()))
                         }
-                    }
-                }
-                None => {
-                    txs_failed += 1;
-                    (false, Some("invalid sender (cannot derive from pubkey)".to_string()))
+                    };
+                    (success, error, preview)
                 }
             };
 
