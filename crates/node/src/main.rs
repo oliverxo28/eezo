@@ -1172,11 +1172,26 @@ async fn post_tx(
                 .await;
                 true        
         } else if state.dag_runner.is_some() {
-            // DAG mode does not yet implement with_node; return error for now
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "DAG mode tx submission not yet implemented"})),
-            );
+            // DAG mode: Submit tx to the shared mempool for shadow payload sampling.
+            // This is read-only from consensus perspective - we just make txs available
+            // for the DAG runner to sample from when building vertices.
+            let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+            match state.mempool.submit(ip, hash32, raw).await {
+                Ok(()) => {
+                    #[cfg(feature = "metrics")]
+                    {
+                        crate::metrics::EEZO_MEMPOOL_LEN.set(state.mempool.len().await as i64);
+                    }
+                    true
+                }
+                Err(e) => {
+                    log::debug!("dag mempool submit error: {}", e);
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({"error": format!("mempool submit error: {}", e)})),
+                    );
+                }
+            }
         } else {
             false
         };
