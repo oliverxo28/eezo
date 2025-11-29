@@ -18,8 +18,8 @@ use tokio::sync::Mutex;
 use eezo_ledger::consensus::SingleNode;
 use eezo_ledger::tx_types::HasTxHash;
 use eezo_ledger::SignedTx;
-use eezo_ledger::{Accounts, Address, Supply, TxCore};
-use eezo_ledger::tx::{validate_tx_stateful, apply_tx, sender_from_pubkey_first20, TxStateError};
+use eezo_ledger::{Address, TxCore};
+use eezo_ledger::tx::{validate_tx_stateful, apply_tx, sender_from_pubkey_first20};
 use crate::mempool::{SharedMempool, TxHash};
 
 // -----------------------------------------------------------------------------
