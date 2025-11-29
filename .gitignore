@@ -31,3 +31,7 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Test database artifacts
+t29_9-*/
+**/t29_9-*/
