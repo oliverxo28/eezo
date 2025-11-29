@@ -321,6 +321,23 @@ impl Mempool {
             .map(|entry| entry.hash)
             .collect()
     }
+
+    /// Return raw bytes for the given tx hashes, in the same order as the input.
+    ///
+    /// This is debug/inspection only; it does NOT remove entries or change any status.
+    /// Used by DAG block preview to fetch tx data for decoding.
+    pub fn get_bytes_for_hashes(&self, hashes: &[TxHash]) -> Vec<(TxHash, Arc<Vec<u8>>)> {
+        let mut out = Vec::with_capacity(hashes.len());
+        'outer: for h in hashes {
+            for entry in self.queue.iter() {
+                if &entry.hash == h {
+                    out.push((entry.hash, Arc::clone(&entry.bytes)));
+                    continue 'outer;
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Concurrent wrapper used by the HTTP layer & proposer.
@@ -386,6 +403,15 @@ impl SharedMempool {
     pub async fn len(&self) -> usize {
         let g = self.0.lock().await;
         g.len()
+    }
+
+    /// Return raw bytes for the given tx hashes, in the same order as the input.
+    ///
+    /// This is debug/inspection only; it does NOT remove entries or change any status.
+    /// Used by DAG block preview to fetch tx data for decoding.
+    pub async fn get_bytes_for_hashes(&self, hashes: &[TxHash]) -> Vec<(TxHash, Arc<Vec<u8>>)> {
+        let g = self.0.lock().await;
+        g.get_bytes_for_hashes(hashes)
     }
 }
 
@@ -622,5 +648,38 @@ mod tests {
         assert_eq!(hashes_all[0], h(1));
         assert_eq!(hashes_all[1], h(2));
         assert_eq!(hashes_all[2], h(3));
+    }
+
+    #[tokio::test]
+    async fn get_bytes_for_hashes_returns_matching_entries() {
+        let mp = SharedMempool::new(Mempool::new(4, 10_000, 10, 600));
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Submit txs with known bytes
+        let bytes1 = vec![1u8, 2, 3];
+        let bytes2 = vec![4u8, 5, 6];
+        let bytes3 = vec![7u8, 8, 9];
+        mp.submit(ip, h(1), bytes1.clone()).await.unwrap();
+        mp.submit(ip, h(2), bytes2.clone()).await.unwrap();
+        mp.submit(ip, h(3), bytes3.clone()).await.unwrap();
+
+        // Query a subset of hashes
+        let result = mp.get_bytes_for_hashes(&[h(1), h(3)]).await;
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, h(1));
+        assert_eq!(*result[0].1, bytes1);
+        assert_eq!(result[1].0, h(3));
+        assert_eq!(*result[1].1, bytes3);
+
+        // Query with a hash that doesn't exist
+        let unknown = h(99);
+        let result2 = mp.get_bytes_for_hashes(&[h(2), unknown]).await;
+        // Only h(2) should be returned since h(99) doesn't exist
+        assert_eq!(result2.len(), 1);
+        assert_eq!(result2[0].0, h(2));
+        assert_eq!(*result2[0].1, bytes2);
+
+        // Mempool unchanged (read-only)
+        assert_eq!(mp.len().await, 3);
     }
 }

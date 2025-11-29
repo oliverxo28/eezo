@@ -450,6 +450,33 @@ pub struct DagBlockCandidateDebug {
     pub tx_hashes: Vec<String>,
 }
 
+/// T62.0: decoded transaction info for block preview.
+///
+/// Contains a subset of human-readable fields decoded from a SignedTxEnvelope.
+/// This is debug-only and does not change consensus or real block production.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DagBlockPreviewTx {
+    pub hash: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub amount: Option<String>,
+    pub fee: Option<String>,
+    pub nonce: Option<u64>,
+}
+
+/// T62.0: synthetic "block preview" from the current DAG candidate + mempool.
+///
+/// This is debug-only and does NOT commit anything to the ledger.
+/// It answers: "If we built a block from the current DAG candidate right now,
+/// what would that block look like (with decoded tx fields)?"
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DagBlockPreview {
+    pub vertex_id: u64,
+    pub round: u64,
+    pub height: u64,
+    pub txs: Vec<DagBlockPreviewTx>,
+}
+
 impl DagPayloadDebug {
     fn from_payload(payload: &DagPayload) -> Self {
         match payload {
@@ -490,6 +517,60 @@ fn hash_to_hex(hash: &[u8; 32]) -> String {
         let _ = write!(&mut s, "{:02x}", b);
     }
     s
+}
+
+// -----------------------------------------------------------------------------
+// T62.0: SignedTxEnvelope decoding for block preview
+// -----------------------------------------------------------------------------
+
+/// Minimal mirror of the TransferTx type from main.rs for decoding.
+/// Only used internally for block preview deserialization.
+#[derive(serde::Deserialize)]
+struct TransferTxPreview {
+    from: String,
+    to: String,
+    amount: String,
+    fee: String,
+    nonce: String,
+}
+
+/// Minimal mirror of the SignedTxEnvelope type from main.rs for decoding.
+/// Only used internally for block preview deserialization.
+#[derive(serde::Deserialize)]
+struct SignedTxEnvelopePreview {
+    tx: TransferTxPreview,
+}
+
+/// Decode raw tx bytes into a DagBlockPreviewTx for the debug endpoint.
+///
+/// If decoding fails, returns an entry with only the hash filled in.
+fn decode_tx_for_preview(hash: &[u8; 32], bytes: &[u8]) -> DagBlockPreviewTx {
+    let hash_hex = hash_to_hex(hash);
+
+    match serde_json::from_slice::<SignedTxEnvelopePreview>(bytes) {
+        Ok(env) => {
+            let nonce = env.tx.nonce.parse::<u64>().ok();
+            DagBlockPreviewTx {
+                hash: hash_hex,
+                from: Some(env.tx.from),
+                to: Some(env.tx.to),
+                amount: Some(env.tx.amount),
+                fee: Some(env.tx.fee),
+                nonce,
+            }
+        }
+        Err(_) => {
+            // Decoding failed; return entry with only the hash
+            DagBlockPreviewTx {
+                hash: hash_hex,
+                from: None,
+                to: None,
+                amount: None,
+                fee: None,
+                nonce: None,
+            }
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -679,6 +760,63 @@ impl DagRunnerHandle {
     /// built from the current DAG tip.
     pub async fn latest_candidate_debug(&self) -> Option<DagBlockCandidateDebug> {
         self.dag.latest_candidate_debug().await
+    }
+
+    /// T62.0: Build a synthetic "block preview" from the current DAG candidate.
+    ///
+    /// This does NOT commit anything; it only inspects the DAG + mempool.
+    /// Returns None if there is no candidate or no tx hashes in the candidate.
+    pub async fn block_preview(&self) -> Option<DagBlockPreview> {
+        // 1) Get the current candidate from DAG (same as /dag/candidate)
+        let candidate = self.dag.latest_candidate_debug().await?;
+
+        // If there are no tx hashes in the candidate, return None
+        if candidate.tx_hashes.is_empty() {
+            return None;
+        }
+
+        // 2) Convert hex strings back to raw TxHash bytes for mempool lookup
+        let hashes: Vec<crate::mempool::TxHash> = candidate
+            .tx_hashes
+            .iter()
+            .filter_map(|hex_str| {
+                let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+                let bytes = hex::decode(stripped).ok()?;
+                if bytes.len() != 32 {
+                    return None;
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Some(arr)
+            })
+            .collect();
+
+        if hashes.is_empty() {
+            return None;
+        }
+
+        // 3) Fetch raw bytes from mempool for these hashes
+        let raw_bytes = self.mempool.get_bytes_for_hashes(&hashes).await;
+
+        // 4) Decode each tx and build DagBlockPreviewTx entries
+        let txs: Vec<DagBlockPreviewTx> = raw_bytes
+            .into_iter()
+            .map(|(hash, bytes)| {
+                decode_tx_for_preview(&hash, &bytes)
+            })
+            .collect();
+
+        // If no txs were found in mempool (already drained), return None
+        if txs.is_empty() {
+            return None;
+        }
+
+        Some(DagBlockPreview {
+            vertex_id: candidate.vertex_id,
+            round: candidate.round,
+            height: candidate.height,
+            txs,
+        })
     }
 }
 
@@ -898,5 +1036,47 @@ mod tests {
 
         // mempool is read-only: still has 3 entries
         assert_eq!(mempool.len().await, 3);
+    }
+
+    /// T62.0: test decode_tx_for_preview with valid JSON
+    #[test]
+    fn decode_tx_for_preview_valid_envelope() {
+        let hash = h(42);
+        let envelope_json = r#"{
+            "tx": {
+                "from": "0x1234",
+                "to": "0x5678",
+                "amount": "1000",
+                "fee": "10",
+                "nonce": "5",
+                "chain_id": "0x01"
+            },
+            "pubkey": "",
+            "sig": ""
+        }"#;
+        let result = decode_tx_for_preview(&hash, envelope_json.as_bytes());
+
+        assert_eq!(result.hash, hash_to_hex(&hash));
+        assert_eq!(result.from, Some("0x1234".to_string()));
+        assert_eq!(result.to, Some("0x5678".to_string()));
+        assert_eq!(result.amount, Some("1000".to_string()));
+        assert_eq!(result.fee, Some("10".to_string()));
+        assert_eq!(result.nonce, Some(5));
+    }
+
+    /// T62.0: test decode_tx_for_preview with invalid JSON
+    #[test]
+    fn decode_tx_for_preview_invalid_envelope() {
+        let hash = h(99);
+        let invalid_json = b"not valid json";
+        let result = decode_tx_for_preview(&hash, invalid_json);
+
+        // Should return entry with only hash filled
+        assert_eq!(result.hash, hash_to_hex(&hash));
+        assert!(result.from.is_none());
+        assert!(result.to.is_none());
+        assert!(result.amount.is_none());
+        assert!(result.fee.is_none());
+        assert!(result.nonce.is_none());
     }
 }
