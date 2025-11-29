@@ -12,8 +12,8 @@ use std::sync::{
 use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 use std::env;
-use std::io::ErrorKind; // <--- ADDED IMPORT
-use std::mem; // <--- ADDED IMPORT for mem::take
+use std::io::ErrorKind; 
+use std::mem; 
 
 use eezo_ledger::consensus::SingleNode;
 // --- UPDATED: Make sure consensus_api imports are correct ---
@@ -21,6 +21,44 @@ use eezo_ledger::consensus_api::{SlotOutcome, NoOpReason};
 // --- END UPDATE ---\
 // --- FIX: Import Block ---\
 use eezo_ledger::Block; // Keep this import, as we'll need it to reconstruct the Block
+
+/// T60.0 — helper: log a compact summary of block tx hashes.
+/// This does **not** change behaviour; it only logs.
+fn log_block_shadow_debug(prefix: &str, height: u64, blk_opt: &Option<Block>) {
+    if let Some(blk) = blk_opt {
+        let tx_count = blk.txs.len();
+        if tx_count == 0 {
+            log::debug!("{}: height={} txs=0", prefix, height);
+            return;
+        }
+
+        // Sample up to first 8 tx hashes; log 4-byte prefixes to keep logs short.
+        let sample: Vec<[u8; 4]> = blk
+            .txs
+            .iter()
+            .take(8)
+            .map(|tx| {
+                let h = tx.hash();
+                [h[0], h[1], h[2], h[3]]
+            })
+            .collect();
+
+        log::debug!(
+            "{}: height={} txs={} sample_tx_hash_prefixes={:?}",
+            prefix,
+            height,
+            tx_count,
+            sample,
+        );
+    } else {
+        log::debug!(
+            "{}: height={} blk_opt=None (no last_committed_header/txs yet)",
+            prefix,
+            height
+        );
+    }
+}
+
 // --- T54 executor wiring ---
 use crate::executor::{Executor, ExecInput};
 use crate::executor::{SingleExecutor};
@@ -316,6 +354,10 @@ impl CoreRunnerHandle {
                             }
                         }
                         // --- END METRICS ---
+
+                        // T60.0: block-only shadow tx hash summary (prep for DAG compare)
+                        log_block_shadow_debug("dag_shadow_block", height, &blk_opt);
+
                         // update committed height gauge and mempool metrics
                         #[cfg(feature = "metrics")]
                         {
@@ -872,6 +914,9 @@ impl CoreRunnerHandle {
                             }
                         }
                         // --- END METRICS ---
+
+                        // T60.0: block-only shadow tx hash summary (prep for DAG compare)
+                        log_block_shadow_debug("dag_shadow_block", height, &blk_opt);
 
                         // update committed height gauge
                         #[cfg(feature = "metrics")]

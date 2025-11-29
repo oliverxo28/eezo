@@ -1,5 +1,7 @@
 // crates/node/src/dag_runner.rs
 // T56.0–T56.5 — DAG vertex model + in-memory DAG store (skeleton, no tx flow yet).
+// T58.0 — Store shadow payload in DAG vertices instead of just logging
+// T58.1 — Add /dag/vertex/{id} debug endpoint
 
 #![cfg(feature = "pq44-runtime")]
 
@@ -105,6 +107,7 @@ impl DagPayload {
         DagPayload::TxHashes(refs)
     }
 }
+
 /// t57.0: build a "shadow" dag payload from the current mempool view.
 ///
 /// this is read-only: it does not remove txs, does not affect ordering,
@@ -195,14 +198,15 @@ impl DagStore {
         }
     }
 
-    /// Insert a new vertex with the given parents, round, and height.
+    /// Insert a new vertex with the given parents, round, height and payload.
     ///
-    /// For T56.x this uses an empty payload and returns the constructed vertex.
-    pub async fn insert_vertex(
+    /// T62.x: payload is now supplied by the caller (e.g. tx hashes from mempool).
+    pub async fn insert_vertex_with_payload(
         &self,
         parent_ids: Vec<DagVertexId>,
         round: u64,
         height: u64,
+        payload: DagPayload,
     ) -> DagVertex {
         let mut inner = self.inner.lock().await;
 
@@ -222,8 +226,7 @@ impl DagStore {
                 parent_ids: parent_ids.clone(),
                 created_at_unix,
             },
-            // T56.4: all vertices use an empty payload for now.
-            payload: DagPayload::Empty,
+            payload,
         };
 
         // Insert vertex.
@@ -272,6 +275,21 @@ impl DagStore {
         vertex
     }
 
+    /// Insert a new vertex with the given parents, round, and height.
+    ///
+    /// For callers that don't care about payload yet, this keeps the
+    /// old behaviour of using an empty payload.
+    pub async fn insert_vertex(
+        &self,
+        parent_ids: Vec<DagVertexId>,
+        round: u64,
+        height: u64,
+    ) -> DagVertex {
+        self
+            .insert_vertex_with_payload(parent_ids, round, height, DagPayload::Empty)
+            .await
+    }
+
     /// Get a vertex by id, if present.
     pub async fn get_vertex(&self, id: DagVertexId) -> Option<DagVertex> {
         let inner = self.inner.lock().await;
@@ -308,6 +326,80 @@ impl DagStore {
             max_height: inner.max_height,
         }
     }
+
+    /// T58.1: Return a debug view of a single vertex, if it exists.
+    pub async fn vertex_debug(&self, id: DagVertexId) -> Option<DagVertexDebug> {
+        let inner = self.inner.lock().await;
+        inner.vertices.get(&id).map(DagVertexDebug::from_vertex)
+    }
+
+    /// T59.0: build a synthetic "block candidate" view from a single vertex.
+    pub async fn candidate_debug_for_vertex(
+        &self,
+        id: DagVertexId,
+    ) -> Option<DagBlockCandidateDebug> {
+        let inner = self.inner.lock().await;
+        let v = inner.vertices.get(&id)?;
+
+        let tx_hashes = match &v.payload {
+            DagPayload::Empty => Vec::new(),
+            DagPayload::TxHashes(ref refs) => {
+                refs.iter().map(|r| hash_to_hex(&r.hash)).collect()
+            }
+        };
+
+        Some(DagBlockCandidateDebug {
+            vertex_id: v.meta.id.0,
+            round: v.meta.round,
+            height: v.meta.height,
+            tx_hashes,
+        })
+    }
+
+    /// T59.0: pick a "best-effort" latest candidate from current DAG tips.
+    ///
+    /// preference:
+    ///   * if exactly one tip exists → use that tip
+    ///   * if multiple tips → choose the one with the largest id
+    ///   * if no tips but vertices exist → choose the vertex with the largest id
+    pub async fn latest_candidate_debug(&self) -> Option<DagBlockCandidateDebug> {
+        let inner = self.inner.lock().await;
+
+        if inner.vertices.is_empty() {
+            return None;
+        }
+
+        let chosen_id = if inner.tips.len() == 1 {
+            *inner.tips.iter().next().unwrap()
+        } else if !inner.tips.is_empty() {
+            *inner.tips
+                .iter()
+                .max_by_key(|DagVertexId(id)| *id)
+                .unwrap()
+        } else {
+            *inner
+                .vertices
+                .keys()
+                .max_by_key(|DagVertexId(id)| *id)
+                .unwrap()
+        };
+
+        let v = inner.vertices.get(&chosen_id)?;
+
+        let tx_hashes = match &v.payload {
+            DagPayload::Empty => Vec::new(),
+            DagPayload::TxHashes(ref refs) => {
+                refs.iter().map(|r| hash_to_hex(&r.hash)).collect()
+            }
+        };
+
+        Some(DagBlockCandidateDebug {
+            vertex_id: v.meta.id.0,
+            round: v.meta.round,
+            height: v.meta.height,
+            tx_hashes,
+        })
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -323,6 +415,81 @@ pub struct DagDebugSnapshot {
     /// T56.3: observability of DAG logical progression.
     pub max_round: u64,
     pub max_height: u64,
+}
+
+// -----------------------------------------------------------------------------
+// T58.1: Debug vertex DTO for /dag/vertex/{id}
+// -----------------------------------------------------------------------------
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DagPayloadDebug {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_hashes: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DagVertexDebug {
+    pub id: u64,
+    pub round: u64,
+    pub height: u64,
+    pub parent_ids: Vec<u64>,
+    pub created_at_unix: u64,
+    pub payload: DagPayloadDebug,
+}
+/// T59.0: synthetic "block candidate" view derived from a single DAG vertex.
+///
+/// this is debug-only and not wired into real block production. it answers:
+/// "if we built a block from this vertex, which tx hashes would it contain?"
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DagBlockCandidateDebug {
+    pub vertex_id: u64,
+    pub round: u64,
+    pub height: u64,
+    /// ordered list of tx hashes (hex "0x..." strings) from the vertex payload.
+    pub tx_hashes: Vec<String>,
+}
+
+impl DagPayloadDebug {
+    fn from_payload(payload: &DagPayload) -> Self {
+        match payload {
+            DagPayload::Empty => DagPayloadDebug {
+                kind: "empty".to_string(),
+                tx_hashes: None,
+            },
+            DagPayload::TxHashes(ref refs) => {
+                let hashes = refs.iter().map(|r| hash_to_hex(&r.hash)).collect();
+                DagPayloadDebug {
+                    kind: "tx_hashes".to_string(),
+                    tx_hashes: Some(hashes),
+                }
+            }
+        }
+    }
+}
+
+impl DagVertexDebug {
+    fn from_vertex(v: &DagVertex) -> Self {
+        DagVertexDebug {
+            id: v.meta.id.0,
+            round: v.meta.round,
+            height: v.meta.height,
+            parent_ids: v.meta.parent_ids.iter().map(|p| p.0).collect(),
+            created_at_unix: v.meta.created_at_unix,
+            payload: DagPayloadDebug::from_payload(&v.payload),
+        }
+    }
+}
+
+/// Hex-encode a 32-byte hash as `0x...` for debug JSON.
+fn hash_to_hex(hash: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(2 + 64);
+    s.push_str("0x");
+    for b in hash {
+        let _ = write!(&mut s, "{:02x}", b);
+    }
+    s
 }
 
 // -----------------------------------------------------------------------------
@@ -395,15 +562,26 @@ impl DagRunnerHandle {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 ticks = ticks.saturating_add(1);
 
-                // Every 50 ticks (~5s) create a dummy vertex on top of current tips.
+                // Every 50 ticks (~5s) create a vertex on top of current tips.
                 if ticks % 50 == 0 {
                     let parents = dag_c.tips().await;
-                    let vtx = dag_c.insert_vertex(parents, round, height).await;
-                    
-                    // T57.2: log shadow payload from mempool (read-only)
+
+                    // T62.x: build payload from mempool (still read-only) and
+                    // actually attach it to the vertex.
+                    let payload = if shadow_max_txs > 0 {
+                        dag_shadow_payload_from_mempool(&mempool_c, shadow_max_txs).await
+                    } else {
+                        DagPayload::Empty
+                    };
+
+                    let vtx = dag_c
+                        .insert_vertex_with_payload(parents, round, height, payload)
+                        .await;
+
+                    // Keep the logging behaviour from T57.2, now based on the
+                    // stored vertex payload.
                     if shadow_max_txs > 0 {
-                        let payload = dag_shadow_payload_from_mempool(&mempool_c, shadow_max_txs).await;
-                        match payload {
+                        match &vtx.payload {
                             DagPayload::Empty => {
                                 log::debug!(
                                     "dag: shadow payload empty at round={} height={}",
@@ -416,7 +594,7 @@ impl DagRunnerHandle {
                                     .first()
                                     .map(|r| format!("{:02x?}", &r.hash[..4]));
                                 log::debug!(
-                                    "dag: shadow payload for vertex round={} height={} txs={} first_hash_prefix={:?}",
+                                    "dag: vertex round={} height={} txs={} first_hash_prefix={:?}",
                                     vtx.meta.round,
                                     vtx.meta.height,
                                     refs.len(),
@@ -425,7 +603,7 @@ impl DagRunnerHandle {
                             }
                         }
                     }
-                    
+
                     round = round.saturating_add(1);
                     height = height.saturating_add(1);
 
@@ -490,7 +668,20 @@ impl DagRunnerHandle {
     pub async fn debug_snapshot(&self) -> DagDebugSnapshot {
         self.dag.debug_snapshot().await
     }
+
+    /// T58.1: Return a debug view of a single DAG vertex by numeric id.
+    pub async fn vertex_debug(&self, id: u64) -> Option<DagVertexDebug> {
+        let id = DagVertexId(id);
+        self.dag.vertex_debug(id).await
+    }
+
+    /// T59.0: expose a debug-only synthetic "block candidate"
+    /// built from the current DAG tip.
+    pub async fn latest_candidate_debug(&self) -> Option<DagBlockCandidateDebug> {
+        self.dag.latest_candidate_debug().await
+    }
 }
+
 
 // -----------------------------------------------------------------------------
 // tests
@@ -523,7 +714,9 @@ mod tests {
         let store = DagStore::new();
 
         // insert a root vertex (no parents) at round=0, height=0
-        let root = store.insert_vertex(Vec::new(), 0, 0).await;
+        let root = store
+            .insert_vertex(Vec::new(), 0, 0, DagPayload::Empty)
+            .await;
         assert_eq!(root.meta.id, DagVertexId(0));
 
         // after first insert: one vertex, tip is {0}
@@ -538,7 +731,9 @@ mod tests {
         assert_eq!(snap1.max_height, 0);
 
         // insert a child on top of the root at round=1, height=1
-        let child = store.insert_vertex(vec![root.meta.id], 1, 1).await;
+        let child = store
+            .insert_vertex(vec![root.meta.id], 1, 1, DagPayload::Empty)
+            .await;
         assert_eq!(child.meta.id, DagVertexId(1));
 
         // after second insert: two vertices, tip is now {1}
@@ -616,6 +811,29 @@ mod tests {
                 assert_eq!(refs[1].hash, [6u8; 32]);
             }
         }
+    }
+
+    /// T58.1: test debug vertex serialization
+    #[tokio::test]
+    async fn dag_vertex_debug_serialization() {
+        let store = DagStore::new();
+
+        // Insert a vertex with TxHashes payload
+        let tx_hashes = vec![[1u8; 32], [2u8; 32]];
+        let payload = DagPayload::from_tx_hashes_raw(tx_hashes.clone());
+        let vertex = store
+            .insert_vertex_with_payload(vec![], 1, 2, payload)
+            .await;
+
+        // Get debug view
+        let debug_view = store.vertex_debug(vertex.meta.id).await.unwrap();
+
+        assert_eq!(debug_view.id, 0);
+        assert_eq!(debug_view.round, 1);
+        assert_eq!(debug_view.height, 2);
+        assert_eq!(debug_view.parent_ids, Vec::<u64>::new());
+        assert_eq!(debug_view.payload.kind, "tx_hashes");
+        assert_eq!(debug_view.payload.tx_hashes.unwrap().len(), 2);
     }
 
     /// simple helper to build a TxHash from a u8 tag, for tests.

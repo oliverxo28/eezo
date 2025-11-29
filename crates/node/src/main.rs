@@ -444,6 +444,41 @@ async fn dag_debug_handler() -> Json<DagDebugView> {
         max_height: 0,
     })
 }
+// Add this handler function near your other DAG handlers
+#[cfg(feature = "pq44-runtime")]
+async fn dag_vertex_handler(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<u64>,
+) -> Response {
+    // If there is no DAG runner (e.g. hotstuff mode), treat as 404.
+    if let Some(dag) = state.dag_runner.as_ref() {
+        match dag.vertex_debug(id).await {
+            Some(v) => (StatusCode::OK, Json(v)).into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+#[cfg(feature = "pq44-runtime")]
+async fn dag_candidate_handler(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if let Some(dag) = state.dag_runner.as_ref() {
+        match dag.latest_candidate_debug().await {
+            Some(c) => (StatusCode::OK, Json(c)).into_response(),
+            None => StatusCode::NO_CONTENT.into_response(),
+        }
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+#[cfg(not(feature = "pq44-runtime"))]
+async fn dag_candidate_handler() -> impl IntoResponse {
+    StatusCode::NOT_FOUND.into_response()
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct NodeIdentity {
@@ -2021,8 +2056,12 @@ fn resolve_outbox_dir(datadir: Option<&std::path::Path>) -> std::path::PathBuf {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install a panic hook that won't itself panic on IO errors.
+    // We use writeln! with explicit error-ignoring to avoid a double-panic
+    // if stderr is closed during shutdown.
     std::panic::set_hook(Box::new(|info| {
-        eprintln!("💥 PANIC: {:?}", info);
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "💥 PANIC: {:?}", info);
     }));
     println!("🚀 Node starting up...");
     let args = Cli::parse();
@@ -2303,7 +2342,12 @@ async fn main() -> anyhow::Result<()> {
     };
     println!("✅ Node identity loaded: {}", identity.node_id);
 
-    env::set_var("RUST_LOG", &cfg.log_level);
+    // Only set RUST_LOG from config if it's not already set by the user.
+    // This allows users to specify more complex log filters like:
+    //   RUST_LOG=info,eezo_node::dag_runner=debug
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", &cfg.log_level);
+    }
     env_logger::init();
     // T36.6: ensure bridge metrics are registered before serving HTTP
     #[cfg(feature = "metrics")]
@@ -3235,6 +3279,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/head", get(head_handler))
         .route("/dag/status", get(dag_status_handler))
         .route("/dag/debug", get(dag_debug_handler))
+		.route("/dag/vertex/:id", get(dag_vertex_handler))
+		.route("/dag/candidate", get(dag_candidate_handler))
         // T30 tx endpoints
         .route("/tx", post(post_tx))
         .route("/tx_batch", post(post_tx_batch)) // <-- ADDED
