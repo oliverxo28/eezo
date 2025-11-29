@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 use eezo_ledger::consensus::SingleNode;
 use eezo_ledger::tx_types::HasTxHash;
 use eezo_ledger::SignedTx;
+use crate::mempool::{SharedMempool, TxHash};
 
 // -----------------------------------------------------------------------------
 // DAG vertex model
@@ -104,6 +105,34 @@ impl DagPayload {
         DagPayload::TxHashes(refs)
     }
 }
+/// t57.0: build a "shadow" dag payload from the current mempool view.
+///
+/// this is read-only: it does not remove txs, does not affect ordering,
+/// and is not wired into the live dag runner yet. it exists so later
+/// tasks can call it from the dag loop in a safe way.
+#[allow(dead_code)]
+pub async fn dag_shadow_payload_from_mempool(
+    mempool: &SharedMempool,
+    max_txs: usize,
+) -> DagPayload {
+    if max_txs == 0 {
+        return DagPayload::Empty;
+    }
+
+    // sample up to max_txs hashes from the current mempool snapshot
+    let hashes: Vec<TxHash> = mempool.sample_hashes(max_txs).await;
+
+    if hashes.is_empty() {
+        DagPayload::Empty
+    } else {
+        log::debug!(
+            "dag shadow payload: sampled {} tx hashes for hypothetical vertex",
+            hashes.len()
+        );
+        DagPayload::from_tx_hashes_raw(hashes)
+    }
+}
+
 /// t56.7: debug-only helper to build a dag payload from real signed txs.
 ///
 /// this is not wired into any live path yet (no /tx changes, no mempool
@@ -317,6 +346,10 @@ pub struct DagRunnerHandle {
     /// In-memory DAG store owned by this runner.
     dag: Arc<DagStore>,
     join: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    // T57.2: mempool handle for shadow payload sampling
+    mempool: crate::mempool::SharedMempool,
+    // T57.2: max txs to sample for shadow payload logging
+    shadow_max_txs: usize,
 }
 
 impl DagRunnerHandle {
@@ -324,7 +357,11 @@ impl DagRunnerHandle {
     ///
     /// For T56.x this uses a simple internal loop that periodically
     /// creates dummy vertices on top of current tips. No tx flow yet.
-    pub fn spawn(node: SingleNode) -> Arc<Self> {
+    pub fn spawn(
+        node: SingleNode,
+        mempool: crate::mempool::SharedMempool,
+        shadow_max_txs: usize,
+    ) -> Arc<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let node = Arc::new(Mutex::new(node));
         let dag = Arc::new(DagStore::new());
@@ -339,6 +376,7 @@ impl DagRunnerHandle {
         let stop_c = Arc::clone(&stop);
         let node_c = Arc::clone(&node);
         let dag_c = Arc::clone(&dag);
+        let mempool_c = mempool.clone();
 
         let join_handle = tokio::spawn(async move {
             // Placeholder: we keep the node handle so later we can drive real
@@ -361,6 +399,33 @@ impl DagRunnerHandle {
                 if ticks % 50 == 0 {
                     let parents = dag_c.tips().await;
                     let vtx = dag_c.insert_vertex(parents, round, height).await;
+                    
+                    // T57.2: log shadow payload from mempool (read-only)
+                    if shadow_max_txs > 0 {
+                        let payload = dag_shadow_payload_from_mempool(&mempool_c, shadow_max_txs).await;
+                        match payload {
+                            DagPayload::Empty => {
+                                log::debug!(
+                                    "dag: shadow payload empty at round={} height={}",
+                                    vtx.meta.round,
+                                    vtx.meta.height,
+                                );
+                            }
+                            DagPayload::TxHashes(ref refs) => {
+                                let first_prefix = refs
+                                    .first()
+                                    .map(|r| format!("{:02x?}", &r.hash[..4]));
+                                log::debug!(
+                                    "dag: shadow payload for vertex round={} height={} txs={} first_hash_prefix={:?}",
+                                    vtx.meta.round,
+                                    vtx.meta.height,
+                                    refs.len(),
+                                    first_prefix,
+                                );
+                            }
+                        }
+                    }
+                    
                     round = round.saturating_add(1);
                     height = height.saturating_add(1);
 
@@ -387,6 +452,8 @@ impl DagRunnerHandle {
             node,
             dag,
             join: Mutex::new(Some(join_handle)),
+            mempool,
+            shadow_max_txs,
         })
     }
 
@@ -432,6 +499,8 @@ impl DagRunnerHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mempool::{SharedMempool, Mempool, TxHash};
+    use std::net::{IpAddr, Ipv4Addr};
 
     /// basic sanity check: empty store has no vertices or tips.
     #[tokio::test]
@@ -548,5 +617,68 @@ mod tests {
             }
         }
     }
-}
 
+    /// simple helper to build a TxHash from a u8 tag, for tests.
+    fn h(tag: u8) -> TxHash {
+        let mut bytes = [0u8; 32];
+        bytes[0] = tag;
+        bytes
+    }
+
+    #[tokio::test]
+    async fn dag_shadow_payload_empty_when_mempool_empty() {
+        // small mempool config: len=4, bytes cap large, trivial rate limits
+        let mempool = SharedMempool::new(Mempool::new(
+            4,
+            1024 * 1024,
+            100,
+            600,
+        ));
+
+        // no txs submitted yet
+        let payload = dag_shadow_payload_from_mempool(&mempool, 10).await;
+
+        match payload {
+            DagPayload::Empty => {}
+            DagPayload::TxHashes(_) => {
+                panic!("expected Empty payload for empty mempool");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dag_shadow_payload_samples_hashes_from_mempool() {
+        let mempool = SharedMempool::new(Mempool::new(
+            8,
+            1024 * 1024,
+            100,
+            600,
+        ));
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // submit three dummy txs with distinct hashes
+        mempool.submit(ip, h(1), vec![0u8; 10]).await.unwrap();
+        mempool.submit(ip, h(2), vec![0u8; 10]).await.unwrap();
+        mempool.submit(ip, h(3), vec![0u8; 10]).await.unwrap();
+
+        // ask for at most 2 hashes
+        let payload = dag_shadow_payload_from_mempool(&mempool, 2).await;
+
+        match payload {
+            DagPayload::Empty => {
+                panic!("expected TxHashes payload, got Empty");
+            }
+            DagPayload::TxHashes(ref refs) => {
+                // we asked for 2; we should get at most 2
+                assert!(refs.len() <= 2);
+                assert!(refs.len() >= 1);
+
+                // the first hash should be the earliest submitted (h(1))
+                assert_eq!(refs[0].hash, h(1));
+            }
+        }
+
+        // mempool is read-only: still has 3 entries
+        assert_eq!(mempool.len().await, 3);
+    }
+}

@@ -305,6 +305,22 @@ impl Mempool {
     pub fn max_bytes(&self) -> usize {
         self.max_bytes
     }
+
+    /// return up to `max` pending tx hashes from the front of the queue.
+    ///
+    /// this is read-only and does not modify ordering, status, or accounting.
+    /// intended for debug / dag "shadow payload" sampling.
+    pub fn sample_hashes(&self, max: usize) -> Vec<TxHash> {
+        if max == 0 {
+            return Vec::new();
+        }
+
+        self.queue
+            .iter()
+            .take(max)
+            .map(|entry| entry.hash)
+            .collect()
+    }
 }
 
 /// Concurrent wrapper used by the HTTP layer & proposer.
@@ -354,6 +370,16 @@ impl SharedMempool {
     pub async fn stats(&self) -> (usize, usize, usize, usize) {
         let g = self.0.lock().await;
         (g.len(), g.cur_bytes(), g.max_len(), g.max_bytes())
+    }
+
+    /// return up to `max` pending tx hashes from the current mempool view.
+    ///
+    /// this is read-only: it does not pop, mark, or mutate any entries.
+    /// dag uses this for "shadow" payload construction without affecting
+    /// the hotstuff path or mempool behaviour.
+    pub async fn sample_hashes(&self, max: usize) -> Vec<TxHash> {
+        let g = self.0.lock().await;
+        g.sample_hashes(max)
     }
 
     /// Return the number of transactions currently in the mempool.
@@ -570,5 +596,31 @@ mod tests {
         let result = mp.requeue(tx, 3).await;
         assert!(result.is_none(), "Requeue should fail after max count");
         assert_eq!(mp.len().await, 0); // Should not be requeued
+    }
+
+    #[tokio::test]
+    async fn sample_hashes_is_read_only() {
+        let mp = SharedMempool::new(Mempool::new(4, 10_000, 10, 600));
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        mp.submit(ip, h(1), vec![0u8; 10]).await.unwrap();
+        mp.submit(ip, h(2), vec![0u8; 10]).await.unwrap();
+        mp.submit(ip, h(3), vec![0u8; 10]).await.unwrap();
+
+        // sample fewer than we have
+        let hashes = mp.sample_hashes(2).await;
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes[0], h(1));
+        assert_eq!(hashes[1], h(2));
+
+        // mempool contents unchanged
+        assert_eq!(mp.len().await, 3);
+
+        // sample more than we have just returns all of them
+        let hashes_all = mp.sample_hashes(10).await;
+        assert_eq!(hashes_all.len(), 3);
+        assert_eq!(hashes_all[0], h(1));
+        assert_eq!(hashes_all[1], h(2));
+        assert_eq!(hashes_all[2], h(3));
     }
 }

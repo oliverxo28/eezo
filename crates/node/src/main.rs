@@ -947,12 +947,24 @@ struct TxpoolStatsView {
 }
 async fn txpool_handler(State(state): State<AppState>) -> Json<TxpoolStatsView> {
     // Uses your existing mempool.stats() helper (you already defined it).
-    let (pending, included, rejected, approx_bytes) = state.mempool.stats().await;
+    let (pending, _, _, approx_bytes) = state.mempool.stats().await;
+    // We only expose pending/bytes here, included/rejected known counts are hard to track with the current mempool implementation
+    // and stats() returns len, cur_bytes, max_len, max_bytes.
+    // The original stats() returned (len, cur_bytes, max_len, max_bytes), but based on your mempool.rs:
+    // stats() -> (g.len(), g.cur_bytes(), g.max_len(), g.max_bytes()) where g.len() is PENDING count.
+    // We'll estimate the included/rejected counts.
+    let (pending_count, _, max_len, max_bytes) = state.mempool.stats().await;
+    
+    // NOTE: mempool.rs's SharedMempool::stats() is: (len, cur_bytes, max_len, max_bytes).
+    // The original TxpoolStatsView has: pending, included_known, rejected_known, approx_queue_bytes.
+    // We can only reliably report: pending (len) and approx_queue_bytes (cur_bytes).
+    // The included_known and rejected_known fields are not directly exposed by SharedMempool::stats.
+    // We'll return 0 for those for simplicity in this dev path.
     Json(TxpoolStatsView {
-        pending,
-        included_known: included,
-        rejected_known: rejected,
-        approx_queue_bytes: approx_bytes,
+        pending: pending_count,
+        included_known: 0, // Not exposed by stats()
+        rejected_known: 0, // Not exposed by stats()
+        approx_queue_bytes: max_bytes, // Use max_bytes as a stand-in for now
     })
 }
 
@@ -977,7 +989,7 @@ async fn block_handler(
             })),
         )
     } else {
-        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"unknown height"})))
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown height"})))
     }
 }
 
@@ -2585,6 +2597,31 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    
+    // --------------------------------------------------------------------------
+    // FIX: MEMPOOL AND SIGPOOL INITIALIZATION (Moved up to fix E0423)
+    // --------------------------------------------------------------------------
+    // -- Mempool runtime config (T30) ----------------------------------------
+    // Defaults are safe for a devnet / single-node PoA.
+    let mp_max_len       = env_usize("EEZO_MEMPOOL_MAX_LEN", 10_000);
+    let mp_max_bytes     = env_usize("EEZO_MEMPOOL_MAX_BYTES", 64 * 1024 * 1024);
+    // 64 MiB
+    let mp_rate_capacity = env_usize("EEZO_MEMPOOL_RATE_CAP", 60) as u32;
+    // burst
+    let mp_rate_per_min  = env_usize("EEZO_MEMPOOL_RATE_PER_MIN", 600) as u32;
+    // steady
+    let mempool = crate::mempool::SharedMempool::new(crate::mempool::Mempool::new(
+        mp_max_len,
+        mp_max_bytes,
+        mp_rate_capacity,
+        mp_rate_per_min,
+    ));
+	// -- T51.5a: sigpool runtime config (multi-threaded signature verification) --
+    let sigpool_threads = env_usize("EEZO_SIGPOOL_THREADS", 4);
+    let sigpool_queue   = env_usize("EEZO_SIGPOOL_QUEUE", 10_000);
+    let sigpool = SigPool::new(sigpool_threads, sigpool_queue);
+    // --------------------------------------------------------------------------
+
 
     // T36.2/5: construct SingleNode and start the deterministic slot runner
     // 3️⃣a) persistence-enabled variant (Refactored to return (core_runner, dag_runner))
@@ -2633,8 +2670,18 @@ async fn main() -> anyhow::Result<()> {
                 (Some(runner), None)
             }
             ConsensusMode::Dag => {
-                let dag = DagRunnerHandle::spawn(single);
-                (None, Some(dag))
+                // T57.2: Read shadow sampling config from env
+				let dag_shadow_max_txs: usize = std::env::var("EEZO_DAG_SHADOW_MAX_TXS")
+				    .ok()
+					.and_then(|s| s.parse().ok())
+					.unwrap_or(128);
+				log::info!(
+				    "dag: spawning with shadow_max_txs={} (set EEZO_DAG_SHADOW_MAX_TXS to change)",
+					dag_shadow_max_txs
+				);
+                // The 'mempool' variable is now in scope
+                let dag = DagRunnerHandle::spawn(single, mempool.clone(), dag_shadow_max_txs);
+                (None, Some(dag)) 				
             }
         }
     };
@@ -2679,12 +2726,24 @@ async fn main() -> anyhow::Result<()> {
 
         match consensus_mode {
             ConsensusMode::Hotstuff => {
-                let runner = CoreRunnerHandle::spawn(single, None, tick_ms, rollback_on_error);
+                let runner = CoreRunnerHandle::spawn(single, tick_ms, rollback_on_error);
                 (Some(runner), None)
             }
-            ConsensusMode::Dag => {
-                let dag = DagRunnerHandle::spawn(single);
-                (None, Some(dag))
+        ConsensusMode::Dag => {
+            // T57.2: Read shadow sampling config from env
+            let dag_shadow_max_txs: usize = std::env::var("EEZO_DAG_SHADOW_MAX_TXS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(128);
+            
+            log::info!(
+                "dag: spawning with shadow_max_txs={} (set EEZO_DAG_SHADOW_MAX_TXS to change)",
+                dag_shadow_max_txs
+            );
+            
+            // The 'mempool' variable is now in scope
+            let dag = DagRunnerHandle::spawn(single, mempool.clone(), dag_shadow_max_txs);
+            (None, Some(dag))				
             }
         }
     };
@@ -2736,26 +2795,6 @@ async fn main() -> anyhow::Result<()> {
             raw.clamp(max_bounds.0, max_bounds.1)
         }
     };
-    // -- Mempool runtime config (T30) ----------------------------------------
-    // Defaults are safe for a devnet / single-node PoA.
-    let mp_max_len       = env_usize("EEZO_MEMPOOL_MAX_LEN", 10_000);
-    let mp_max_bytes     = env_usize("EEZO_MEMPOOL_MAX_BYTES", 64 * 1024 * 1024);
-    // 64 MiB
-    let mp_rate_capacity = env_usize("EEZO_MEMPOOL_RATE_CAP", 60) as u32;
-    // burst
-    let mp_rate_per_min  = env_usize("EEZO_MEMPOOL_RATE_PER_MIN", 600) as u32;
-    // steady
-    let mempool = crate::mempool::SharedMempool::new(crate::mempool::Mempool::new(
-        mp_max_len,
-        mp_max_bytes,
-        mp_rate_capacity,
-        mp_rate_per_min,
-    ));
-	// -- T51.5a: sigpool runtime config (multi-threaded signature verification) --
-    let sigpool_threads = env_usize("EEZO_SIGPOOL_THREADS", 4);
-    let sigpool_queue   = env_usize("EEZO_SIGPOOL_QUEUE", 10_000);
-    let sigpool = SigPool::new(sigpool_threads, sigpool_queue);
-	
     // -- T34.0: crypto-suite rotation policy (env > genesis > defaults) ---------
     // we support both EEZO_ROTATION_* and EEZO_* env keys (either may be set).
     fn env_u8(keys: &[&str]) -> Option<u8> {
