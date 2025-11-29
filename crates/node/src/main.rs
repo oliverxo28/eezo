@@ -2022,7 +2022,7 @@ fn resolve_outbox_dir(datadir: Option<&std::path::Path>) -> std::path::PathBuf {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Install a panic hook that won't itself panic on IO errors.
-    // We use write! with explicit error-ignoring to avoid a double-panic
+    // We use writeln! with explicit error-ignoring to avoid a double-panic
     // if stderr is closed during shutdown.
     std::panic::set_hook(Box::new(|info| {
         use std::io::Write;
