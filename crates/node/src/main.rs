@@ -2021,8 +2021,12 @@ fn resolve_outbox_dir(datadir: Option<&std::path::Path>) -> std::path::PathBuf {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install a panic hook that won't itself panic on IO errors.
+    // We use write! with explicit error-ignoring to avoid a double-panic
+    // if stderr is closed during shutdown.
     std::panic::set_hook(Box::new(|info| {
-        eprintln!("💥 PANIC: {:?}", info);
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "💥 PANIC: {:?}", info);
     }));
     println!("🚀 Node starting up...");
     let args = Cli::parse();
@@ -2303,7 +2307,12 @@ async fn main() -> anyhow::Result<()> {
     };
     println!("✅ Node identity loaded: {}", identity.node_id);
 
-    env::set_var("RUST_LOG", &cfg.log_level);
+    // Only set RUST_LOG from config if it's not already set by the user.
+    // This allows users to specify more complex log filters like:
+    //   RUST_LOG=info,eezo_node::dag_runner=debug
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", &cfg.log_level);
+    }
     env_logger::init();
     // T36.6: ensure bridge metrics are registered before serving HTTP
     #[cfg(feature = "metrics")]
