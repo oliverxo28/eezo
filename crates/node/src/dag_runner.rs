@@ -2,6 +2,7 @@
 // T56.0–T56.5 — DAG vertex model + in-memory DAG store (skeleton, no tx flow yet).
 // T58.0 — Store shadow payload in DAG vertices instead of just logging
 // T58.1 — Add /dag/vertex/{id} debug endpoint
+// T63.0 — DAG block preview → execution dry-run (no commit)
 
 #![cfg(feature = "pq44-runtime")]
 
@@ -17,6 +18,8 @@ use tokio::sync::Mutex;
 use eezo_ledger::consensus::SingleNode;
 use eezo_ledger::tx_types::HasTxHash;
 use eezo_ledger::SignedTx;
+use eezo_ledger::{Accounts, Address, Supply, TxCore};
+use eezo_ledger::tx::{validate_tx_stateful, apply_tx, sender_from_pubkey_first20, TxStateError};
 use crate::mempool::{SharedMempool, TxHash};
 
 // -----------------------------------------------------------------------------
@@ -477,6 +480,43 @@ pub struct DagBlockPreview {
     pub txs: Vec<DagBlockPreviewTx>,
 }
 
+// -----------------------------------------------------------------------------
+// T63.0: Dry-run execution result types
+// -----------------------------------------------------------------------------
+
+/// T63.0: Per-transaction result from dry-run execution.
+///
+/// Reports whether a transaction would succeed or fail if the current DAG
+/// candidate were turned into a block right now.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DagBlockDryRunTxResult {
+    pub hash: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub amount: Option<String>,
+    pub fee: Option<String>,
+    pub nonce: Option<u64>,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// T63.0: Summary of dry-run execution for a DAG candidate block.
+///
+/// This is debug-only and does NOT commit anything to the ledger.
+/// It answers: "If the current DAG candidate were turned into a block right now,
+/// would all of its txs execute cleanly on the current state? Which ones would fail?"
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DagBlockDryRunResult {
+    pub vertex_id: u64,
+    pub round: u64,
+    pub height: u64,
+    pub txs_total: usize,
+    pub txs_ok: usize,
+    pub txs_failed: usize,
+    pub would_apply_cleanly: bool,
+    pub tx_results: Vec<DagBlockDryRunTxResult>,
+}
+
 impl DagPayloadDebug {
     fn from_payload(payload: &DagPayload) -> Self {
         match payload {
@@ -583,6 +623,77 @@ fn decode_tx_for_preview(hash: &[u8; 32], bytes: &[u8]) -> DagBlockPreviewTx {
             }
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// T63.0: Parse SignedTxEnvelope into ledger SignedTx for dry-run
+// -----------------------------------------------------------------------------
+
+/// Full SignedTxEnvelope structure for parsing (extends preview version with pubkey/sig).
+#[derive(serde::Deserialize)]
+struct SignedTxEnvelopeFull {
+    tx: TransferTxPreview,
+    #[serde(default)]
+    pubkey: String,
+    #[serde(default)]
+    sig: String,
+}
+
+/// Parse raw tx bytes (JSON envelope) into a ledger SignedTx for execution.
+///
+/// Returns None if parsing fails or required fields are missing/invalid.
+fn parse_signed_tx_from_envelope(bytes: &[u8]) -> Option<SignedTx> {
+    let env: SignedTxEnvelopeFull = serde_json::from_slice(bytes).ok()?;
+
+    // Parse numeric fields
+    let amount: u128 = env.tx.amount.parse().ok()?;
+    let fee: u128 = env.tx.fee.parse().ok()?;
+    let nonce: u64 = env.tx.nonce.parse().ok()?;
+
+    // Parse 'to' address (expect 0x... format, 20 bytes)
+    let to_hex = env.tx.to.strip_prefix("0x").unwrap_or(&env.tx.to);
+    let to_bytes = hex::decode(to_hex).ok()?;
+    if to_bytes.len() != 20 {
+        return None;
+    }
+    let mut to_arr = [0u8; 20];
+    to_arr.copy_from_slice(&to_bytes);
+    let to = Address(to_arr);
+
+    // Parse pubkey (hex string, may be empty for devnet)
+    let pubkey: Vec<u8> = if env.pubkey.is_empty() {
+        // For devnet: if pubkey is empty, try to derive from 'from' address
+        let from_hex = env.tx.from.strip_prefix("0x").unwrap_or(&env.tx.from);
+        let from_bytes = hex::decode(from_hex).ok()?;
+        // Extend from bytes to at least 20 bytes for sender derivation
+        if from_bytes.len() >= 20 {
+            from_bytes
+        } else {
+            Vec::new()
+        }
+    } else {
+        let pk_hex = env.pubkey.strip_prefix("0x").unwrap_or(&env.pubkey);
+        hex::decode(pk_hex).ok()?
+    };
+
+    // Parse signature (hex string, may be empty for devnet)
+    let sig: Vec<u8> = if env.sig.is_empty() {
+        Vec::new()
+    } else {
+        let sig_hex = env.sig.strip_prefix("0x").unwrap_or(&env.sig);
+        hex::decode(sig_hex).ok()?
+    };
+
+    Some(SignedTx {
+        core: TxCore {
+            to,
+            amount,
+            fee,
+            nonce,
+        },
+        pubkey,
+        sig,
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -828,6 +939,162 @@ impl DagRunnerHandle {
             round: candidate.round,
             height: candidate.height,
             txs,
+        })
+    }
+
+    /// T63.0: Execute the current DAG candidate in a sandbox (no commit).
+    ///
+    /// This performs a dry-run execution of the current DAG candidate:
+    /// - Clones the current ledger state (accounts, supply)
+    /// - Sequentially validates and applies each transaction on the clone
+    /// - Reports per-tx success/failure and error messages
+    /// - Does NOT modify the real chain state
+    ///
+    /// Returns None if there's no candidate or no txs.
+    pub async fn block_dry_run(&self) -> Option<DagBlockDryRunResult> {
+        // 1) Get the current candidate from DAG (same as block_preview)
+        let candidate = self.dag.latest_candidate_debug().await?;
+
+        if candidate.tx_hashes.is_empty() {
+            return None;
+        }
+
+        // 2) Convert hex strings back to raw TxHash bytes for mempool lookup
+        let hashes: Vec<crate::mempool::TxHash> = candidate
+            .tx_hashes
+            .iter()
+            .filter_map(|hex_str| {
+                let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+                let bytes = hex::decode(stripped).ok()?;
+                if bytes.len() != 32 {
+                    return None;
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Some(arr)
+            })
+            .collect();
+
+        if hashes.is_empty() {
+            return None;
+        }
+
+        // 3) Fetch raw bytes from mempool for these hashes
+        let raw_bytes = self.mempool.get_bytes_for_hashes(&hashes).await;
+
+        if raw_bytes.is_empty() {
+            return None;
+        }
+
+        // 4) Parse tx bytes into SignedTx structures and decode preview info
+        let mut parsed_txs: Vec<(TxHash, SignedTx, DagBlockPreviewTx)> = Vec::new();
+        for (hash, bytes) in raw_bytes {
+            // Decode for preview display
+            let preview = decode_tx_for_preview(&hash, &bytes);
+
+            // Try to parse into a ledger SignedTx for execution
+            match parse_signed_tx_from_envelope(&bytes) {
+                Some(stx) => parsed_txs.push((hash, stx, preview)),
+                None => {
+                    // If parsing fails, we'll report it as a failed tx
+                    parsed_txs.push((
+                        hash,
+                        // Create a dummy SignedTx that will fail validation
+                        SignedTx {
+                            core: TxCore {
+                                to: Address([0u8; 20]),
+                                amount: 0,
+                                fee: 0,
+                                nonce: 0,
+                            },
+                            pubkey: Vec::new(),
+                            sig: Vec::new(),
+                        },
+                        DagBlockPreviewTx {
+                            hash: preview.hash,
+                            from: preview.from,
+                            to: preview.to,
+                            amount: preview.amount,
+                            fee: preview.fee,
+                            nonce: preview.nonce,
+                        },
+                    ));
+                }
+            }
+        }
+
+        if parsed_txs.is_empty() {
+            return None;
+        }
+
+        // 5) Clone the current ledger state for sandbox execution
+        let (mut shadow_accounts, mut shadow_supply) = {
+            let node_guard = self.node.lock().await;
+            (node_guard.accounts.clone(), node_guard.supply.clone())
+        };
+
+        // 6) Execute each tx sequentially on the shadow state
+        let mut tx_results: Vec<DagBlockDryRunTxResult> = Vec::with_capacity(parsed_txs.len());
+        let mut txs_ok = 0usize;
+        let mut txs_failed = 0usize;
+
+        for (_hash, stx, preview) in parsed_txs {
+            // Try to derive sender from pubkey
+            let sender = sender_from_pubkey_first20(&stx);
+
+            let (success, error) = match sender {
+                Some(sender_addr) => {
+                    // Validate stateful rules (nonce, balance)
+                    match validate_tx_stateful(&shadow_accounts, sender_addr, &stx.core) {
+                        Ok(()) => {
+                            // Apply to shadow state
+                            match apply_tx(&mut shadow_accounts, &mut shadow_supply, sender_addr, &stx.core) {
+                                Ok(()) => {
+                                    txs_ok += 1;
+                                    (true, None)
+                                }
+                                Err(e) => {
+                                    txs_failed += 1;
+                                    (false, Some(format!("{}", e)))
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            txs_failed += 1;
+                            (false, Some(format!("{}", e)))
+                        }
+                    }
+                }
+                None => {
+                    txs_failed += 1;
+                    (false, Some("invalid sender (cannot derive from pubkey)".to_string()))
+                }
+            };
+
+            tx_results.push(DagBlockDryRunTxResult {
+                hash: preview.hash,
+                from: preview.from,
+                to: preview.to,
+                amount: preview.amount,
+                fee: preview.fee,
+                nonce: preview.nonce,
+                success,
+                error,
+            });
+        }
+
+        let txs_total = tx_results.len();
+        let would_apply_cleanly = txs_failed == 0;
+
+        Some(DagBlockDryRunResult {
+            vertex_id: candidate.vertex_id,
+            round: candidate.round,
+            height: candidate.height,
+            txs_total,
+            txs_ok,
+            txs_failed,
+            would_apply_cleanly,
+            tx_results,
         })
     }
 }
@@ -1090,5 +1357,149 @@ mod tests {
         assert!(result.amount.is_none());
         assert!(result.fee.is_none());
         assert!(result.nonce.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // T63.0: Tests for dry-run execution helpers
+    // -------------------------------------------------------------------------
+
+    /// T63.0: test parse_signed_tx_from_envelope with valid JSON
+    #[test]
+    fn parse_signed_tx_from_envelope_valid() {
+        // Create a valid envelope with a proper 20-byte 'to' address
+        let envelope_json = r#"{
+            "tx": {
+                "from": "0x0102030405060708091011121314151617181920",
+                "to": "0x1112131415161718192021222324252627282930",
+                "amount": "1000",
+                "fee": "10",
+                "nonce": "5",
+                "chain_id": "0x01"
+            },
+            "pubkey": "0102030405060708091011121314151617181920",
+            "sig": ""
+        }"#;
+
+        let result = parse_signed_tx_from_envelope(envelope_json.as_bytes());
+        assert!(result.is_some());
+
+        let stx = result.unwrap();
+        assert_eq!(stx.core.amount, 1000);
+        assert_eq!(stx.core.fee, 10);
+        assert_eq!(stx.core.nonce, 5);
+        // to address should be parsed correctly
+        assert_eq!(stx.core.to.0[0], 0x11);
+        // pubkey should be derived from the 'from' field
+        assert!(!stx.pubkey.is_empty());
+    }
+
+    /// T63.0: test parse_signed_tx_from_envelope with invalid 'to' address
+    #[test]
+    fn parse_signed_tx_from_envelope_invalid_to() {
+        // 'to' address is not 20 bytes
+        let envelope_json = r#"{
+            "tx": {
+                "from": "0x1234",
+                "to": "0x1234",
+                "amount": "1000",
+                "fee": "10",
+                "nonce": "5",
+                "chain_id": "0x01"
+            },
+            "pubkey": "",
+            "sig": ""
+        }"#;
+
+        let result = parse_signed_tx_from_envelope(envelope_json.as_bytes());
+        // Should fail because 'to' is not 20 bytes
+        assert!(result.is_none());
+    }
+
+    /// T63.0: test parse_signed_tx_from_envelope with invalid amount
+    #[test]
+    fn parse_signed_tx_from_envelope_invalid_amount() {
+        let envelope_json = r#"{
+            "tx": {
+                "from": "0x0102030405060708091011121314151617181920",
+                "to": "0x1112131415161718192021222324252627282930",
+                "amount": "not_a_number",
+                "fee": "10",
+                "nonce": "5",
+                "chain_id": "0x01"
+            },
+            "pubkey": "",
+            "sig": ""
+        }"#;
+
+        let result = parse_signed_tx_from_envelope(envelope_json.as_bytes());
+        // Should fail because 'amount' is not a valid number
+        assert!(result.is_none());
+    }
+
+    /// T63.0: test DagBlockDryRunResult serialization
+    #[test]
+    fn dag_block_dry_run_result_serializes() {
+        let result = DagBlockDryRunResult {
+            vertex_id: 1,
+            round: 2,
+            height: 3,
+            txs_total: 2,
+            txs_ok: 1,
+            txs_failed: 1,
+            would_apply_cleanly: false,
+            tx_results: vec![
+                DagBlockDryRunTxResult {
+                    hash: "0xabc".to_string(),
+                    from: Some("0x1234".to_string()),
+                    to: Some("0x5678".to_string()),
+                    amount: Some("1000".to_string()),
+                    fee: Some("10".to_string()),
+                    nonce: Some(0),
+                    success: true,
+                    error: None,
+                },
+                DagBlockDryRunTxResult {
+                    hash: "0xdef".to_string(),
+                    from: Some("0x9999".to_string()),
+                    to: Some("0x8888".to_string()),
+                    amount: Some("500".to_string()),
+                    fee: Some("5".to_string()),
+                    nonce: Some(1),
+                    success: false,
+                    error: Some("insufficient funds".to_string()),
+                },
+            ],
+        };
+
+        // Should serialize without panicking
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("vertex_id"));
+        assert!(json.contains("would_apply_cleanly"));
+        assert!(json.contains("tx_results"));
+        assert!(json.contains("insufficient funds"));
+    }
+
+    /// T63.0: test DagBlockDryRunResult with empty txs
+    #[test]
+    fn dag_block_dry_run_result_empty_txs() {
+        let result = DagBlockDryRunResult {
+            vertex_id: 10,
+            round: 10,
+            height: 10,
+            txs_total: 0,
+            txs_ok: 0,
+            txs_failed: 0,
+            would_apply_cleanly: true,
+            tx_results: vec![],
+        };
+
+        // Verify all fields
+        assert_eq!(result.txs_total, 0);
+        assert!(result.would_apply_cleanly);
+        assert!(result.tx_results.is_empty());
+
+        // Should serialize
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"would_apply_cleanly\":true"));
     }
 }
