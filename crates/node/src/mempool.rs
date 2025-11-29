@@ -326,6 +326,10 @@ impl Mempool {
     ///
     /// This is debug/inspection only; it does NOT remove entries or change any status.
     /// Used by DAG block preview to fetch tx data for decoding.
+    ///
+    /// Note: Uses O(n*m) nested loop for simplicity since this is a debug-only path
+    /// with typically small numbers of hashes. If performance becomes an issue,
+    /// consider building a temporary HashMap for O(1) lookup.
     pub fn get_bytes_for_hashes(&self, hashes: &[TxHash]) -> Vec<(TxHash, Arc<Vec<u8>>)> {
         let mut out = Vec::with_capacity(hashes.len());
         'outer: for h in hashes {

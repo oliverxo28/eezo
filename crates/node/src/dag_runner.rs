@@ -543,13 +543,20 @@ struct SignedTxEnvelopePreview {
 
 /// Decode raw tx bytes into a DagBlockPreviewTx for the debug endpoint.
 ///
-/// If decoding fails, returns an entry with only the hash filled in.
+/// If decoding fails, logs a debug message and returns an entry with only the hash filled in.
 fn decode_tx_for_preview(hash: &[u8; 32], bytes: &[u8]) -> DagBlockPreviewTx {
     let hash_hex = hash_to_hex(hash);
 
     match serde_json::from_slice::<SignedTxEnvelopePreview>(bytes) {
         Ok(env) => {
             let nonce = env.tx.nonce.parse::<u64>().ok();
+            if nonce.is_none() {
+                log::debug!(
+                    "dag block_preview: could not parse nonce '{}' for tx {}",
+                    env.tx.nonce,
+                    hash_hex
+                );
+            }
             DagBlockPreviewTx {
                 hash: hash_hex,
                 from: Some(env.tx.from),
@@ -559,8 +566,13 @@ fn decode_tx_for_preview(hash: &[u8; 32], bytes: &[u8]) -> DagBlockPreviewTx {
                 nonce,
             }
         }
-        Err(_) => {
-            // Decoding failed; return entry with only the hash
+        Err(e) => {
+            // Decoding failed; log and return entry with only the hash
+            log::debug!(
+                "dag block_preview: could not decode tx {}: {}",
+                hash_hex,
+                e
+            );
             DagBlockPreviewTx {
                 hash: hash_hex,
                 from: None,
