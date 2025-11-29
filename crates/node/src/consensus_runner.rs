@@ -1213,4 +1213,13 @@ impl CoreRunnerHandle {
         let mut g = self.node.lock().await;
         f(&mut g)
     }
+
+    /// T63.1: Get a snapshot of the current accounts and supply for dry-run execution.
+    ///
+    /// This clones the live ledger state so that dry-run can execute transactions
+    /// against the real chain state without modifying it.
+    pub async fn snapshot_accounts_supply(&self) -> (eezo_ledger::Accounts, eezo_ledger::Supply) {
+        let g = self.node.lock().await;
+        (g.accounts.clone(), g.supply.clone())
+    }
 }

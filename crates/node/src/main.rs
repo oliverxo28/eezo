@@ -521,10 +521,19 @@ async fn dag_block_preview_handler() -> Response {
 /// Execute the current DAG candidate in a sandbox (no commit).
 /// Returns per-tx success/failure and whether the entire block would apply cleanly.
 /// This is debug-only and does NOT modify the real chain state.
+///
+/// T63.1: Now uses the real chain state from CoreRunnerHandle when available.
 #[cfg(feature = "pq44-runtime")]
 async fn dag_block_dry_run_handler(State(state): State<AppState>) -> Response {
     if let Some(dag) = state.dag_runner.as_ref() {
-        match dag.block_dry_run().await {
+        // T63.1: Get real chain state from CoreRunnerHandle if available
+        let real_state = if let Some(core) = state.core_runner.as_ref() {
+            Some(core.snapshot_accounts_supply().await)
+        } else {
+            None
+        };
+
+        match dag.block_dry_run(real_state).await {
             Some(result) => (StatusCode::OK, Json(result)).into_response(),
             None => {
                 // No candidate or no txs – return a small "empty" marker

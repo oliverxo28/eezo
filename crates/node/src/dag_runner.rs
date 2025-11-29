@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 use eezo_ledger::consensus::SingleNode;
 use eezo_ledger::tx_types::HasTxHash;
 use eezo_ledger::SignedTx;
-use eezo_ledger::{Address, TxCore};
+use eezo_ledger::{Accounts, Address, Supply, TxCore};
 use eezo_ledger::tx::{validate_tx_stateful, apply_tx, sender_from_pubkey_first20};
 use crate::mempool::{SharedMempool, TxHash};
 
@@ -947,16 +947,24 @@ impl DagRunnerHandle {
         })
     }
 
-    /// T63.0: Execute the current DAG candidate in a sandbox (no commit).
+    /// T63.0/T63.1: Execute the current DAG candidate in a sandbox (no commit).
     ///
     /// This performs a dry-run execution of the current DAG candidate:
-    /// - Clones the current ledger state (accounts, supply)
+    /// - Uses provided accounts/supply snapshot (from real chain state) if given
+    /// - Falls back to DAG runner's internal node state if no snapshot provided
     /// - Sequentially validates and applies each transaction on the clone
     /// - Reports per-tx success/failure and error messages
     /// - Does NOT modify the real chain state
     ///
     /// Returns None if there's no candidate or no txs.
-    pub async fn block_dry_run(&self) -> Option<DagBlockDryRunResult> {
+    ///
+    /// # Arguments
+    /// * `real_state` - Optional tuple of (accounts, supply) from the real chain state.
+    ///                  If provided, dry-run uses this instead of the DAG runner's internal state.
+    pub async fn block_dry_run(
+        &self,
+        real_state: Option<(Accounts, Supply)>,
+    ) -> Option<DagBlockDryRunResult> {
         // 1) Get the current candidate from DAG (same as block_preview)
         let candidate = self.dag.latest_candidate_debug().await?;
 
@@ -1014,10 +1022,18 @@ impl DagRunnerHandle {
             return None;
         }
 
-        // 5) Clone the current ledger state for sandbox execution
-        let (mut shadow_accounts, mut shadow_supply) = {
-            let node_guard = self.node.lock().await;
-            (node_guard.accounts.clone(), node_guard.supply.clone())
+        // 5) Get ledger state for sandbox execution
+        // T63.1: Use real chain state if provided, otherwise fall back to DAG runner's internal node
+        let (mut shadow_accounts, mut shadow_supply) = match real_state {
+            Some((accounts, supply)) => {
+                log::debug!("dag dry_run: using real chain state snapshot");
+                (accounts, supply)
+            }
+            None => {
+                log::debug!("dag dry_run: falling back to internal node state");
+                let node_guard = self.node.lock().await;
+                (node_guard.accounts.clone(), node_guard.supply.clone())
+            }
         };
 
         // 6) Execute each tx sequentially on the shadow state
