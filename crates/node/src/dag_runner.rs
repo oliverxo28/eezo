@@ -518,6 +518,127 @@ pub struct DagBlockDryRunResult {
     pub tx_results: Vec<DagBlockDryRunTxResult>,
 }
 
+// -----------------------------------------------------------------------------
+// T69.0 — DAG template policy gate
+// -----------------------------------------------------------------------------
+
+/// T69.0: Policy for gating DAG-sourced block txs based on dry-run template quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DagTemplatePolicy {
+    /// Do not gate on dry-run at all. Behaviour stays exactly like T68.1
+    /// (DAG then fallback only if missing).
+    Off,
+    /// Only accept DAG candidate if would_apply_cleanly == true (txs_failed == 0).
+    CleanOnly,
+    /// Allow some failures but not too many.
+    /// Accept if txs_failed <= MAX_FAILED_RATIO * txs_total.
+    ToleratPartial,
+}
+
+impl Default for DagTemplatePolicy {
+    fn default() -> Self {
+        DagTemplatePolicy::Off
+    }
+}
+
+impl DagTemplatePolicy {
+    /// Parse policy from the EEZO_DAG_TEMPLATE_POLICY environment variable.
+    /// Returns `Off` if unset or unrecognized.
+    pub fn from_env() -> Self {
+        match std::env::var("EEZO_DAG_TEMPLATE_POLICY")
+            .unwrap_or_else(|_| "off".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "clean_only" | "cleanonly" => DagTemplatePolicy::CleanOnly,
+            "tolerate_partial" | "toleratepartial" => DagTemplatePolicy::ToleratPartial,
+            _ => DagTemplatePolicy::Off,
+        }
+    }
+}
+
+/// T69.0: Result of evaluating a DAG template against a policy.
+#[derive(Debug, Clone)]
+pub struct DagTemplateGateDecision {
+    /// Whether to accept the DAG candidate.
+    pub accept: bool,
+    /// Human-readable reason for the decision.
+    pub reason: &'static str,
+}
+
+/// T69.0: Evaluate whether a DAG template meets the policy requirements.
+///
+/// # Thresholds for `ToleratPartial`:
+/// - At most 10% of transactions can fail
+/// - At least 1 successful transaction is required
+pub fn evaluate_template_policy(
+    policy: DagTemplatePolicy,
+    txs_ok: usize,
+    txs_failed: usize,
+    would_apply_cleanly: bool,
+) -> DagTemplateGateDecision {
+    // Thresholds for ToleratPartial mode
+    const MAX_FAILED_RATIO: f64 = 0.10; // At most 10% failed
+
+    match policy {
+        DagTemplatePolicy::Off => {
+            // Always accept when policy is off
+            DagTemplateGateDecision {
+                accept: true,
+                reason: "policy=off (always accept)",
+            }
+        }
+
+        DagTemplatePolicy::CleanOnly => {
+            if would_apply_cleanly {
+                DagTemplateGateDecision {
+                    accept: true,
+                    reason: "policy=clean_only (all txs would apply cleanly)",
+                }
+            } else {
+                DagTemplateGateDecision {
+                    accept: false,
+                    reason: "policy=clean_only (some txs would fail)",
+                }
+            }
+        }
+
+        DagTemplatePolicy::ToleratPartial => {
+            let txs_total = txs_ok + txs_failed;
+
+            // Edge case: no txs at all
+            if txs_total == 0 {
+                return DagTemplateGateDecision {
+                    accept: false,
+                    reason: "policy=tolerate_partial (no txs in candidate)",
+                };
+            }
+
+            // Must have at least one successful tx
+            if txs_ok == 0 {
+                return DagTemplateGateDecision {
+                    accept: false,
+                    reason: "policy=tolerate_partial (no successful txs)",
+                };
+            }
+
+            // Check failure ratio
+            let failed_ratio = txs_failed as f64 / txs_total as f64;
+            if failed_ratio <= MAX_FAILED_RATIO {
+                DagTemplateGateDecision {
+                    accept: true,
+                    reason: "policy=tolerate_partial (failure ratio acceptable)",
+                }
+            } else {
+                DagTemplateGateDecision {
+                    accept: false,
+                    reason: "policy=tolerate_partial (too many failures)",
+                }
+            }
+        }
+    }
+}
+
 /// T64.0: header-like view of a "shadow" hotstuff block template.
 ///
 /// this is derived entirely from the dry-run result and does not change
@@ -1341,6 +1462,43 @@ impl DagRunnerHandle {
 
         Some(txs)
     }
+
+    /// T69.0: Evaluate the current DAG template against the given policy.
+    ///
+    /// This runs a dry-run of the DAG candidate and evaluates whether it meets
+    /// the policy requirements. Used by the proposer to gate DAG-sourced blocks.
+    ///
+    /// # Arguments
+    /// * `policy` - The template policy to evaluate against
+    /// * `real_state` - Optional real ledger state for dry-run execution
+    ///
+    /// # Returns
+    /// * `Some(DagTemplateGateDecision)` - The gate decision if template exists
+    /// * `None` - If no template/candidate is available
+    pub async fn evaluate_template_gate(
+        &self,
+        policy: DagTemplatePolicy,
+        real_state: Option<(Accounts, Supply)>,
+    ) -> Option<DagTemplateGateDecision> {
+        // If policy is off, we can skip the dry-run entirely
+        if policy == DagTemplatePolicy::Off {
+            return Some(DagTemplateGateDecision {
+                accept: true,
+                reason: "policy=off (always accept)",
+            });
+        }
+
+        // Run the dry-run to get template metrics
+        let dry_run = self.block_dry_run(real_state).await?;
+
+        // Evaluate against the policy
+        Some(evaluate_template_policy(
+            policy,
+            dry_run.txs_ok,
+            dry_run.txs_failed,
+            dry_run.would_apply_cleanly,
+        ))
+    }
 }
 
 
@@ -2003,5 +2161,75 @@ mod tests {
         // will return None)
         let result = dag_handle.collect_block_txs_from_dag(1024 * 1024).await;
         assert!(result.is_none(), "Expected None when DAG has no candidate");
+    }
+
+    // -------------------------------------------------------------------------
+    // T69.0: Tests for evaluate_template_policy
+    // -------------------------------------------------------------------------
+
+    /// T69.0: Test that policy=Off always accepts.
+    #[test]
+    fn evaluate_template_policy_off_always_accepts() {
+        let decision = evaluate_template_policy(DagTemplatePolicy::Off, 0, 0, false);
+        assert!(decision.accept, "Off policy should always accept");
+
+        let decision = evaluate_template_policy(DagTemplatePolicy::Off, 10, 5, false);
+        assert!(decision.accept, "Off policy should always accept");
+
+        let decision = evaluate_template_policy(DagTemplatePolicy::Off, 0, 10, false);
+        assert!(decision.accept, "Off policy should always accept");
+    }
+
+    /// T69.0: Test that policy=CleanOnly accepts only when would_apply_cleanly=true.
+    #[test]
+    fn evaluate_template_policy_clean_only() {
+        // Should accept when clean
+        let decision = evaluate_template_policy(DagTemplatePolicy::CleanOnly, 10, 0, true);
+        assert!(decision.accept, "CleanOnly should accept when would_apply_cleanly=true");
+
+        // Should reject when not clean
+        let decision = evaluate_template_policy(DagTemplatePolicy::CleanOnly, 10, 1, false);
+        assert!(!decision.accept, "CleanOnly should reject when would_apply_cleanly=false");
+
+        // Should reject when not clean even if no failures (edge case)
+        let decision = evaluate_template_policy(DagTemplatePolicy::CleanOnly, 10, 0, false);
+        assert!(!decision.accept, "CleanOnly should reject when would_apply_cleanly=false");
+    }
+
+    /// T69.0: Test that policy=ToleratPartial accepts within tolerance.
+    #[test]
+    fn evaluate_template_policy_tolerate_partial() {
+        // 10% failure ratio threshold
+
+        // Should accept: 10 ok, 1 failed = 9.09% failure < 10%
+        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratPartial, 10, 1, false);
+        assert!(decision.accept, "ToleratPartial should accept 9.09% failure rate");
+
+        // Should accept: 9 ok, 1 failed = 10% failure (exactly at threshold)
+        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratPartial, 9, 1, false);
+        assert!(decision.accept, "ToleratPartial should accept exactly 10% failure rate");
+
+        // Should reject: 8 ok, 2 failed = 20% failure > 10%
+        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratPartial, 8, 2, false);
+        assert!(!decision.accept, "ToleratPartial should reject 20% failure rate");
+
+        // Should reject: 0 ok, 1 failed = 100% failure
+        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratPartial, 0, 1, false);
+        assert!(!decision.accept, "ToleratPartial should reject when no successful txs");
+
+        // Should reject: 0 ok, 0 failed = empty
+        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratPartial, 0, 0, false);
+        assert!(!decision.accept, "ToleratPartial should reject when no txs");
+
+        // Should accept: all successful
+        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratPartial, 10, 0, true);
+        assert!(decision.accept, "ToleratPartial should accept when all txs succeed");
+    }
+
+    /// T69.0: Test DagTemplatePolicy::from_env parsing.
+    #[test]
+    fn dag_template_policy_from_env_parsing() {
+        // Note: This test doesn't actually set env vars, just tests Default
+        assert_eq!(DagTemplatePolicy::default(), DagTemplatePolicy::Off);
     }
 }

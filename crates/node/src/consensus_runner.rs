@@ -66,6 +66,8 @@ use crate::executor::{SingleExecutor};
 use crate::executor::ParallelExecutor;
 // T67.0: DAG runner handle for future DAG-aware block building
 use crate::dag_runner::DagRunnerHandle;
+// T69.0: DAG template policy gate
+use crate::dag_runner::{DagTemplatePolicy, evaluate_template_policy};
 
 // T36.6 metrics hooks
 #[cfg(feature = "metrics")]
@@ -175,8 +177,12 @@ impl CoreRunnerHandle {
                 log::info!("consensus: block tx source = mempool (default)");
                 BlockTxSource::Mempool
             }
-        };	
-            
+        };
+
+        // T69.0: Parse DAG template policy from env
+        let dag_template_policy = DagTemplatePolicy::from_env();
+        log::info!("consensus: dag template policy = {:?}", dag_template_policy);
+
         // T54: choose executor mode/threads from env (parallel vs single)
         let exec_threads = std::env::var("EEZO_EXECUTOR_THREADS")
             .ok().and_then(|v| v.parse::<usize>().ok())
@@ -231,20 +237,50 @@ impl CoreRunnerHandle {
                 #[cfg(feature = "metrics")]
                 let slot_start = std::time::Instant::now();
 
-                // T68.1: If DAG source is selected, try to fetch txs from DAG first
-                // (before acquiring the node lock). This allows the DAG handle to
-                // access its mempool without blocking the node mutex.
+                // T68.1 + T69.0: If DAG source is selected, try to fetch txs from DAG first.
+                // T69.0: Also evaluate the template quality gate if policy is not "off".
                 let dag_txs: Option<Vec<SignedTx>> = if matches!(block_tx_source, BlockTxSource::DagCandidate) {
                     // Try to get DAG handle
                     let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
                     if let Some(dag_handle) = dag_opt {
-                        // Read block_byte_budget from node config (we need to peek at it)
-                        let block_byte_budget = {
+                        // Read block_byte_budget and snapshot state for dry-run
+                        let (block_byte_budget, real_state) = {
                             let guard = node_c.lock().await;
-                            guard.cfg.block_byte_budget
+                            let state = (guard.accounts.clone(), guard.supply.clone());
+                            (guard.cfg.block_byte_budget, state)
                         };
-                        // Call the async DAG tx collection method
-                        dag_handle.collect_block_txs_from_dag(block_byte_budget).await
+
+                        // T69.0: Evaluate template gate before collecting txs
+                        let gate_decision = dag_handle.evaluate_template_gate(
+                            dag_template_policy,
+                            Some(real_state),
+                        ).await;
+
+                        match gate_decision {
+                            Some(decision) if decision.accept => {
+                                // Template passed the gate, collect txs from DAG
+                                log::debug!(
+                                    "dag_tx_source: template gate accepted (reason={})",
+                                    decision.reason
+                                );
+                                dag_handle.collect_block_txs_from_dag(block_byte_budget).await
+                            }
+                            Some(decision) => {
+                                // Template rejected by gate
+                                log::info!(
+                                    "dag_tx_source: template gate rejected (reason={})",
+                                    decision.reason
+                                );
+                                #[cfg(feature = "metrics")]
+                                crate::metrics::dag_template_gate_rejected_inc();
+                                None // Fall back to mempool
+                            }
+                            None => {
+                                // No template available (no DAG candidate)
+                                log::debug!("dag_tx_source: no template available for gate evaluation");
+                                None // Fall back to mempool
+                            }
+                        }
                     } else {
                         log::debug!("dag_tx_source: DagCandidate selected but no DAG handle attached");
                         None
@@ -795,7 +831,11 @@ impl CoreRunnerHandle {
                 log::info!("consensus: block tx source = mempool (default)");
                 BlockTxSource::Mempool
             }
-        };	
+        };
+
+        // T69.0: Parse DAG template policy from env
+        let dag_template_policy = DagTemplatePolicy::from_env();
+        log::info!("consensus: dag template policy = {:?}", dag_template_policy);
 
         // T54: choose executor mode/threads from env (parallel vs single)
         let exec_threads = std::env::var("EEZO_EXECUTOR_THREADS")
@@ -835,20 +875,50 @@ impl CoreRunnerHandle {
                 #[cfg(feature = "metrics")]
                 let slot_start = std::time::Instant::now();
 
-                // T68.1: If DAG source is selected, try to fetch txs from DAG first
-                // (before acquiring the node lock). This allows the DAG handle to
-                // access its mempool without blocking the node mutex.
+                // T68.1 + T69.0: If DAG source is selected, try to fetch txs from DAG first.
+                // T69.0: Also evaluate the template quality gate if policy is not "off".
                 let dag_txs: Option<Vec<SignedTx>> = if matches!(block_tx_source, BlockTxSource::DagCandidate) {
                     // Try to get DAG handle
                     let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
                     if let Some(dag_handle) = dag_opt {
-                        // Read block_byte_budget from node config (we need to peek at it)
-                        let block_byte_budget = {
+                        // Read block_byte_budget and snapshot state for dry-run
+                        let (block_byte_budget, real_state) = {
                             let guard = node_c.lock().await;
-                            guard.cfg.block_byte_budget
+                            let state = (guard.accounts.clone(), guard.supply.clone());
+                            (guard.cfg.block_byte_budget, state)
                         };
-                        // Call the async DAG tx collection method
-                        dag_handle.collect_block_txs_from_dag(block_byte_budget).await
+
+                        // T69.0: Evaluate template gate before collecting txs
+                        let gate_decision = dag_handle.evaluate_template_gate(
+                            dag_template_policy,
+                            Some(real_state),
+                        ).await;
+
+                        match gate_decision {
+                            Some(decision) if decision.accept => {
+                                // Template passed the gate, collect txs from DAG
+                                log::debug!(
+                                    "dag_tx_source: template gate accepted (reason={})",
+                                    decision.reason
+                                );
+                                dag_handle.collect_block_txs_from_dag(block_byte_budget).await
+                            }
+                            Some(decision) => {
+                                // Template rejected by gate
+                                log::info!(
+                                    "dag_tx_source: template gate rejected (reason={})",
+                                    decision.reason
+                                );
+                                #[cfg(feature = "metrics")]
+                                crate::metrics::dag_template_gate_rejected_inc();
+                                None // Fall back to mempool
+                            }
+                            None => {
+                                // No template available (no DAG candidate)
+                                log::debug!("dag_tx_source: no template available for gate evaluation");
+                                None // Fall back to mempool
+                            }
+                        }
                     } else {
                         log::debug!("dag_tx_source: DagCandidate selected but no DAG handle attached");
                         None
