@@ -1266,4 +1266,44 @@ pub fn dag_compare_metrics_set(
     }
 }
 
+// -----------------------------------------------------------------------------
+// T68.1 — DAG block tx source metrics
+// -----------------------------------------------------------------------------
+/// Counter: blocks built using DAG candidate as tx source.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_BLOCK_SOURCE_USED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_block_source_used_total",
+        "Number of blocks built using DAG candidate as tx source"
+    )
+    .unwrap()
+});
+
+/// Counter: blocks that fell back to mempool when DAG source was selected.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_BLOCK_SOURCE_FALLBACK_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_block_source_fallback_total",
+        "Number of blocks that fell back to mempool when DAG source was selected"
+    )
+    .unwrap()
+});
+
+/// Helper: increment DAG block source used counter.
+#[inline]
+pub fn dag_block_source_used_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_BLOCK_SOURCE_USED_TOTAL.inc();
+    }
+}
+
+/// Helper: increment DAG block source fallback counter.
+#[inline]
+pub fn dag_block_source_fallback_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_BLOCK_SOURCE_FALLBACK_TOTAL.inc();
+    }
+}
 
