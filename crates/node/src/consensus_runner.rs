@@ -237,6 +237,10 @@ impl CoreRunnerHandle {
                 #[cfg(feature = "metrics")]
                 let slot_start = std::time::Instant::now();
 
+                // T70.0: Track DAG prepare time when DAG source is enabled
+                #[cfg(feature = "metrics")]
+                let dag_prepare_start = std::time::Instant::now();
+
                 // T68.1 + T69.0: If DAG source is selected, try to fetch txs from DAG first.
                 // T69.0: Also evaluate the template quality gate if policy is not "off".
                 let dag_txs: Option<Vec<SignedTx>> = if matches!(block_tx_source, BlockTxSource::DagCandidate) {
@@ -289,6 +293,17 @@ impl CoreRunnerHandle {
                     None
                 };
 
+                // T70.0: Record DAG prepare time (only when DAG source is enabled)
+                #[cfg(feature = "metrics")]
+                if matches!(block_tx_source, BlockTxSource::DagCandidate) {
+                    let dag_prepare_elapsed = dag_prepare_start.elapsed().as_secs_f64();
+                    crate::metrics::observe_block_dag_prepare_seconds(dag_prepare_elapsed);
+                }
+
+                // T70.0: Track executor time
+                #[cfg(feature = "metrics")]
+                let exec_start = std::time::Instant::now();
+
                 // T54 Step 9: Use the executor instead of run_one_slot
                 let outcome: Result<SlotOutcome, eezo_ledger::ConsensusError> = {
                     let mut guard = node_c.lock().await;
@@ -322,7 +337,14 @@ impl CoreRunnerHandle {
                     
                     // 4. Execute block using the executor
                     let exec_outcome = exec.execute_block(&mut guard, exec_input);
-                    
+
+                    // T70.0: Record executor time
+                    #[cfg(feature = "metrics")]
+                    {
+                        let exec_elapsed = exec_start.elapsed().as_secs_f64();
+                        crate::metrics::observe_block_exec_seconds(exec_elapsed);
+                    }
+
                     // 5. Process outcome
                     match exec_outcome.result {
                         Ok(blk) => {
@@ -406,6 +428,8 @@ impl CoreRunnerHandle {
                     crate::metrics::EEZO_BLOCK_E2E_LATENCY_SECONDS
                         .with_label_values(&["commit"])
                         .observe(sec);
+                    // T70.0: Also record total block latency for perf harness
+                    crate::metrics::observe_block_total_latency_seconds(sec);
                 }
                 // optional: structured logs (kept minimal in T36.0)
                 match outcome {
@@ -875,6 +899,10 @@ impl CoreRunnerHandle {
                 #[cfg(feature = "metrics")]
                 let slot_start = std::time::Instant::now();
 
+                // T70.0: Track DAG prepare time when DAG source is enabled
+                #[cfg(feature = "metrics")]
+                let dag_prepare_start = std::time::Instant::now();
+
                 // T68.1 + T69.0: If DAG source is selected, try to fetch txs from DAG first.
                 // T69.0: Also evaluate the template quality gate if policy is not "off".
                 let dag_txs: Option<Vec<SignedTx>> = if matches!(block_tx_source, BlockTxSource::DagCandidate) {
@@ -927,6 +955,17 @@ impl CoreRunnerHandle {
                     None
                 };
 
+                // T70.0: Record DAG prepare time (only when DAG source is enabled)
+                #[cfg(feature = "metrics")]
+                if matches!(block_tx_source, BlockTxSource::DagCandidate) {
+                    let dag_prepare_elapsed = dag_prepare_start.elapsed().as_secs_f64();
+                    crate::metrics::observe_block_dag_prepare_seconds(dag_prepare_elapsed);
+                }
+
+                // T70.0: Track executor time
+                #[cfg(feature = "metrics")]
+                let exec_start = std::time::Instant::now();
+
                 // T54 Step 9: Use the executor instead of run_one_slot
                 let outcome: Result<SlotOutcome, eezo_ledger::ConsensusError> = {
                     let mut guard = node_c.lock().await;
@@ -960,7 +999,14 @@ impl CoreRunnerHandle {
                     
                     // 4. Execute block using the executor
                     let exec_outcome = exec.execute_block(&mut guard, exec_input);
-                    
+
+                    // T70.0: Record executor time
+                    #[cfg(feature = "metrics")]
+                    {
+                        let exec_elapsed = exec_start.elapsed().as_secs_f64();
+                        crate::metrics::observe_block_exec_seconds(exec_elapsed);
+                    }
+
                     // 5. Process outcome
                     match exec_outcome.result {
                         Ok(blk) => {
@@ -1043,6 +1089,8 @@ impl CoreRunnerHandle {
                     crate::metrics::EEZO_BLOCK_E2E_LATENCY_SECONDS
                         .with_label_values(&["commit"])
                         .observe(sec);
+                    // T70.0: Also record total block latency for perf harness
+                    crate::metrics::observe_block_total_latency_seconds(sec);
                 }				
                 match outcome {
                      // FIX: Revert pattern match to only use 'height'
