@@ -532,7 +532,7 @@ pub enum DagTemplatePolicy {
     CleanOnly,
     /// Allow some failures but not too many.
     /// Accept if txs_failed <= MAX_FAILED_RATIO * txs_total.
-    ToleratPartial,
+    ToleratePartial,
 }
 
 impl Default for DagTemplatePolicy {
@@ -551,7 +551,7 @@ impl DagTemplatePolicy {
             .as_str()
         {
             "clean_only" | "cleanonly" => DagTemplatePolicy::CleanOnly,
-            "tolerate_partial" | "toleratepartial" => DagTemplatePolicy::ToleratPartial,
+            "tolerate_partial" | "toleratepartial" => DagTemplatePolicy::ToleratePartial,
             _ => DagTemplatePolicy::Off,
         }
     }
@@ -568,7 +568,7 @@ pub struct DagTemplateGateDecision {
 
 /// T69.0: Evaluate whether a DAG template meets the policy requirements.
 ///
-/// # Thresholds for `ToleratPartial`:
+/// # Thresholds for `ToleratePartial`:
 /// - At most 10% of transactions can fail
 /// - At least 1 successful transaction is required
 pub fn evaluate_template_policy(
@@ -577,7 +577,7 @@ pub fn evaluate_template_policy(
     txs_failed: usize,
     would_apply_cleanly: bool,
 ) -> DagTemplateGateDecision {
-    // Thresholds for ToleratPartial mode
+    // Thresholds for ToleratePartial mode
     const MAX_FAILED_RATIO: f64 = 0.10; // At most 10% failed
 
     match policy {
@@ -603,7 +603,7 @@ pub fn evaluate_template_policy(
             }
         }
 
-        DagTemplatePolicy::ToleratPartial => {
+        DagTemplatePolicy::ToleratePartial => {
             let txs_total = txs_ok + txs_failed;
 
             // Edge case: no txs at all
@@ -2196,34 +2196,34 @@ mod tests {
         assert!(!decision.accept, "CleanOnly should reject when would_apply_cleanly=false");
     }
 
-    /// T69.0: Test that policy=ToleratPartial accepts within tolerance.
+    /// T69.0: Test that policy=ToleratePartial accepts within tolerance.
     #[test]
     fn evaluate_template_policy_tolerate_partial() {
         // 10% failure ratio threshold
 
         // Should accept: 10 ok, 1 failed = 9.09% failure < 10%
-        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratPartial, 10, 1, false);
-        assert!(decision.accept, "ToleratPartial should accept 9.09% failure rate");
+        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratePartial, 10, 1, false);
+        assert!(decision.accept, "ToleratePartial should accept 9.09% failure rate");
 
         // Should accept: 9 ok, 1 failed = 10% failure (exactly at threshold)
-        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratPartial, 9, 1, false);
-        assert!(decision.accept, "ToleratPartial should accept exactly 10% failure rate");
+        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratePartial, 9, 1, false);
+        assert!(decision.accept, "ToleratePartial should accept exactly 10% failure rate");
 
         // Should reject: 8 ok, 2 failed = 20% failure > 10%
-        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratPartial, 8, 2, false);
-        assert!(!decision.accept, "ToleratPartial should reject 20% failure rate");
+        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratePartial, 8, 2, false);
+        assert!(!decision.accept, "ToleratePartial should reject 20% failure rate");
 
         // Should reject: 0 ok, 1 failed = 100% failure
-        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratPartial, 0, 1, false);
-        assert!(!decision.accept, "ToleratPartial should reject when no successful txs");
+        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratePartial, 0, 1, false);
+        assert!(!decision.accept, "ToleratePartial should reject when no successful txs");
 
         // Should reject: 0 ok, 0 failed = empty
-        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratPartial, 0, 0, false);
-        assert!(!decision.accept, "ToleratPartial should reject when no txs");
+        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratePartial, 0, 0, false);
+        assert!(!decision.accept, "ToleratePartial should reject when no txs");
 
         // Should accept: all successful
-        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratPartial, 10, 0, true);
-        assert!(decision.accept, "ToleratPartial should accept when all txs succeed");
+        let decision = evaluate_template_policy(DagTemplatePolicy::ToleratePartial, 10, 0, true);
+        assert!(decision.accept, "ToleratePartial should accept when all txs succeed");
     }
 
     /// T69.0: Test DagTemplatePolicy::from_env parsing.
