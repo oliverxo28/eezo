@@ -1380,8 +1380,17 @@ impl CoreRunnerHandle {
                 // T68.1: Check if we got txs from DAG
                 if let Some(mut txs) = dag_txs {
                     if !txs.is_empty() {
-                        // Apply max_tx cap if configured
+                        // Apply max_tx cap if configured.
+                        // NOTE: Unlike the mempool path, we do NOT need to re-enqueue
+                        // overflow txs because the DAG's collect_block_txs_from_dag()
+                        // uses get_bytes_for_hashes() which is read-only. The txs are
+                        // still in the mempool and will be included in future blocks.
                         if block_max_tx < usize::MAX && txs.len() > block_max_tx {
+                            log::debug!(
+                                "dag_tx_source: truncating from {} to {} txs (overflow stays in mempool)",
+                                txs.len(),
+                                block_max_tx
+                            );
                             txs.truncate(block_max_tx);
                         }
 
