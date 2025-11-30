@@ -1307,3 +1307,25 @@ pub fn dag_block_source_fallback_inc() {
     }
 }
 
+// -----------------------------------------------------------------------------
+// T69.0 — DAG template gate metrics
+// -----------------------------------------------------------------------------
+/// Counter: DAG candidates rejected due to template quality gate.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_TEMPLATE_GATE_REJECTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_template_gate_rejected_total",
+        "Number of DAG candidates rejected due to template quality gate"
+    )
+    .unwrap()
+});
+
+/// Helper: increment DAG template gate rejected counter.
+#[inline]
+pub fn dag_template_gate_rejected_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_TEMPLATE_GATE_REJECTED_TOTAL.inc();
+    }
+}
+
