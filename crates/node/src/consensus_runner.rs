@@ -168,7 +168,7 @@ impl CoreRunnerHandle {
             .as_str()
         {
             "dag" | "dagcandidate" => {
-                log::info!("consensus: block tx source = DAG candidate (mempool-backed for now)");
+                log::info!("consensus: block tx source = DAG candidate (with mempool fallback)");
                 BlockTxSource::DagCandidate
             }
             _ => {
@@ -191,6 +191,9 @@ impl CoreRunnerHandle {
             log::info!("executor: mode=single");
             Box::new(SingleExecutor::new())
         };
+
+        // T68.1: Clone the DAG handle for use inside the spawned task
+        let dag_c = Arc::clone(&dag);
 
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
@@ -227,7 +230,29 @@ impl CoreRunnerHandle {
                 ticker.tick().await;
                 #[cfg(feature = "metrics")]
                 let slot_start = std::time::Instant::now();
-                
+
+                // T68.1: If DAG source is selected, try to fetch txs from DAG first
+                // (before acquiring the node lock). This allows the DAG handle to
+                // access its mempool without blocking the node mutex.
+                let dag_txs: Option<Vec<SignedTx>> = if matches!(block_tx_source, BlockTxSource::DagCandidate) {
+                    // Try to get DAG handle
+                    let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
+                    if let Some(dag_handle) = dag_opt {
+                        // Read block_byte_budget from node config (we need to peek at it)
+                        let block_byte_budget = {
+                            let guard = node_c.lock().await;
+                            guard.cfg.block_byte_budget
+                        };
+                        // Call the async DAG tx collection method
+                        dag_handle.collect_block_txs_from_dag(block_byte_budget).await
+                    } else {
+                        log::debug!("dag_tx_source: DagCandidate selected but no DAG handle attached");
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 // T54 Step 9: Use the executor instead of run_one_slot
                 let outcome: Result<SlotOutcome, eezo_ledger::ConsensusError> = {
                     let mut guard = node_c.lock().await;
@@ -244,11 +269,12 @@ impl CoreRunnerHandle {
                         None
                     };
                     
-                    // 1–2. Collect transactions for this block from the chosen source
-                    //      (currently mempool-only; applies byte budget + EEZO_BLOCK_MAX_TX cap,
-                    //       re-enqueues overflow).
-                    let txs = Self::collect_block_txs(
+                    // 1–2. Collect transactions for this block from the chosen source.
+                    // T68.1: If DAG source is selected and returned txs, use those;
+                    // otherwise fall back to mempool.
+                    let txs = Self::collect_block_txs_with_dag_fallback(
                         block_tx_source,
+                        dag_txs,
                         &mut guard,
                         block_max_tx,
                     );
@@ -762,7 +788,7 @@ impl CoreRunnerHandle {
             .as_str()
         {
             "dag" | "dagcandidate" => {
-                log::info!("consensus: block tx source = DAG candidate (mempool-backed for now)");
+                log::info!("consensus: block tx source = DAG candidate (with mempool fallback)");
                 BlockTxSource::DagCandidate
             }
             _ => {
@@ -786,6 +812,9 @@ impl CoreRunnerHandle {
             Box::new(SingleExecutor::new())
         };
 
+        // T68.1: Clone the DAG handle for use inside the spawned task
+        let dag_c = Arc::clone(&dag);
+
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
 			// expose T36.6 bridge metrics on /metrics immediately
@@ -804,7 +833,29 @@ impl CoreRunnerHandle {
                 if stop_c.load(Ordering::Relaxed) { break; }
                 ticker.tick().await;
                 #[cfg(feature = "metrics")]
-                let slot_start = std::time::Instant::now();				
+                let slot_start = std::time::Instant::now();
+
+                // T68.1: If DAG source is selected, try to fetch txs from DAG first
+                // (before acquiring the node lock). This allows the DAG handle to
+                // access its mempool without blocking the node mutex.
+                let dag_txs: Option<Vec<SignedTx>> = if matches!(block_tx_source, BlockTxSource::DagCandidate) {
+                    // Try to get DAG handle
+                    let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
+                    if let Some(dag_handle) = dag_opt {
+                        // Read block_byte_budget from node config (we need to peek at it)
+                        let block_byte_budget = {
+                            let guard = node_c.lock().await;
+                            guard.cfg.block_byte_budget
+                        };
+                        // Call the async DAG tx collection method
+                        dag_handle.collect_block_txs_from_dag(block_byte_budget).await
+                    } else {
+                        log::debug!("dag_tx_source: DagCandidate selected but no DAG handle attached");
+                        None
+                    }
+                } else {
+                    None
+                };
 
                 // T54 Step 9: Use the executor instead of run_one_slot
                 let outcome: Result<SlotOutcome, eezo_ledger::ConsensusError> = {
@@ -822,11 +873,12 @@ impl CoreRunnerHandle {
                         None
                     };
                     
-                    // 1–2. Collect transactions for this block from the chosen source
-                    //      (currently mempool-only; applies byte budget + EEZO_BLOCK_MAX_TX cap,
-                    //       re-enqueues overflow).
-                    let txs = Self::collect_block_txs(
+                    // 1–2. Collect transactions for this block from the chosen source.
+                    // T68.1: If DAG source is selected and returned txs, use those;
+                    // otherwise fall back to mempool.
+                    let txs = Self::collect_block_txs_with_dag_fallback(
                         block_tx_source,
+                        dag_txs,
                         &mut guard,
                         block_max_tx,
                     );
@@ -1291,39 +1343,87 @@ impl CoreRunnerHandle {
     ) -> Vec<SignedTx> {
         match source {
             BlockTxSource::Mempool => {
-                // 1. Drain transactions from mempool based on byte budget
-                let block_byte_budget = guard.cfg.block_byte_budget;
-                let mut txs = guard.mempool.drain_for_block(block_byte_budget);
-
-                // 2. Apply max_tx cap if configured, re-enqueue overflow
-                if block_max_tx < usize::MAX && txs.len() > block_max_tx {
-                    let dropped = txs.split_off(block_max_tx);
-                    for tx in dropped {
-                        guard.mempool.enqueue_tx(tx);
-                    }
-                }
-
-                txs
+                Self::collect_from_mempool(guard, block_max_tx)
             }
 
             BlockTxSource::DagCandidate => {
                 // T68.0: For now, DagCandidate is just a thin wrapper over the mempool
                 // behaviour. Real DAG-driven tx selection will arrive in T68.1+.
+                // NOTE: This path is only used by the non-persistence spawn variant.
+                // The persistence-enabled spawn uses collect_block_txs_with_dag_fallback.
                 log::debug!("dag_tx_source: DagCandidate mode selected → using mempool (T68.0 stub)");
+                Self::collect_from_mempool(guard, block_max_tx)
+            }
+        }
+    }
 
-                let block_byte_budget = guard.cfg.block_byte_budget;
-                let mut txs = guard.mempool.drain_for_block(block_byte_budget);
+    /// T68.1: Collect block txs with proper DAG fallback logic.
+    ///
+    /// If `dag_txs` is Some and non-empty, use those txs (sourced from DAG candidate).
+    /// Otherwise, fall back to draining from mempool (same as BlockTxSource::Mempool).
+    ///
+    /// This function is called from the persistence-enabled spawn path where we can
+    /// fetch DAG txs before acquiring the node lock.
+    fn collect_block_txs_with_dag_fallback(
+        source: BlockTxSource,
+        dag_txs: Option<Vec<SignedTx>>,
+        guard: &mut SingleNode,
+        block_max_tx: usize,
+    ) -> Vec<SignedTx> {
+        match source {
+            BlockTxSource::Mempool => {
+                // Pure mempool mode - no DAG involvement
+                Self::collect_from_mempool(guard, block_max_tx)
+            }
 
-                if block_max_tx < usize::MAX && txs.len() > block_max_tx {
-                    let dropped = txs.split_off(block_max_tx);
-                    for tx in dropped {
-                        guard.mempool.enqueue_tx(tx);
+            BlockTxSource::DagCandidate => {
+                // T68.1: Check if we got txs from DAG
+                if let Some(mut txs) = dag_txs {
+                    if !txs.is_empty() {
+                        // Apply max_tx cap if configured
+                        if block_max_tx < usize::MAX && txs.len() > block_max_tx {
+                            txs.truncate(block_max_tx);
+                        }
+
+                        log::info!(
+                            "dag_tx_source: using {} tx(s) from DAG candidate",
+                            txs.len()
+                        );
+
+                        // T68.1: Update metrics - DAG source used
+                        #[cfg(feature = "metrics")]
+                        crate::metrics::dag_block_source_used_inc();
+
+                        return txs;
                     }
                 }
 
-                txs
+                // T68.1: DAG returned None or empty - fall back to mempool
+                log::info!("dag_tx_source: DAG candidate empty/unavailable, falling back to mempool");
+
+                // T68.1: Update metrics - fallback to mempool
+                #[cfg(feature = "metrics")]
+                crate::metrics::dag_block_source_fallback_inc();
+
+                Self::collect_from_mempool(guard, block_max_tx)
             }
         }
+    }
+
+    /// Helper: Drain transactions from mempool with byte budget and max_tx cap.
+    fn collect_from_mempool(guard: &mut SingleNode, block_max_tx: usize) -> Vec<SignedTx> {
+        let block_byte_budget = guard.cfg.block_byte_budget;
+        let mut txs = guard.mempool.drain_for_block(block_byte_budget);
+
+        // Apply max_tx cap if configured, re-enqueue overflow
+        if block_max_tx < usize::MAX && txs.len() > block_max_tx {
+            let dropped = txs.split_off(block_max_tx);
+            for tx in dropped {
+                guard.mempool.enqueue_tx(tx);
+            }
+        }
+
+        txs
     }
 
     /// T63.1: Get a snapshot of the current accounts and supply for dry-run execution.
