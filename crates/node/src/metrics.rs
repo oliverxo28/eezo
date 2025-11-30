@@ -1154,5 +1154,116 @@ pub static EEZO_DAG_HEIGHT_MAX: Lazy<IntGauge> = Lazy::new(|| {
     )
     .unwrap()
 });
+// -----------------------------------------------------------------------------
+// T65.2 — DAG template & compare metrics
+// -----------------------------------------------------------------------------
+/// Gauge: number of txs in the DAG shadow block template that would succeed
+/// under dry-run execution.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_TEMPLATE_TXS_OK: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_template_txs_ok",
+        "Number of txs that would succeed in the DAG shadow block template"
+    )
+    .unwrap()
+});
+
+/// Gauge: number of txs in the DAG shadow block template that would fail
+/// under dry-run execution.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_TEMPLATE_TXS_FAILED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_template_txs_failed",
+        "Number of txs that would fail in the DAG shadow block template"
+    )
+    .unwrap()
+});
+
+/// Gauge: 1 if the current DAG shadow template would apply cleanly
+/// (no failed txs), else 0.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_TEMPLATE_WOULD_APPLY_CLEANLY: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_template_would_apply_cleanly",
+        "1 if DAG shadow block template would apply cleanly, else 0"
+    )
+    .unwrap()
+});
+
+/// Gauge: overlap count between DAG candidate tx hashes and last committed block.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_COMPARE_OVERLAP: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_compare_overlap",
+        "Number of tx hashes shared by DAG candidate and latest committed block"
+    )
+    .unwrap()
+});
+
+/// Gauge: tx hashes only present in DAG candidate, not in last committed block.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_COMPARE_ONLY_IN_DAG: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_compare_only_in_dag",
+        "Number of tx hashes only in DAG candidate (not in last committed block)"
+    )
+    .unwrap()
+});
+
+/// Gauge: tx hashes only present in latest committed block, not in DAG candidate.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_COMPARE_ONLY_IN_BLOCK: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_compare_only_in_block",
+        "Number of tx hashes only in latest committed block (not in DAG candidate)"
+    )
+    .unwrap()
+});
+
+/// Helper: update DAG template metrics from optional template fields.
+#[inline]
+pub fn dag_template_metrics_set(
+    txs_ok: Option<usize>,
+    txs_failed: Option<usize>,
+    would_apply_cleanly: Option<bool>,
+) {
+    #[cfg(feature = "metrics")]
+    {
+        let ok = txs_ok.unwrap_or(0) as i64;
+        let failed = txs_failed.unwrap_or(0) as i64;
+        let clean_flag = match would_apply_cleanly {
+            Some(true) => 1,
+            Some(false) => 0,
+            None => 0,
+        };
+
+        EEZO_DAG_TEMPLATE_TXS_OK.set(ok);
+        EEZO_DAG_TEMPLATE_TXS_FAILED.set(failed);
+        EEZO_DAG_TEMPLATE_WOULD_APPLY_CLEANLY.set(clean_flag);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = (txs_ok, txs_failed, would_apply_cleanly);
+    }
+}
+
+/// Helper: update DAG candidate vs block compare metrics.
+#[inline]
+pub fn dag_compare_metrics_set(
+    overlap: usize,
+    only_in_dag: usize,
+    only_in_block: usize,
+) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_COMPARE_OVERLAP.set(overlap as i64);
+        EEZO_DAG_COMPARE_ONLY_IN_DAG.set(only_in_dag as i64);
+        EEZO_DAG_COMPARE_ONLY_IN_BLOCK.set(only_in_block as i64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = (overlap, only_in_dag, only_in_block);
+    }
+}
 
 

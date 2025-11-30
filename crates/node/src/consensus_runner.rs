@@ -21,6 +21,7 @@ use eezo_ledger::consensus_api::{SlotOutcome, NoOpReason};
 // --- END UPDATE ---\
 // --- FIX: Import Block ---\
 use eezo_ledger::Block; // Keep this import, as we'll need it to reconstruct the Block
+use eezo_ledger::SignedTx; // T66.0: used by collect_block_txs_from_mempool()
 
 /// T60.0 — helper: log a compact summary of block tx hashes.
 /// This does **not** change behaviour; it only logs.
@@ -63,6 +64,8 @@ fn log_block_shadow_debug(prefix: &str, height: u64, blk_opt: &Option<Block>) {
 use crate::executor::{Executor, ExecInput};
 use crate::executor::{SingleExecutor};
 use crate::executor::ParallelExecutor;
+// T67.0: DAG runner handle for future DAG-aware block building
+use crate::dag_runner::DagRunnerHandle;
 
 // T36.6 metrics hooks
 #[cfg(feature = "metrics")]
@@ -113,7 +116,15 @@ fn qc_sidecar_enforce_on() -> bool {
     #[cfg(not(feature = "qc-sidecar-v2-enforce"))]
     { false }
 }
-
+#[derive(Copy, Clone, Debug)]
+enum BlockTxSource {
+    /// Current behaviour: collect txs directly from mempool.
+    Mempool,
+    /// New mode (T68.0): conceptually "DAG candidate", but currently implemented
+    /// as a thin wrapper that falls back to mempool. Real DAG usage will land
+    /// in T68.1+.
+    DagCandidate,
+}
 /// Drives a `SingleNode` by calling `run_one_slot()` on a fixed cadence.
 /// No networking, no HTTP, no persistence here. Pure runner.
 pub struct CoreRunnerHandle {
@@ -125,18 +136,24 @@ pub struct CoreRunnerHandle {
     #[cfg(feature = "persistence")]
     #[allow(dead_code)]
     db: Option<Arc<Persistence>>,
+    // T67.0: optional DAG runner handle for future DAG-aware block building
+    // Stored behind a Mutex so we can attach it after construction.
+    #[allow(dead_code)]
+    dag: Arc<Mutex<Option<Arc<DagRunnerHandle>>>>,
     join: tokio::task::JoinHandle<()>,
 }
-
 impl CoreRunnerHandle {
     /// Spawn the runner with a given tick interval (milliseconds).
     /// `rollback_on_error` controls whether to roll back on slot errors.
+    #[cfg(not(feature = "persistence"))]
     #[cfg(not(feature = "persistence"))]
     pub fn spawn(node: SingleNode, tick_ms: u64, rollback_on_error: bool) -> Arc<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let node = Arc::new(Mutex::new(node));
         let stop_c = Arc::clone(&stop);
         let node_c = Arc::clone(&node);
+        // T67.0: start with no DAG handle; it can be attached later
+        let dag = Arc::new(Mutex::new(None));
         // Note: db_c is not available in this cfg block
 
         // 1️⃣ Add MAX_TX reading at struct init (persistence disabled path)
@@ -144,6 +161,21 @@ impl CoreRunnerHandle {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(usize::MAX);
+		// T68.0: select block tx source from env (default: mempool).
+        let block_tx_source = match std::env::var("EEZO_BLOCK_TX_SOURCE")
+            .unwrap_or_else(|_| "mempool".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "dag" | "dagcandidate" => {
+                log::info!("consensus: block tx source = DAG candidate (mempool-backed for now)");
+                BlockTxSource::DagCandidate
+            }
+            _ => {
+                log::info!("consensus: block tx source = mempool (default)");
+                BlockTxSource::Mempool
+            }
+        };	
             
         // T54: choose executor mode/threads from env (parallel vs single)
         let exec_threads = std::env::var("EEZO_EXECUTOR_THREADS")
@@ -212,21 +244,17 @@ impl CoreRunnerHandle {
                         None
                     };
                     
-                    // 1. Drain transactions from mempool
-                    let block_byte_budget = guard.cfg.block_byte_budget;
-                    let candidates = guard.mempool.drain_for_block(block_byte_budget);
-                    
-                    // 2. Apply max_tx cap if configured
-                    let mut txs = candidates;
-                    if block_max_tx < usize::MAX && txs.len() > block_max_tx {
-                        let dropped = txs.split_off(block_max_tx);
-                        for tx in dropped {
-                            guard.mempool.enqueue_tx(tx);
-                        }
-                    }
-                    
+                    // 1–2. Collect transactions for this block from the chosen source
+                    //      (currently mempool-only; applies byte budget + EEZO_BLOCK_MAX_TX cap,
+                    //       re-enqueues overflow).
+                    let txs = Self::collect_block_txs(
+                        block_tx_source,
+                        &mut guard,
+                        block_max_tx,
+                    );
+
                     let next_height = guard.height + 1;
-                    
+
                     // 3. Create executor input
                     let exec_input = ExecInput::new(txs, next_height);
                     
@@ -705,6 +733,7 @@ impl CoreRunnerHandle {
             // db field is not present when persistence is off
             #[cfg(feature = "persistence")] // Ensure db is only included when feature is on
             db: None, // This branch explicitly lacks persistence
+            dag,
             join,
         })
     }
@@ -717,6 +746,8 @@ impl CoreRunnerHandle {
         let stop_c = Arc::clone(&stop);
         let node_c = Arc::clone(&node);
         let db_c = db.clone();
+        // T67.0: start with no DAG handle; it can be attached later
+        let dag = Arc::new(Mutex::new(None));
         // Clone Option<Arc<Persistence>> for the loop
 
         // 1️⃣ Add MAX_TX reading at struct init (persistence enabled path)
@@ -724,6 +755,21 @@ impl CoreRunnerHandle {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(usize::MAX);
+		// T68.0: select block tx source from env (default: mempool).
+        let block_tx_source = match std::env::var("EEZO_BLOCK_TX_SOURCE")
+            .unwrap_or_else(|_| "mempool".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "dag" | "dagcandidate" => {
+                log::info!("consensus: block tx source = DAG candidate (mempool-backed for now)");
+                BlockTxSource::DagCandidate
+            }
+            _ => {
+                log::info!("consensus: block tx source = mempool (default)");
+                BlockTxSource::Mempool
+            }
+        };	
 
         // T54: choose executor mode/threads from env (parallel vs single)
         let exec_threads = std::env::var("EEZO_EXECUTOR_THREADS")
@@ -776,21 +822,17 @@ impl CoreRunnerHandle {
                         None
                     };
                     
-                    // 1. Drain transactions from mempool
-                    let block_byte_budget = guard.cfg.block_byte_budget;
-                    let candidates = guard.mempool.drain_for_block(block_byte_budget);
-                    
-                    // 2. Apply max_tx cap if configured
-                    let mut txs = candidates;
-                    if block_max_tx < usize::MAX && txs.len() > block_max_tx {
-                        let dropped = txs.split_off(block_max_tx);
-                        for tx in dropped {
-                            guard.mempool.enqueue_tx(tx);
-                        }
-                    }
-                    
+                    // 1–2. Collect transactions for this block from the chosen source
+                    //      (currently mempool-only; applies byte budget + EEZO_BLOCK_MAX_TX cap,
+                    //       re-enqueues overflow).
+                    let txs = Self::collect_block_txs(
+                        block_tx_source,
+                        &mut guard,
+                        block_max_tx,
+                    );
+
                     let next_height = guard.height + 1;
-                    
+
                     // 3. Create executor input
                     let exec_input = ExecInput::new(txs, next_height);
                     
@@ -1192,10 +1234,34 @@ impl CoreRunnerHandle {
 
             log::info!("consensus: runner stopped");
         });
-        Arc::new(Self { stop, node, db, join }) // db field included here
+        Arc::new(Self {
+            stop,
+            node,
+            db,
+            dag,
+            join,
+        })
     }
+	/// T67.0: attach or clear the DAG runner handle (no behaviour change yet).
+    ///
+    /// This is called from main.rs once both CoreRunnerHandle and DagRunnerHandle
+    /// (if any) have been constructed. For now we only store the handle and log;
+    /// the proposer logic does not read it yet.
+    pub async fn set_dag_runner(self: &Arc<Self>, dag: Option<Arc<DagRunnerHandle>>) {
+        {
+            let mut guard = self.dag.lock().await;
+            *guard = dag.clone();
+        }
 
-
+        match dag {
+            Some(_) => {
+                log::info!("consensus: core_runner: dag handle attached");
+            }
+            None => {
+                log::info!("consensus: core_runner: dag handle absent");
+            }
+        }
+    }
     /// Request stop and wait for the loop to finish.
     pub async fn stop(self: &Arc<Self>) {
         // Use Relaxed ordering
@@ -1212,6 +1278,52 @@ impl CoreRunnerHandle {
     {
         let mut g = self.node.lock().await;
         f(&mut g)
+    }
+
+    /// T66.1: helper to collect block txs for the next block from a given source.
+    ///
+    /// Today this only supports `BlockTxSource::Mempool` (current behaviour).
+    /// Later tasks can extend this to support DAG candidates.
+    fn collect_block_txs(
+        source: BlockTxSource,
+        guard: &mut SingleNode,
+        block_max_tx: usize,
+    ) -> Vec<SignedTx> {
+        match source {
+            BlockTxSource::Mempool => {
+                // 1. Drain transactions from mempool based on byte budget
+                let block_byte_budget = guard.cfg.block_byte_budget;
+                let mut txs = guard.mempool.drain_for_block(block_byte_budget);
+
+                // 2. Apply max_tx cap if configured, re-enqueue overflow
+                if block_max_tx < usize::MAX && txs.len() > block_max_tx {
+                    let dropped = txs.split_off(block_max_tx);
+                    for tx in dropped {
+                        guard.mempool.enqueue_tx(tx);
+                    }
+                }
+
+                txs
+            }
+
+            BlockTxSource::DagCandidate => {
+                // T68.0: For now, DagCandidate is just a thin wrapper over the mempool
+                // behaviour. Real DAG-driven tx selection will arrive in T68.1+.
+                log::debug!("dag_tx_source: DagCandidate mode selected → using mempool (T68.0 stub)");
+
+                let block_byte_budget = guard.cfg.block_byte_budget;
+                let mut txs = guard.mempool.drain_for_block(block_byte_budget);
+
+                if block_max_tx < usize::MAX && txs.len() > block_max_tx {
+                    let dropped = txs.split_off(block_max_tx);
+                    for tx in dropped {
+                        guard.mempool.enqueue_tx(tx);
+                    }
+                }
+
+                txs
+            }
+        }
     }
 
     /// T63.1: Get a snapshot of the current accounts and supply for dry-run execution.

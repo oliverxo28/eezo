@@ -561,6 +561,212 @@ async fn dag_block_dry_run_handler() -> Response {
     )
         .into_response()
 }
+/// T64.1: GET /dag/block_template
+///
+/// Returns a synthetic Hotstuff-style block template derived from the current
+/// DAG candidate, using the same shadow execution state as /dag/block_dry_run.
+/// This does NOT commit anything; it only inspects DAG + mempool.
+#[cfg(feature = "pq44-runtime")]
+async fn dag_block_template_handler(State(state): State<AppState>) -> Response {
+    if let Some(dag) = state.dag_runner.as_ref() {
+        // Reuse the same real-state snapshot logic as /dag/block_dry_run
+        let real_state = if let Some(core) = state.core_runner.as_ref() {
+            Some(core.snapshot_accounts_supply().await)
+        } else {
+            None
+        };
+
+        match dag.block_template_shadow(real_state).await {
+            Some(template) => (StatusCode::OK, Json(template)).into_response(),
+            None => {
+                // No candidate or no txs – return a small "empty" marker
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "status": "empty" })),
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "dag runner not active" })),
+        )
+            .into_response()
+    }
+}
+
+#[cfg(not(feature = "pq44-runtime"))]
+async fn dag_block_template_handler() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({ "error": "pq44-runtime disabled" })),
+    )
+        .into_response()
+}
+/// T65.0: GET /dag/block_compare
+///
+/// Compare the current DAG candidate (tx hashes) against the latest committed
+/// block from the Hotstuff path (as tracked in `recent_blocks`).
+/// This is debug-only, read-only, and does **not** change real chain state.
+///
+/// The idea is: while DAG is building candidates from mempool, we can inspect
+/// how much that candidate overlaps with the most recently committed block.
+#[derive(Serialize)]
+struct DagBlockCompareView {
+    dag_vertex_id: u64,
+    dag_round: u64,
+    dag_height: u64,
+    dag_tx_count: usize,
+    last_block_height: Option<u64>,
+    last_block_tx_count: usize,
+    overlap_count: usize,
+    only_in_dag: Vec<String>,
+    only_in_block: Vec<String>,
+
+    // T65.1: summary of the DAG shadow block template (from T64)
+    template_target_height: Option<u64>,
+    template_tx_count: Option<usize>,
+    template_txs_total: Option<usize>,
+    template_txs_ok: Option<usize>,
+    template_txs_failed: Option<usize>,
+    template_fee_total: Option<String>,
+    template_would_apply_cleanly: Option<bool>,
+}
+
+#[cfg(feature = "pq44-runtime")]
+async fn dag_block_compare_handler(State(state): State<AppState>) -> Response {
+    use std::collections::HashSet;
+
+    // Require a running DAG runner.
+    let dag = if let Some(d) = state.dag_runner.as_ref() {
+        d
+    } else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "dag runner not active" })),
+        )
+        .into_response();
+    };
+
+    // Fetch current DAG candidate debug view (tx hashes).
+    let candidate_opt = dag.latest_candidate_debug().await;
+    let candidate = if let Some(c) = candidate_opt {
+        c
+    } else {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "empty" })),
+        )
+        .into_response();
+    };
+
+    if candidate.tx_hashes.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "empty" })),
+        )
+        .into_response();
+    }
+
+    // T65.1: build a shadow block template, same as /dag/block_template
+    let real_state = if let Some(core) = state.core_runner.as_ref() {
+        Some(core.snapshot_accounts_supply().await)
+    } else {
+        None
+    };
+
+    let template_opt = dag.block_template_shadow(real_state).await;
+
+    let (
+        template_target_height,
+        template_tx_count,
+        template_txs_total,
+        template_txs_ok,
+        template_txs_failed,
+        template_fee_total,
+        template_would_apply_cleanly,
+    ) = if let Some(t) = template_opt {
+        (
+            Some(t.header.target_height),
+            Some(t.header.tx_count),
+            Some(t.header.txs_total),
+            Some(t.header.txs_ok),
+            Some(t.header.txs_failed),
+            Some(t.header.fee_total),
+            Some(t.header.would_apply_cleanly),
+        )
+    } else {
+        (None, None, None, None, None, None, None)
+    };
+
+    // Look up the latest committed block from the in-memory recent_blocks cache.
+    let rb = state.recent_blocks.read().await;
+    let (last_block_height, last_block_hashes): (Option<u64>, Vec<String>) =
+        if let Some((h, hashes)) = rb.by_height.iter().max_by_key(|(h, _)| *h) {
+            (Some(*h), hashes.clone())
+        } else {
+            (None, Vec::new())
+        };
+
+    // Build set views for overlap / difference calculations.
+    let dag_set: HashSet<String> = candidate.tx_hashes.iter().cloned().collect();
+    let block_set: HashSet<String> = last_block_hashes.iter().cloned().collect();
+
+    let overlap_count = dag_set.intersection(&block_set).count();
+
+    let mut only_in_dag: Vec<String> =
+        dag_set.difference(&block_set).cloned().collect();
+
+    let mut only_in_block: Vec<String> =
+        block_set.difference(&dag_set).cloned().collect();
+
+    // Sort for stable output (helps for debugging / tests).
+    only_in_dag.sort();
+    only_in_block.sort();
+	// T65.2: export template + compare metrics for Prometheus.
+    crate::metrics::dag_template_metrics_set(
+	    template_txs_ok,
+		template_txs_failed,
+		template_would_apply_cleanly,
+	);
+    crate::metrics::dag_compare_metrics_set(
+	    overlap_count,
+		only_in_dag.len(),
+		only_in_block.len(),
+	);	
+
+    let view = DagBlockCompareView {
+        dag_vertex_id: candidate.vertex_id,
+        dag_round: candidate.round,
+        dag_height: candidate.height,
+        dag_tx_count: candidate.tx_hashes.len(),
+        last_block_height,
+        last_block_tx_count: last_block_hashes.len(),
+        overlap_count,
+        only_in_dag,
+        only_in_block,
+
+        template_target_height,
+        template_tx_count,
+        template_txs_total,
+        template_txs_ok,
+        template_txs_failed,
+        template_fee_total,
+        template_would_apply_cleanly,
+    };
+
+    (StatusCode::OK, Json(view)).into_response()
+}
+
+#[cfg(not(feature = "pq44-runtime"))]
+async fn dag_block_compare_handler() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({ "error": "pq44-runtime disabled" })),
+    )
+        .into_response()
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct NodeIdentity {
@@ -1640,9 +1846,10 @@ async fn post_faucet(
                     node.dev_faucet_credit(addr_copy, amount as u128);
                 })
                 .await;
-        } else if state.dag_runner.is_some() {
-            // DAG mode: skip ledger credit for now (not implemented)
-            // The node-level accounts below will still be credited
+        } else if let Some(dag_runner) = &state.dag_runner {
+            // T63.x: DAG mode: credit the internal SingleNode's accounts
+            // so that /dag/block_dry_run can see the funded balance
+            dag_runner.dev_faucet_credit(ledger_addr, amount as u128).await;
         }
     }
 
@@ -3143,6 +3350,20 @@ async fn main() -> anyhow::Result<()> {
     }));
     let receipts = Arc::new(RwLock::new(HashMap::<String, Receipt>::new()));
 
+    // T67.0: wire optional DAG handle into core runner (no behaviour change).
+    // For now, we only store the handle and log its presence/absence.
+    #[cfg(feature = "pq44-runtime")]
+    {
+        if let (Some(core), Some(dag)) = (core_runner.clone(), dag_runner.clone()) {
+            // Both handles exist → attach DAG
+            core.set_dag_runner(Some(dag)).await;
+        } else if let Some(core) = core_runner.clone() {
+            // Only core runner exists (normal Hotstuff mode) → mark DAG as absent
+            core.set_dag_runner(None).await;
+        }
+        // If there is no core_runner at all (pure DAG mode), we don't call set_dag_runner.
+    }
+
     // 4️⃣ Pass both handles into AppState
     let state = AppState {
         runtime_config: runtime_config.clone(),
@@ -3380,6 +3601,8 @@ async fn main() -> anyhow::Result<()> {
 		.route("/dag/candidate", get(dag_candidate_handler))
         .route("/dag/block_preview", get(dag_block_preview_handler))
         .route("/dag/block_dry_run", get(dag_block_dry_run_handler))
+		.route("/dag/block_template", get(dag_block_template_handler))
+		.route("/dag/block_compare", get(dag_block_compare_handler))
         // T30 tx endpoints
         .route("/tx", post(post_tx))
         .route("/tx_batch", post(post_tx_batch)) // <-- ADDED
