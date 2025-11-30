@@ -1640,9 +1640,10 @@ async fn post_faucet(
                     node.dev_faucet_credit(addr_copy, amount as u128);
                 })
                 .await;
-        } else if state.dag_runner.is_some() {
-            // DAG mode: skip ledger credit for now (not implemented)
-            // The node-level accounts below will still be credited
+        } else if let Some(dag_runner) = &state.dag_runner {
+            // T63.x: DAG mode: credit the internal SingleNode's accounts
+            // so that /dag/block_dry_run can see the funded balance
+            dag_runner.dev_faucet_credit(ledger_addr, amount as u128).await;
         }
     }
 
