@@ -1111,6 +1111,24 @@ impl DagRunnerHandle {
             tx_results,
         })
     }
+
+    /// T63.x: Credit funds to an account in the DAG runner's internal SingleNode.
+    ///
+    /// This is used by the `/faucet` endpoint in DAG mode to ensure that the
+    /// dry-run execution has access to the same funded accounts.
+    pub async fn dev_faucet_credit(&self, addr: Address, amount: u128) {
+        let mut guard = self.node.lock().await;
+        guard.dev_faucet_credit(addr, amount);
+    }
+
+    /// T63.x: Get a snapshot of the current accounts and supply from the DAG runner's internal SingleNode.
+    ///
+    /// This is used by the `/dag/block_dry_run` endpoint to get the live ledger state
+    /// for dry-run execution without modifying it.
+    pub async fn snapshot_accounts_supply(&self) -> (Accounts, Supply) {
+        let guard = self.node.lock().await;
+        (guard.accounts.clone(), guard.supply.clone())
+    }
 }
 
 
@@ -1515,5 +1533,167 @@ mod tests {
         // Should serialize
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"would_apply_cleanly\":true"));
+    }
+
+    // -------------------------------------------------------------------------
+    // T63.x: Integration test for dry-run with faucet funding
+    // -------------------------------------------------------------------------
+
+    /// T63.x: Test that block_dry_run correctly uses funded accounts and
+    /// updates nonces sequentially as it applies transactions.
+    ///
+    /// This test simulates:
+    /// 1. Creating a DAG runner with a funded account
+    /// 2. Submitting multiple sequential transactions to mempool
+    /// 3. Creating a DAG vertex with those transaction hashes
+    /// 4. Running block_dry_run and verifying all txs succeed with correct nonces
+    #[tokio::test]
+    async fn dag_dry_run_with_funded_account_sequential_txs() {
+        use eezo_ledger::consensus::{SingleNode, SingleNodeCfg};
+        use eezo_ledger::Address;
+
+        // 1) Create a minimal SingleNode with a funded account
+        let chain_id = [0u8; 20];
+        let cfg = SingleNodeCfg {
+            chain_id,
+            block_byte_budget: 1 << 20,
+            header_cache_cap: 100,
+            ..Default::default()
+        };
+
+        // Generate dummy keys for SingleNode
+        let (pk, sk) = pqcrypto_mldsa::mldsa44::keypair();
+        let mut node = SingleNode::new(cfg, sk, pk);
+
+        // Create a sender address and fund it
+        let sender_bytes: [u8; 20] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                       0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+                                       0x17, 0x18, 0x19, 0x20];
+        let sender = Address(sender_bytes);
+
+        // Fund with enough for 10 txs (each tx: amount=1000 + fee=1 = 1001)
+        let initial_balance: u128 = 100_000;
+        node.dev_faucet_credit(sender, initial_balance);
+
+        // Verify the account was funded
+        let acct = node.accounts.get(&sender);
+        assert_eq!(acct.balance, initial_balance);
+        assert_eq!(acct.nonce, 0);
+
+        // 2) Create mempool and submit transactions
+        let mempool = SharedMempool::new(Mempool::new(100, 1024 * 1024, 100, 600));
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Create 5 sequential transactions (nonces 0, 1, 2, 3, 4)
+        let recipient_bytes: [u8; 20] = [0xca, 0xfe, 0xba, 0xbe, 0xca, 0xfe, 0xba, 0xbe,
+                                          0xca, 0xfe, 0xba, 0xbe, 0xca, 0xfe, 0xba, 0xbe,
+                                          0xca, 0xfe, 0xba, 0xbe];
+        let to_hex = format!("0x{}", hex::encode(recipient_bytes));
+        let from_hex = format!("0x{}", hex::encode(sender_bytes));
+
+        let mut tx_hashes: Vec<TxHash> = Vec::new();
+        for nonce in 0..5u64 {
+            let envelope = serde_json::json!({
+                "tx": {
+                    "from": from_hex,
+                    "to": to_hex,
+                    "amount": "1000",
+                    "fee": "1",
+                    "nonce": nonce.to_string(),
+                    "chain_id": "0x0000000000000000000000000000000000000001"
+                },
+                "pubkey": hex::encode(&sender_bytes), // Use sender bytes as pseudo-pubkey
+                "sig": ""
+            });
+            let raw = serde_json::to_vec(&envelope).unwrap();
+            let hash: [u8; 32] = *blake3::hash(&raw).as_bytes();
+            tx_hashes.push(hash);
+
+            mempool.submit(ip, hash, raw).await.unwrap();
+        }
+
+        // 3) Create a DAG store and insert a vertex with the tx hashes
+        let dag = DagStore::new();
+        let payload = DagPayload::from_tx_hashes_raw(tx_hashes.clone());
+        let _vertex = dag.insert_vertex_with_payload(vec![], 1, 1, payload).await;
+
+        // 4) Now we need to create a mock DagRunnerHandle to test block_dry_run
+        // Since DagRunnerHandle::spawn starts a background task, we'll test the
+        // underlying logic directly using the internal state
+
+        // Create Accounts and Supply from the funded node
+        let accounts = node.accounts.clone();
+        let supply = node.supply.clone();
+
+        // Get the candidate from the DAG
+        let candidate = dag.latest_candidate_debug().await.unwrap();
+        assert_eq!(candidate.tx_hashes.len(), 5);
+
+        // Get the tx bytes from mempool
+        let raw_bytes = mempool.get_bytes_for_hashes(&tx_hashes).await;
+        assert_eq!(raw_bytes.len(), 5);
+
+        // 5) Manually execute the dry-run logic (same as in block_dry_run)
+        let mut shadow_accounts = accounts.clone();
+        let mut shadow_supply = supply.clone();
+
+        let mut all_success = true;
+        let mut tx_results: Vec<(u64, bool, Option<String>)> = Vec::new();
+
+        for (hash, bytes) in raw_bytes {
+            // Parse the tx
+            let stx = parse_signed_tx_from_envelope(&bytes);
+            if stx.is_none() {
+                tx_results.push((0, false, Some("parse failed".to_string())));
+                all_success = false;
+                continue;
+            }
+            let stx = stx.unwrap();
+
+            // Derive sender
+            let sender_derived = sender_from_pubkey_first20(&stx);
+            if sender_derived.is_none() {
+                tx_results.push((stx.core.nonce, false, Some("invalid sender".to_string())));
+                all_success = false;
+                continue;
+            }
+            let sender_addr = sender_derived.unwrap();
+
+            // Validate and apply
+            match validate_tx_stateful(&shadow_accounts, sender_addr, &stx.core) {
+                Ok(()) => {
+                    match apply_tx(&mut shadow_accounts, &mut shadow_supply, sender_addr, &stx.core) {
+                        Ok(()) => {
+                            tx_results.push((stx.core.nonce, true, None));
+                        }
+                        Err(e) => {
+                            tx_results.push((stx.core.nonce, false, Some(format!("{}", e))));
+                            all_success = false;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tx_results.push((stx.core.nonce, false, Some(format!("{}", e))));
+                    all_success = false;
+                }
+            }
+        }
+
+        // 6) Verify results: all 5 txs should succeed
+        assert_eq!(tx_results.len(), 5, "Expected 5 tx results");
+        for (i, (nonce, success, error)) in tx_results.iter().enumerate() {
+            assert!(
+                *success,
+                "tx {} (nonce {}) should succeed, but got error: {:?}",
+                i, nonce, error
+            );
+        }
+        assert!(all_success, "All transactions should succeed");
+
+        // 7) Verify the shadow state was correctly updated
+        let final_acct = shadow_accounts.get(&sender);
+        // Each tx costs 1001 (1000 + 1 fee), 5 txs = 5005
+        assert_eq!(final_acct.balance, initial_balance - 5 * 1001);
+        assert_eq!(final_acct.nonce, 5); // Started at 0, incremented 5 times
     }
 }
