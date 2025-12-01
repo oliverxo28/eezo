@@ -77,18 +77,37 @@ pub struct RealGpuHandle {
     ctx: eezo_prover::gpu_hash::GpuBlake3Context,
 }
 
+/// T71.1: Mutex to protect GPU initialization (env var manipulation is not thread-safe).
+#[cfg(feature = "gpu-hash")]
+static GPU_INIT_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// T71.1: Cached GPU handle result, initialized once per process.
+#[cfg(feature = "gpu-hash")]
+static GPU_HANDLE_CACHE: OnceLock<Option<RealGpuHandle>> = OnceLock::new();
+
 #[cfg(feature = "gpu-hash")]
 impl RealGpuHandle {
-    /// T71.1: Attempt to initialize the real GPU backend.
+    /// T71.1: Attempt to initialize the real GPU backend (cached, thread-safe).
     ///
     /// This creates a `GpuBlake3Context` from the prover crate. We override
     /// the prover's env var (EEZO_GPU_HASH_REAL) temporarily to "1" so that
     /// the context attempts real GPU initialization, but this is controlled
     /// by the node's EEZO_NODE_GPU_HASH env var at a higher level.
     ///
-    /// Returns None if GPU initialization fails (logged + metric).
-    pub fn try_init() -> Option<Self> {
+    /// Returns a reference to the cached handle, or None if GPU initialization failed.
+    /// Initialization is performed only once per process.
+    pub fn try_init() -> Option<&'static Self> {
+        GPU_HANDLE_CACHE
+            .get_or_init(|| Self::init_gpu_backend_internal())
+            .as_ref()
+    }
+
+    /// T71.1: Internal GPU initialization with thread-safe env var manipulation.
+    fn init_gpu_backend_internal() -> Option<RealGpuHandle> {
         use eezo_prover::gpu_hash::GpuBlake3Context;
+
+        // T71.1: Acquire mutex to ensure thread-safe env var manipulation.
+        let _guard = GPU_INIT_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
         // T71.1: The prover's GpuBlake3Context::new() checks EEZO_GPU_HASH_REAL.
         // We temporarily set it to "1" to request real GPU init, but only if
@@ -135,8 +154,15 @@ impl RealGpuHandle {
     pub fn hash_block_body(&self, bytes: &[u8]) -> Result<[u8; 32], String> {
         use eezo_prover::gpu_hash::{Blake3GpuBackend, Blake3GpuBatch};
 
+        // T71.1: Check for integer overflow when casting bytes.len() to u32.
+        // On 64-bit systems, usize can be larger than u32::MAX.
+        let len: u32 = bytes
+            .len()
+            .try_into()
+            .map_err(|_| format!("Input too large for GPU hashing: {} bytes exceeds u32::MAX", bytes.len()))?;
+
         let offsets = [0u32];
-        let lens = [bytes.len() as u32];
+        let lens = [len];
         let mut digests_out = [0u8; 32];
 
         let mut batch = Blake3GpuBatch {
@@ -160,12 +186,20 @@ pub struct RealGpuHandle {
     _private: (),
 }
 
+/// T71.1: Cached GPU handle for stub (always None).
+#[cfg(not(feature = "gpu-hash"))]
+static GPU_HANDLE_CACHE_STUB: OnceLock<Option<RealGpuHandle>> = OnceLock::new();
+
 #[cfg(not(feature = "gpu-hash"))]
 impl RealGpuHandle {
     /// T71.1: Stub init that always returns None (no GPU available).
-    pub fn try_init() -> Option<Self> {
-        log::info!("node_gpu_hash: T71.1 gpu-hash feature disabled; using CPU-only stub");
-        None
+    pub fn try_init() -> Option<&'static Self> {
+        GPU_HANDLE_CACHE_STUB
+            .get_or_init(|| {
+                log::info!("node_gpu_hash: T71.1 gpu-hash feature disabled; using CPU-only stub");
+                None
+            })
+            .as_ref()
     }
 
     /// T71.1: Stub hash that always fails (should never be called).
@@ -190,8 +224,8 @@ impl RealGpuHandle {
 ///   4. Logs and counts all GPU events for observability
 pub struct NodeHashEngine {
     backend: NodeHashBackend,
-    /// T71.1: Optional handle to the real GPU backend.
-    gpu: Option<RealGpuHandle>,
+    /// T71.1: Optional reference to the cached GPU backend (cached once per process).
+    gpu: Option<&'static RealGpuHandle>,
 }
 
 /// Global default engine mode, initialized once per process from env.
@@ -215,14 +249,11 @@ impl NodeHashEngine {
             mode
         });
 
-        // T71.1: Initialize GPU handle if needed (only once per process)
+        // T71.1: Initialize GPU handle if needed (cached once per process).
         let gpu = match backend {
             NodeHashBackend::CpuOnly => None,
             NodeHashBackend::CpuWithGpuShadow | NodeHashBackend::GpuPreferred => {
-                // We don't use GPU_HANDLE OnceLock here because RealGpuHandle
-                // is not Sync (it contains wgpu types). Instead, we try init
-                // each time from_env is called, but GpuBlake3Context::new()
-                // internally uses its own OnceLock for the actual GPU resources.
+                // try_init returns Option<&'static RealGpuHandle> - cached internally.
                 RealGpuHandle::try_init()
             }
         };
@@ -235,12 +266,6 @@ impl NodeHashEngine {
     #[cfg(test)]
     pub fn with_backend(backend: NodeHashBackend) -> Self {
         NodeHashEngine { backend, gpu: None }
-    }
-
-    /// T71.1: Create an engine with a specific backend and GPU handle (for testing).
-    #[cfg(test)]
-    pub fn with_backend_and_gpu(backend: NodeHashBackend, gpu: Option<RealGpuHandle>) -> Self {
-        NodeHashEngine { backend, gpu }
     }
 
     /// Get the current backend mode.
@@ -268,7 +293,7 @@ impl NodeHashEngine {
         // 1) Always compute CPU digest as ground truth
         let cpu_digest = *blake3::hash(bytes).as_bytes();
 
-        match (&self.backend, &self.gpu) {
+        match (&self.backend, self.gpu) {
             // T71.1: CpuOnly mode or no GPU handle - pure CPU path
             (NodeHashBackend::CpuOnly, _) | (_, None) => cpu_digest,
             // T71.1: GPU modes with available handle - run comparison
