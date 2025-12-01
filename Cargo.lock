@@ -1604,6 +1604,7 @@ dependencies = [
  "eezo-crypto",
  "eezo-ledger",
  "eezo-net",
+ "eezo-prover",
  "eezo-serde",
  "eezo-wallet",
  "env_logger",

@@ -60,6 +60,55 @@ fn log_block_shadow_debug(prefix: &str, height: u64, blk_opt: &Option<Block>) {
     }
 }
 
+/// T71.0 — Compute a GPU-accelerated block body hash (optional, for comparison).
+///
+/// This function:
+///   1. Serializes all tx bytes from the block into a single buffer
+///   2. Runs the GPU hash engine on the buffer (if GPU mode is enabled)
+///   3. Returns the canonical CPU digest (GPU is only for comparison/metrics)
+///
+/// The returned hash is always the CPU digest. GPU can only match or mismatch.
+/// This does **not** change consensus behaviour; it only exercises the GPU path.
+fn compute_block_body_hash_with_gpu(blk_opt: &Option<Block>, height: u64) -> Option<[u8; 32]> {
+    use crate::gpu_hash::{NodeHashEngine, NodeHashBackend};
+
+    let blk = blk_opt.as_ref()?;
+    if blk.txs.is_empty() {
+        return None;
+    }
+
+    // Build the GPU hash engine (reads EEZO_NODE_GPU_HASH from env)
+    let engine = NodeHashEngine::from_env();
+
+    // Only run the GPU path if not in CpuOnly mode
+    if engine.backend() == NodeHashBackend::CpuOnly {
+        // Skip GPU comparison when disabled
+        return None;
+    }
+
+    // Serialize all tx bytes into a single buffer (concatenated tx encodings)
+    let mut block_body_bytes = Vec::new();
+    for tx in &blk.txs {
+        // Use tx.hash() bytes as a compact representation of each tx
+        // (The actual tx bytes would require serialization, which varies by tx type.
+        //  Using tx hashes gives us a stable, compact representation for GPU testing.)
+        block_body_bytes.extend_from_slice(&tx.hash());
+    }
+
+    // Run the GPU hash engine (will log + count metrics internally)
+    let digest = engine.hash_block_body(&block_body_bytes);
+
+    log::debug!(
+        "node_gpu_hash: computed block body hash at height={} (mode={:?}, bytes={}, digest=0x{})",
+        height,
+        engine.backend(),
+        block_body_bytes.len(),
+        hex::encode(&digest[..4])
+    );
+
+    Some(digest)
+}
+
 // --- T54 executor wiring ---
 use crate::executor::{Executor, ExecInput};
 use crate::executor::{SingleExecutor};
@@ -471,6 +520,10 @@ impl CoreRunnerHandle {
 
                         // T60.0: block-only shadow tx hash summary (prep for DAG compare)
                         log_block_shadow_debug("dag_shadow_block", height, &blk_opt);
+
+                        // T71.0: GPU hash comparison (optional, controlled by EEZO_NODE_GPU_HASH)
+                        // This exercises the GPU hashing path without changing consensus behaviour.
+                        let _ = compute_block_body_hash_with_gpu(&blk_opt, height);
 
                         // update committed height gauge and mempool metrics
                         #[cfg(feature = "metrics")]
@@ -1129,6 +1182,10 @@ impl CoreRunnerHandle {
 
                         // T60.0: block-only shadow tx hash summary (prep for DAG compare)
                         log_block_shadow_debug("dag_shadow_block", height, &blk_opt);
+
+                        // T71.0: GPU hash comparison (optional, controlled by EEZO_NODE_GPU_HASH)
+                        // This exercises the GPU hashing path without changing consensus behaviour.
+                        let _ = compute_block_body_hash_with_gpu(&blk_opt, height);
 
                         // update committed height gauge
                         #[cfg(feature = "metrics")]

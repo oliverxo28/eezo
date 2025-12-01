@@ -81,6 +81,8 @@ mod mempool;
 mod sigpool;
 mod accounts;
 mod executor;
+// T71.0: GPU hashing adapter
+mod gpu_hash;
 
 use peers::{parse_peers_from_env, peers_handler, PeerMap, PeerService};
 use accounts::{Accounts, AccountView, FaucetReq};
@@ -108,6 +110,7 @@ use crate::metrics::{
     register_t37_kemtls_metrics,
     register_t40_shadow_sig_metrics,
     register_t40_cutover_metrics,
+    register_t71_gpu_hash_metrics,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -2665,6 +2668,9 @@ async fn main() -> anyhow::Result<()> {
         // T40: make shadow + cutover counters visible at boot
         register_t40_shadow_sig_metrics();
         register_t40_cutover_metrics();
+
+        // T71.0: GPU hash adapter metrics
+        register_t71_gpu_hash_metrics();
 	}	
     // T37: spawn a dedicated /metrics HTTP server on EEZO_METRICS_BIND (or default)
     let metrics_bind = std::env::var("EEZO_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9898".into());
