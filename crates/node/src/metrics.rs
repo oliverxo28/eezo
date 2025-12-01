@@ -1489,14 +1489,15 @@ mod tests {
 // T71.0 / T71.2 — Node GPU hash adapter metrics
 // -----------------------------------------------------------------------------
 
-/// T71.2: Gauge indicating whether GPU hashing is enabled after initialization.
-/// Value: 0 = GPU unavailable/disabled/failed, 1 = GPU successfully initialized.
-/// This gauge is set once at startup and does not change afterward.
+/// T71.2: Gauge indicating whether GPU hashing was successfully initialized.
+/// Value: 0 = GPU unavailable/disabled/init failed, 1 = GPU successfully initialized.
+/// This gauge is set once during GPU initialization and does not change afterward.
+/// Runtime errors are tracked separately via error_total counter.
 #[cfg(feature = "metrics")]
 pub static EEZO_NODE_GPU_HASH_ENABLED: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(
         "eezo_node_gpu_hash_enabled",
-        "Whether GPU hashing is enabled (0=disabled/failed, 1=enabled)"
+        "Whether GPU hashing was successfully initialized (0=no, 1=yes)"
     )
     .unwrap()
 });

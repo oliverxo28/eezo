@@ -148,11 +148,10 @@ impl RealGpuHandle {
                 Some(RealGpuHandle { ctx })
             }
             Ok(_) => {
-                // T71.2: Improved logging for "context initialized but not usable"
+                // T71.2: Context created but device/queue unavailable
                 log::error!(
-                    "node_gpu_hash: failed to initialize GPU backend: context created but is_available() returned false; \
-                     this typically means the GPU adapter was found but the device/queue could not be created. \
-                     Falling back to CPU-only hashing."
+                    "node_gpu_hash: GPU init failed: adapter found but device/queue unavailable; \
+                     falling back to CPU"
                 );
                 crate::metrics::node_gpu_hash_error_inc();
                 // T71.2: Set enabled gauge to 0 when GPU is not usable
@@ -160,10 +159,9 @@ impl RealGpuHandle {
                 None
             }
             Err(e) => {
-                // T71.2: Improved logging with full error chain via Display and Debug
+                // T71.2: Full error chain via Display and Debug for diagnostics
                 log::error!(
-                    "node_gpu_hash: failed to initialize GPU backend: {} (details: {:?}); \
-                     falling back to CPU-only hashing",
+                    "node_gpu_hash: GPU init failed: {} ({:?}); falling back to CPU",
                     e, e
                 );
                 crate::metrics::node_gpu_hash_error_inc();
@@ -188,10 +186,10 @@ impl RealGpuHandle {
         // T71.1: Check for integer overflow when casting bytes.len() to u32.
         // On 64-bit systems, usize can be larger than u32::MAX. This is a rare
         // edge case (>4GB input) but we handle it gracefully with an error.
-        let len: u32 = bytes
-            .len()
+        let byte_len = bytes.len();
+        let len: u32 = byte_len
             .try_into()
-            .map_err(|_| format!("Input too large for GPU hashing: {} bytes exceeds u32::MAX", bytes.len()))?;
+            .map_err(|_| format!("Input too large for GPU hashing: {} bytes exceeds u32::MAX", byte_len))?;
 
         let offsets = [0u32];
         let lens = [len];
