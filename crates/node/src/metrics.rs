@@ -1774,3 +1774,9 @@ pub fn register_t72_exec_perf_metrics() {
     let _ = &*EEZO_EXEC_TXS_PER_BLOCK;
     let _ = &*EEZO_EXEC_BLOCK_BYTES;
 }
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t72_exec_perf_metrics() {
+    // No metrics to register when the feature is off.
+}

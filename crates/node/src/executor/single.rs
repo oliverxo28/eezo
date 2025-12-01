@@ -25,10 +25,9 @@ use crate::metrics::{
     observe_exec_block_commit_seconds,
     observe_exec_tx_apply_seconds,
     observe_exec_txs_per_block,
-    // Note: observe_exec_block_bytes is imported but not used in single.rs
-    // since SignedTx doesn't expose an encoded_len() method and computing
-    // to_bytes().len() for each tx would be wasteful. Block bytes are tracked
-    // in parallel.rs where PreparedTx already has the data cached.
+    // Note: observe_exec_block_bytes is not used in either executor to avoid
+    // expensive serialization overhead from calling tx.to_bytes() for each tx.
+    // The txs_per_block metric serves as a proxy for block size.
 };
 
 use super::{Executor, ExecInput, ExecOutcome};
@@ -95,8 +94,8 @@ impl Executor for SingleExecutor {
 
         // T72.0: Record detailed executor performance metrics
         observe_exec_txs_per_block(tx_count as u64);
-        // Note: block_bytes tracking skipped in SingleExecutor as SignedTx
-        // doesn't expose an encoded_len() method. Use parallel executor for byte metrics.
+        // Note: block_bytes tracking is skipped in both executors to avoid
+        // expensive serialization overhead. txs_per_block serves as a proxy.
 
         // T72.0: Record per-tx apply time (average) and commit time
         // In SingleExecutor, there's no separate commit phase, so we record 0.

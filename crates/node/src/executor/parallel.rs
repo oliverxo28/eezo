@@ -38,7 +38,8 @@ use crate::metrics::{
     observe_exec_block_commit_seconds,
     observe_exec_tx_apply_seconds,
     observe_exec_txs_per_block,
-    observe_exec_block_bytes,
+    // Note: observe_exec_block_bytes is not used to avoid expensive serialization
+    // overhead from calling tx.to_bytes() for each transaction.
 };
 
 /// PreparedTx: Precomputed transaction metadata to avoid redundant access_list() calls.
@@ -543,14 +544,9 @@ impl Executor for ParallelExecutor {
             observe_exec_tx_apply_seconds(per_tx_sec);
         }
 
-        // T72.0: Calculate and record total block bytes
-        // Using to_bytes().len() since SignedTx doesn't have encoded_len()
-        if let Ok(ref b) = block {
-            let block_bytes: u64 = b.txs.iter().map(|tx| tx.to_bytes().len() as u64).sum();
-            if block_bytes > 0 {
-                observe_exec_block_bytes(block_bytes);
-            }
-        }
+        // T72.0: Block bytes tracking is skipped to avoid expensive serialization
+        // overhead from calling tx.to_bytes() for every transaction. The txs_per_block
+        // metric provides a sufficient proxy for block size correlation.
 
         // Comprehensive timing breakdown for performance analysis
         log::info!(
