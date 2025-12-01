@@ -31,6 +31,17 @@ use crate::metrics::{
     EEZO_EXEC_WAVE_FUSED_LEN,
 };
 
+// T72.0: Import detailed executor perf metric helpers
+use crate::metrics::{
+    observe_exec_block_prepare_seconds,
+    observe_exec_block_apply_seconds,
+    observe_exec_block_commit_seconds,
+    observe_exec_tx_apply_seconds,
+    observe_exec_txs_per_block,
+    // Note: observe_exec_block_bytes is not used to avoid expensive serialization
+    // overhead from calling tx.to_bytes() for each transaction.
+};
+
 /// PreparedTx: Precomputed transaction metadata to avoid redundant access_list() calls.
 /// 
 /// T54.6 FIX: Instead of calling access_list() 5+ times per transaction, we compute it
@@ -509,6 +520,33 @@ impl Executor for ParallelExecutor {
             Err(_) => 0,
         };
         let finalize_elapsed = finalize_start.elapsed();
+
+        // T72.0: Record detailed executor performance metrics
+        // Prepare = all pre-apply work (prefetch, wave build, compact, fusion, slice)
+        let total_prepare_secs = prepare_elapsed.as_secs_f64()
+            + wave_build_elapsed.as_secs_f64()
+            + compact_elapsed.as_secs_f64()
+            + fusion_elapsed.as_secs_f64()
+            + slice_elapsed.as_secs_f64();
+        observe_exec_block_prepare_seconds(total_prepare_secs);
+
+        // Apply = time spent executing the wave loop
+        observe_exec_block_apply_seconds(apply_elapsed.as_secs_f64());
+
+        // Commit = time spent finalizing the block
+        observe_exec_block_commit_seconds(finalize_elapsed.as_secs_f64());
+
+        // Per-tx metrics
+        observe_exec_txs_per_block(tx_count as u64);
+        if tx_count > 0 {
+            // Average per-tx apply time
+            let per_tx_sec = apply_elapsed.as_secs_f64() / tx_count as f64;
+            observe_exec_tx_apply_seconds(per_tx_sec);
+        }
+
+        // T72.0: Block bytes tracking is skipped to avoid expensive serialization
+        // overhead from calling tx.to_bytes() for every transaction. The txs_per_block
+        // metric provides a sufficient proxy for block size correlation.
 
         // Comprehensive timing breakdown for performance analysis
         log::info!(

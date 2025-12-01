@@ -111,6 +111,7 @@ use crate::metrics::{
     register_t40_shadow_sig_metrics,
     register_t40_cutover_metrics,
     register_t71_gpu_hash_metrics,
+    register_t72_exec_perf_metrics,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -2671,6 +2672,9 @@ async fn main() -> anyhow::Result<()> {
 
         // T71.0: GPU hash adapter metrics
         register_t71_gpu_hash_metrics();
+
+        // T72.0: Detailed executor performance metrics
+        register_t72_exec_perf_metrics();
 	}	
     // T37: spawn a dedicated /metrics HTTP server on EEZO_METRICS_BIND (or default)
     let metrics_bind = std::env::var("EEZO_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9898".into());

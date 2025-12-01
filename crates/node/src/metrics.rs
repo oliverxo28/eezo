@@ -1609,3 +1609,174 @@ pub fn register_t71_gpu_hash_metrics() {
     let _ = &*EEZO_NODE_GPU_HASH_MISMATCH_TOTAL;
     let _ = &*EEZO_NODE_GPU_HASH_ERROR_TOTAL;
 }
+
+// -----------------------------------------------------------------------------
+// T72.0 — Detailed executor performance metrics
+// -----------------------------------------------------------------------------
+
+/// Histogram: time spent in executor prepare/plan phase per block (seconds).
+/// This captures any pre-loop work such as building execution plans, prefetching state, etc.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_BLOCK_PREPARE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_block_prepare_seconds",
+        "Time spent in executor prepare/plan phase per block (seconds)",
+        vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+    )
+    .unwrap()
+});
+
+/// Histogram: time spent executing the main tx apply loop per block (seconds).
+/// This is the core execution time running all transactions in a block.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_BLOCK_APPLY_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_block_apply_seconds",
+        "Time spent executing the main tx apply loop per block (seconds)",
+        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+    )
+    .unwrap()
+});
+
+/// Histogram: time spent in block commit/finalize phase (seconds).
+/// This captures state finalization after all transactions are applied.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_BLOCK_COMMIT_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_block_commit_seconds",
+        "Time spent in block commit/finalize phase (seconds)",
+        vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5]
+    )
+    .unwrap()
+});
+
+/// Histogram: per-transaction apply time (seconds).
+/// Tracks the cost of executing individual transactions.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_TX_APPLY_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_tx_apply_seconds",
+        "Per-transaction apply time (seconds)",
+        vec![0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1]
+    )
+    .unwrap()
+});
+
+/// Histogram: number of transactions per block.
+/// Helps correlate latency with transaction count.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_TXS_PER_BLOCK: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_txs_per_block",
+        "Number of transactions per block",
+        vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0]
+    )
+    .unwrap()
+});
+
+/// Histogram: total bytes of transactions per block.
+/// Helps correlate latency with block size.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_BLOCK_BYTES: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_block_bytes",
+        "Total bytes of transactions per block",
+        vec![100.0, 500.0, 1000.0, 5000.0, 10000.0, 50000.0, 100000.0, 500000.0, 1000000.0]
+    )
+    .unwrap()
+});
+
+/// Helper: observe executor block prepare time (seconds).
+#[inline]
+pub fn observe_exec_block_prepare_seconds(duration_sec: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_BLOCK_PREPARE_SECONDS.observe(duration_sec);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = duration_sec;
+    }
+}
+
+/// Helper: observe executor block apply time (seconds).
+#[inline]
+pub fn observe_exec_block_apply_seconds(duration_sec: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_BLOCK_APPLY_SECONDS.observe(duration_sec);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = duration_sec;
+    }
+}
+
+/// Helper: observe executor block commit time (seconds).
+#[inline]
+pub fn observe_exec_block_commit_seconds(duration_sec: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_BLOCK_COMMIT_SECONDS.observe(duration_sec);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = duration_sec;
+    }
+}
+
+/// Helper: observe per-transaction apply time (seconds).
+#[inline]
+pub fn observe_exec_tx_apply_seconds(duration_sec: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_TX_APPLY_SECONDS.observe(duration_sec);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = duration_sec;
+    }
+}
+
+/// Helper: observe transactions per block count.
+#[inline]
+pub fn observe_exec_txs_per_block(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_TXS_PER_BLOCK.observe(count as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: observe block bytes.
+#[inline]
+pub fn observe_exec_block_bytes(bytes: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_BLOCK_BYTES.observe(bytes as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = bytes;
+    }
+}
+
+/// Eagerly register T72.0 executor performance metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t72_exec_perf_metrics() {
+    let _ = &*EEZO_EXEC_BLOCK_PREPARE_SECONDS;
+    let _ = &*EEZO_EXEC_BLOCK_APPLY_SECONDS;
+    let _ = &*EEZO_EXEC_BLOCK_COMMIT_SECONDS;
+    let _ = &*EEZO_EXEC_TX_APPLY_SECONDS;
+    let _ = &*EEZO_EXEC_TXS_PER_BLOCK;
+    let _ = &*EEZO_EXEC_BLOCK_BYTES;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t72_exec_perf_metrics() {
+    // No metrics to register when the feature is off.
+}
