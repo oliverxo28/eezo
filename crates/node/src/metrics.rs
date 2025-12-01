@@ -1486,20 +1486,37 @@ mod tests {
 }
 
 // -----------------------------------------------------------------------------
-// T71.0 — Node GPU hash adapter metrics
+// T71.0 / T71.2 — Node GPU hash adapter metrics
 // -----------------------------------------------------------------------------
 
-/// Counter: Total number of GPU hash attempts (any mode except CpuOnly).
+/// T71.2: Gauge indicating whether GPU hashing was successfully initialized.
+/// Value: 0 = GPU unavailable/disabled/init failed, 1 = GPU successfully initialized.
+/// This gauge is set once during GPU initialization and does not change afterward.
+/// Runtime errors are tracked separately via error_total counter.
+#[cfg(feature = "metrics")]
+pub static EEZO_NODE_GPU_HASH_ENABLED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_node_gpu_hash_enabled",
+        "Whether GPU hashing was successfully initialized (0=no, 1=yes)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total number of GPU hash attempts that actually reached the GPU backend.
+/// This counts only runtime hash calls when GPU is available and mode is shadow/prefer.
+/// If GPU init fails at startup, this stays at 0.
+/// See also: error_total which counts both init and runtime failures.
 #[cfg(feature = "metrics")]
 pub static EEZO_NODE_GPU_HASH_ATTEMPTS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "eezo_node_gpu_hash_attempts_total",
-        "Total number of GPU hash attempts (any GPU mode)"
+        "Total GPU hash attempts that reached the GPU backend (runtime only)"
     )
     .unwrap()
 });
 
 /// Counter: GPU hash runs that matched CPU digest (success).
+/// Only incremented during runtime when GPU produces correct results.
 #[cfg(feature = "metrics")]
 pub static EEZO_NODE_GPU_HASH_SUCCESS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -1510,6 +1527,7 @@ pub static EEZO_NODE_GPU_HASH_SUCCESS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 /// Counter: GPU hash runs that did NOT match CPU digest (mismatch).
+/// Only incremented during runtime when GPU produces different results than CPU.
 #[cfg(feature = "metrics")]
 pub static EEZO_NODE_GPU_HASH_MISMATCH_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -1519,17 +1537,33 @@ pub static EEZO_NODE_GPU_HASH_MISMATCH_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
-/// Counter: GPU hash runs that failed with an error (fallback to CPU).
+/// Counter: Total GPU-related errors, including both initialization failures
+/// and runtime hash failures.
+/// - Init failures: incremented once at startup if GPU context creation fails
+/// - Runtime failures: incremented each time a hash operation fails
+/// When this is > 0 but attempts_total = 0, it indicates an init failure.
 #[cfg(feature = "metrics")]
 pub static EEZO_NODE_GPU_HASH_ERROR_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "eezo_node_gpu_hash_error_total",
-        "Total GPU hash runs that failed with an error"
+        "Total GPU errors (init failures + runtime failures)"
     )
     .unwrap()
 });
 
+/// T71.2: Helper to set the GPU enabled gauge.
+/// Call with 1 when GPU init succeeds, 0 when it fails or is disabled.
+#[inline]
+pub fn node_gpu_hash_enabled_set(val: i64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_NODE_GPU_HASH_ENABLED.set(val);
+    }
+    let _ = val; // suppress unused warning when metrics feature is off
+}
+
 /// Helper: increment GPU hash attempts counter.
+/// Only called during runtime hash operations, not during init.
 #[inline]
 pub fn node_gpu_hash_attempts_inc() {
     #[cfg(feature = "metrics")]
@@ -1557,6 +1591,7 @@ pub fn node_gpu_hash_mismatch_inc() {
 }
 
 /// Helper: increment GPU hash error counter.
+/// Called for both init failures and runtime failures.
 #[inline]
 pub fn node_gpu_hash_error_inc() {
     #[cfg(feature = "metrics")]
@@ -1565,9 +1600,10 @@ pub fn node_gpu_hash_error_inc() {
     }
 }
 
-/// Eagerly register T71.0 GPU hash metrics so they appear on /metrics at boot.
+/// Eagerly register T71.0/T71.2 GPU hash metrics so they appear on /metrics at boot.
 #[cfg(feature = "metrics")]
 pub fn register_t71_gpu_hash_metrics() {
+    let _ = &*EEZO_NODE_GPU_HASH_ENABLED;
     let _ = &*EEZO_NODE_GPU_HASH_ATTEMPTS_TOTAL;
     let _ = &*EEZO_NODE_GPU_HASH_SUCCESS_TOTAL;
     let _ = &*EEZO_NODE_GPU_HASH_MISMATCH_TOTAL;

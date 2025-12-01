@@ -119,12 +119,12 @@ kemtls-resume = ["eezo-net/kemtls-resume"]
 # T41.4: opt-in strict mode for QC sidecar v2 (enforce at cutover+1)
 qc-sidecar-v2-enforce = []
 
-# T71.0: GPU hashing adapter (safe, optional GPU-accelerated hashing)
-# NOTE: The gpu-hash feature currently uses a stub CPU backend for testing.
-# Real GPU integration from eezo-prover will be wired in a follow-up T71.x task
-# once the prover's feature gating issues are resolved.
-# When ready, enable: gpu-hash = ["eezo-prover", "eezo-prover/gpu-hash"]
-gpu-hash = []
+# T71.0/T71.1: GPU hashing adapter (safe, optional GPU-accelerated hashing)
+# T71.1: Now wires to the real eezo-prover GPU backend when enabled.
+# When this feature is on, the node uses eezo-prover's GpuBlake3Context for
+# GPU-accelerated BLAKE3 hashing. Node env: EEZO_NODE_GPU_HASH=off|shadow|prefer
+# Note: We also enable eezo-prover/stark-air to satisfy prover_loop.rs dependencies.
+gpu-hash = ["eezo-prover", "eezo-prover/gpu-hash", "eezo-prover/stark-air"]
 
 [dev-dependencies]
 tempfile = "3.10"
