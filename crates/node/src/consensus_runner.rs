@@ -86,12 +86,12 @@ fn compute_block_body_hash_with_gpu(blk_opt: &Option<Block>, height: u64) -> Opt
         return None;
     }
 
-    // Serialize all tx bytes into a single buffer (concatenated tx encodings)
+    // Serialize all tx bytes into a single buffer (concatenated tx hashes)
     let mut block_body_bytes = Vec::new();
     for tx in &blk.txs {
-        // Use tx.hash() bytes as a compact representation of each tx
-        // (The actual tx bytes would require serialization, which varies by tx type.
-        //  Using tx hashes gives us a stable, compact representation for GPU testing.)
+        // Use tx.hash() bytes as a compact representation of each tx.
+        // This provides a stable, well-defined input format for GPU hashing
+        // without depending on the variable-length tx serialization format.
         block_body_bytes.extend_from_slice(&tx.hash());
     }
 

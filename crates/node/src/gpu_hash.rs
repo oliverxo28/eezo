@@ -185,41 +185,33 @@ impl NodeHashEngine {
     /// GPU batch hashing API. Otherwise, it just returns the CPU hash.
     ///
     /// TODO (T71.x): Wire in real GPU backend from eezo-prover when gpu-hash feature is active.
+    /// For now, we use a stub that just returns the CPU hash to exercise the adapter + metrics.
     #[allow(unused_variables)]
     fn gpu_hash_internal(&self, bytes: &[u8]) -> Result<[u8; 32], String> {
-        // When gpu-hash feature is enabled, use the prover's GPU implementation
-        #[cfg(feature = "gpu-hash")]
-        {
-            use eezo_prover::gpu_hash::{Blake3GpuBatch, default_batch_engine};
+        // TODO (T71.x): When gpu-hash feature is enabled, use the prover's GPU implementation.
+        // The code would look like:
+        //
+        // #[cfg(feature = "gpu-hash")]
+        // {
+        //     use eezo_prover::gpu_hash::{Blake3GpuBatch, default_batch_engine};
+        //     let offsets = [0u32];
+        //     let lens = [bytes.len() as u32];
+        //     let mut digests_out = [0u8; 32];
+        //     let mut batch = Blake3GpuBatch {
+        //         input_blob: bytes,
+        //         offsets: &offsets,
+        //         lens: &lens,
+        //         digests_out: &mut digests_out,
+        //     };
+        //     let engine = default_batch_engine();
+        //     engine.hash_batch(&mut batch).map_err(|e| format!("GPU batch hash failed: {}", e))?;
+        //     Ok(digests_out)
+        // }
 
-            // Prepare a single-message batch
-            let offsets = [0u32];
-            let lens = [bytes.len() as u32];
-            let mut digests_out = [0u8; 32];
-
-            let mut batch = Blake3GpuBatch {
-                input_blob: bytes,
-                offsets: &offsets,
-                lens: &lens,
-                digests_out: &mut digests_out,
-            };
-
-            // Use the default batch engine (CPU or GPU based on prover env)
-            let engine = default_batch_engine();
-            engine
-                .hash_batch(&mut batch)
-                .map_err(|e| format!("GPU batch hash failed: {}", e))?;
-
-            Ok(digests_out)
-        }
-
-        // When gpu-hash is not enabled, use CPU as a "fake GPU" for testing the adapter
-        #[cfg(not(feature = "gpu-hash"))]
-        {
-            // This is a stub that just returns the CPU hash.
-            // In real GPU mode, this would call the prover's GPU backend.
-            Ok(*blake3::hash(bytes).as_bytes())
-        }
+        // For T71.0: This is a stub that just returns the CPU hash.
+        // This exercises the adapter + metrics structure without requiring real GPU.
+        // Real GPU integration will be added in a follow-up T71.x task.
+        Ok(*blake3::hash(bytes).as_bytes())
     }
 }
 
