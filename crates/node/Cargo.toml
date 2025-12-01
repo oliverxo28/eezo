@@ -51,6 +51,8 @@ num_cpus = "1.16"
 # T54.6 FIX: SmallVec for efficient PreparedTx access lists
 smallvec = "1.13"
 
+# T73.1: DashMap for STM executor's multi-version hashmap (optional, stm-exec feature)
+dashmap = { version = "6.1", optional = true }
 
 # Metrics / logging
 prometheus = "0.13"
@@ -125,6 +127,11 @@ qc-sidecar-v2-enforce = []
 # GPU-accelerated BLAKE3 hashing. Node env: EEZO_NODE_GPU_HASH=off|shadow|prefer
 # Note: We also enable eezo-prover/stark-air to satisfy prover_loop.rs dependencies.
 gpu-hash = ["eezo-prover", "eezo-prover/gpu-hash", "eezo-prover/stark-air"]
+
+# T73.1: Block-STM executor scaffolding (optional, for parallel tx execution)
+# Enables mvhashmap.rs and stm.rs modules in crates/node/src/executor/
+# Note: This only adds the modules; wiring into consensus_runner is T73.3+
+stm-exec = ["dashmap"]
 
 [dev-dependencies]
 tempfile = "3.10"

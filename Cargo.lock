@@ -1308,6 +1308,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1568,7 +1582,7 @@ dependencies = [
  "bincode",
  "bytes",
  "chacha20poly1305",
- "dashmap",
+ "dashmap 5.5.3",
  "eezo-crypto",
  "eezo-ledger",
  "hmac",
@@ -1600,6 +1614,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "clap",
+ "dashmap 6.1.0",
  "dirs",
  "eezo-crypto",
  "eezo-ledger",
