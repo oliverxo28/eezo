@@ -107,22 +107,32 @@ impl RealGpuHandle {
         use eezo_prover::gpu_hash::GpuBlake3Context;
 
         // T71.1: Acquire mutex to ensure thread-safe env var manipulation.
+        // We use into_inner() on poison errors because GPU init failure is not
+        // critical - we simply fall back to CPU hashing. The mutex protects
+        // env var manipulation, not critical data integrity.
         let _guard = GPU_INIT_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
         // T71.1: The prover's GpuBlake3Context::new() checks EEZO_GPU_HASH_REAL.
         // We temporarily set it to "1" to request real GPU init, but only if
         // the node's EEZO_NODE_GPU_HASH is shadow or prefer (already checked
-        // by caller). We restore the original value afterward.
+        // by caller). We use a scope guard pattern to ensure the env var is
+        // always restored, even if GpuBlake3Context::new() panics.
         let original_val = env::var("EEZO_GPU_HASH_REAL").ok();
         env::set_var("EEZO_GPU_HASH_REAL", "1");
 
-        let result = GpuBlake3Context::new();
-
-        // Restore original env var
-        match original_val {
-            Some(v) => env::set_var("EEZO_GPU_HASH_REAL", v),
-            None => env::remove_var("EEZO_GPU_HASH_REAL"),
+        // Scope guard: restore env var on any exit path (including panic)
+        struct EnvGuard(Option<String>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(v) => env::set_var("EEZO_GPU_HASH_REAL", v),
+                    None => env::remove_var("EEZO_GPU_HASH_REAL"),
+                }
+            }
         }
+        let _env_guard = EnvGuard(original_val);
+
+        let result = GpuBlake3Context::new();
 
         match result {
             Ok(ctx) if ctx.is_available() => {
@@ -150,12 +160,17 @@ impl RealGpuHandle {
     /// T71.1: Hash a block body using the real GPU backend.
     ///
     /// Uses the prover's `Blake3GpuBackend::hash_batch` API with a single
-    /// message. Returns the 32-byte digest on success.
+    /// message. This batch API is required because the prover's GPU backend
+    /// only exposes batch hashing, but the overhead is minimal for single
+    /// messages since we're already paying the GPU kernel launch cost.
+    ///
+    /// Returns the 32-byte digest on success.
     pub fn hash_block_body(&self, bytes: &[u8]) -> Result<[u8; 32], String> {
         use eezo_prover::gpu_hash::{Blake3GpuBackend, Blake3GpuBatch};
 
         // T71.1: Check for integer overflow when casting bytes.len() to u32.
-        // On 64-bit systems, usize can be larger than u32::MAX.
+        // On 64-bit systems, usize can be larger than u32::MAX. This is a rare
+        // edge case (>4GB input) but we handle it gracefully with an error.
         let len: u32 = bytes
             .len()
             .try_into()
@@ -181,31 +196,36 @@ impl RealGpuHandle {
 }
 
 /// T71.1: Stub RealGpuHandle when gpu-hash feature is disabled.
+/// This is a zero-sized type that should never be instantiated.
 #[cfg(not(feature = "gpu-hash"))]
 pub struct RealGpuHandle {
+    // Private field prevents external construction
     _private: (),
 }
 
-/// T71.1: Cached GPU handle for stub (always None).
+/// T71.1: Static flag for logging the stub message only once.
 #[cfg(not(feature = "gpu-hash"))]
-static GPU_HANDLE_CACHE_STUB: OnceLock<Option<RealGpuHandle>> = OnceLock::new();
+static STUB_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(not(feature = "gpu-hash"))]
 impl RealGpuHandle {
     /// T71.1: Stub init that always returns None (no GPU available).
+    /// Logs the stub message only once per process.
     pub fn try_init() -> Option<&'static Self> {
-        GPU_HANDLE_CACHE_STUB
-            .get_or_init(|| {
-                log::info!("node_gpu_hash: T71.1 gpu-hash feature disabled; using CPU-only stub");
-                None
-            })
-            .as_ref()
+        // Log only on first call
+        if !STUB_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::info!("node_gpu_hash: T71.1 gpu-hash feature disabled; using CPU-only");
+        }
+        None
     }
 
-    /// T71.1: Stub hash that always fails (should never be called).
+    /// T71.1: Stub hash method for type compatibility.
+    /// This method is never called because try_init() always returns None,
+    /// but it's needed for the compiler to verify type signatures match.
     #[allow(dead_code)]
     pub fn hash_block_body(&self, _bytes: &[u8]) -> Result<[u8; 32], String> {
-        Err("GPU hashing not available (gpu-hash feature disabled)".to_string())
+        // This should never be reached since try_init() returns None
+        unreachable!("GPU hash_block_body called in stub mode")
     }
 }
 
