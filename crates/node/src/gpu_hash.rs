@@ -1,5 +1,5 @@
 // =============================================================================
-// T71.0 / T71.1 — Safe GPU hashing adapter for the node
+// T71.0 / T71.1 / T71.2 — Safe GPU hashing adapter for the node
 //
 // This module provides a GPU-accelerated hashing option inside the node for
 // block commitments. Key properties:
@@ -15,6 +15,11 @@
 //
 // T71.1: Wire to the real eezo-prover GPU backend (GpuBlake3Context) instead
 // of the stub. Node uses EEZO_NODE_GPU_HASH (not prover's EEZO_GPU_HASH_REAL).
+//
+// T71.2: Improved observability for GPU init failures:
+//   - New gauge: eezo_node_gpu_hash_enabled (0=disabled/failed, 1=enabled)
+//   - Better error logging with full error chain
+//   - Clarified metric semantics (attempts_total vs error_total)
 // =============================================================================
 
 use std::env;
@@ -103,6 +108,7 @@ impl RealGpuHandle {
     }
 
     /// T71.1: Internal GPU initialization with thread-safe env var manipulation.
+    /// T71.2: Sets the eezo_node_gpu_hash_enabled gauge and logs detailed errors.
     fn init_gpu_backend_internal() -> Option<RealGpuHandle> {
         use eezo_prover::gpu_hash::GpuBlake3Context;
 
@@ -136,22 +142,33 @@ impl RealGpuHandle {
 
         match result {
             Ok(ctx) if ctx.is_available() => {
-                log::info!("node_gpu_hash: T71.1 real GPU backend initialized successfully");
+                log::info!("node_gpu_hash: GPU backend initialized successfully");
+                // T71.2: Set enabled gauge to 1 when GPU init succeeds
+                crate::metrics::node_gpu_hash_enabled_set(1);
                 Some(RealGpuHandle { ctx })
             }
             Ok(_) => {
-                log::warn!(
-                    "node_gpu_hash: T71.1 GPU context initialized but not usable; GPU disabled"
+                // T71.2: Improved logging for "context initialized but not usable"
+                log::error!(
+                    "node_gpu_hash: failed to initialize GPU backend: context created but is_available() returned false; \
+                     this typically means the GPU adapter was found but the device/queue could not be created. \
+                     Falling back to CPU-only hashing."
                 );
                 crate::metrics::node_gpu_hash_error_inc();
+                // T71.2: Set enabled gauge to 0 when GPU is not usable
+                crate::metrics::node_gpu_hash_enabled_set(0);
                 None
             }
             Err(e) => {
+                // T71.2: Improved logging with full error chain via Display and Debug
                 log::error!(
-                    "node_gpu_hash: T71.1 failed to initialize GPU backend: {}; GPU disabled",
-                    e
+                    "node_gpu_hash: failed to initialize GPU backend: {} (details: {:?}); \
+                     falling back to CPU-only hashing",
+                    e, e
                 );
                 crate::metrics::node_gpu_hash_error_inc();
+                // T71.2: Set enabled gauge to 0 when GPU init fails
+                crate::metrics::node_gpu_hash_enabled_set(0);
                 None
             }
         }
@@ -195,7 +212,7 @@ impl RealGpuHandle {
     }
 }
 
-/// T71.1: Stub RealGpuHandle when gpu-hash feature is disabled.
+/// T71.1/T71.2: Stub RealGpuHandle when gpu-hash feature is disabled.
 /// This is a zero-sized type that should never be instantiated.
 #[cfg(not(feature = "gpu-hash"))]
 pub struct RealGpuHandle {
@@ -209,12 +226,14 @@ static STUB_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 
 #[cfg(not(feature = "gpu-hash"))]
 impl RealGpuHandle {
-    /// T71.1: Stub init that always returns None (no GPU available).
-    /// Logs the stub message only once per process.
+    /// T71.1/T71.2: Stub init that always returns None (no GPU available).
+    /// Logs the stub message only once per process and sets enabled gauge to 0.
     pub fn try_init() -> Option<&'static Self> {
         // Log only on first call
         if !STUB_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            log::info!("node_gpu_hash: T71.1 gpu-hash feature disabled; using CPU-only");
+            log::info!("node_gpu_hash: gpu-hash feature disabled; using CPU-only");
+            // T71.2: Set enabled gauge to 0 when feature is disabled
+            crate::metrics::node_gpu_hash_enabled_set(0);
         }
         None
     }
