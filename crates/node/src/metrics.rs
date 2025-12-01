@@ -1329,3 +1329,159 @@ pub fn dag_template_gate_rejected_inc() {
     }
 }
 
+// -----------------------------------------------------------------------------
+// T70.0 — Performance harness metrics
+// -----------------------------------------------------------------------------
+
+/// Gauge: unique run ID for correlating perf experiments
+#[cfg(feature = "metrics")]
+pub static EEZO_PERF_RUN_ID: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_perf_run_id",
+        "Unique run ID for correlating performance experiment metrics"
+    )
+    .unwrap()
+});
+
+/// Histogram: executor time per block (seconds)
+#[cfg(feature = "metrics")]
+pub static EEZO_BLOCK_EXEC_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_block_exec_seconds",
+        "Time spent executing a block (seconds)",
+        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+    )
+    .unwrap()
+});
+
+/// Histogram: DAG candidate + template preparation time per block (seconds)
+#[cfg(feature = "metrics")]
+pub static EEZO_BLOCK_DAG_PREPARE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_block_dag_prepare_seconds",
+        "Time spent preparing DAG candidate and template per block (seconds)",
+        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+    )
+    .unwrap()
+});
+
+/// Histogram: total block latency from slot start to block applied (seconds)
+#[cfg(feature = "metrics")]
+pub static EEZO_BLOCK_TOTAL_LATENCY_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_block_total_latency_seconds",
+        "Total time from slot start to block applied (seconds)",
+        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+    )
+    .unwrap()
+});
+
+/// T70.0: Perf mode configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerfMode {
+    /// No performance instrumentation (default)
+    Off,
+    /// Measure Hotstuff + mempool baseline path
+    Baseline,
+    /// Measure DAG tx source path
+    DagSource,
+}
+
+impl Default for PerfMode {
+    fn default() -> Self {
+        PerfMode::Off
+    }
+}
+
+impl PerfMode {
+    /// Parse perf mode from the EEZO_PERF_MODE environment variable.
+    pub fn from_env() -> Self {
+        match std::env::var("EEZO_PERF_MODE")
+            .unwrap_or_else(|_| "off".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "baseline" => PerfMode::Baseline,
+            "dag_source" | "dagsource" => PerfMode::DagSource,
+            _ => PerfMode::Off,
+        }
+    }
+
+    /// Check if perf instrumentation is enabled
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, PerfMode::Off)
+    }
+}
+
+/// Helper: set the perf run ID (called once at startup)
+#[inline]
+pub fn set_perf_run_id(id: i64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_PERF_RUN_ID.set(id);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = id;
+    }
+}
+
+/// Helper: observe block execution time (seconds)
+#[inline]
+pub fn observe_block_exec_seconds(seconds: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_BLOCK_EXEC_SECONDS.observe(seconds);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = seconds;
+    }
+}
+
+/// Helper: observe DAG prepare time (seconds)
+#[inline]
+pub fn observe_block_dag_prepare_seconds(seconds: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_BLOCK_DAG_PREPARE_SECONDS.observe(seconds);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = seconds;
+    }
+}
+
+/// Helper: observe total block latency (seconds)
+#[inline]
+pub fn observe_block_total_latency_seconds(seconds: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_BLOCK_TOTAL_LATENCY_SECONDS.observe(seconds);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = seconds;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// T70.0 — Unit tests for PerfMode
+// -----------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn perf_mode_default_is_off() {
+        assert_eq!(PerfMode::default(), PerfMode::Off);
+    }
+
+    #[test]
+    fn perf_mode_is_enabled() {
+        assert!(!PerfMode::Off.is_enabled());
+        assert!(PerfMode::Baseline.is_enabled());
+        assert!(PerfMode::DagSource.is_enabled());
+    }
+}
+

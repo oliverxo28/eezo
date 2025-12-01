@@ -2669,7 +2669,17 @@ async fn main() -> anyhow::Result<()> {
     // T37: spawn a dedicated /metrics HTTP server on EEZO_METRICS_BIND (or default)
     let metrics_bind = std::env::var("EEZO_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9898".into());
     tokio::spawn(spawn_metrics_server(metrics_bind.clone()));
-    log::info!("spawned metrics server on {}", metrics_bind);	
+    log::info!("spawned metrics server on {}", metrics_bind);
+
+    // T70.0: Parse and log perf mode, set perf run ID
+    let perf_mode = crate::metrics::PerfMode::from_env();
+    log::info!("main: perf mode = {:?}", perf_mode);
+    if perf_mode.is_enabled() {
+        // Generate a random run ID for correlating metrics
+        let run_id = rand::random::<u32>() as i64;
+        crate::metrics::set_perf_run_id(run_id);
+        log::info!("main: perf run_id = {}", run_id);
+    }
 
     // Parse chain_id once, early — ENV overrides, else use genesis (default).
     // Allows decimal (e.g., "31337") or hex ("0x..."), left-padded to 20 bytes.
