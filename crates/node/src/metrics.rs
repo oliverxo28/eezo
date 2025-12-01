@@ -1485,3 +1485,92 @@ mod tests {
     }
 }
 
+// -----------------------------------------------------------------------------
+// T71.0 — Node GPU hash adapter metrics
+// -----------------------------------------------------------------------------
+
+/// Counter: Total number of GPU hash attempts (any mode except CpuOnly).
+#[cfg(feature = "metrics")]
+pub static EEZO_NODE_GPU_HASH_ATTEMPTS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_node_gpu_hash_attempts_total",
+        "Total number of GPU hash attempts (any GPU mode)"
+    )
+    .unwrap()
+});
+
+/// Counter: GPU hash runs that matched CPU digest (success).
+#[cfg(feature = "metrics")]
+pub static EEZO_NODE_GPU_HASH_SUCCESS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_node_gpu_hash_success_total",
+        "Total GPU hash runs that matched CPU digest"
+    )
+    .unwrap()
+});
+
+/// Counter: GPU hash runs that did NOT match CPU digest (mismatch).
+#[cfg(feature = "metrics")]
+pub static EEZO_NODE_GPU_HASH_MISMATCH_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_node_gpu_hash_mismatch_total",
+        "Total GPU hash runs with digest mismatch vs CPU"
+    )
+    .unwrap()
+});
+
+/// Counter: GPU hash runs that failed with an error (fallback to CPU).
+#[cfg(feature = "metrics")]
+pub static EEZO_NODE_GPU_HASH_ERROR_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_node_gpu_hash_error_total",
+        "Total GPU hash runs that failed with an error"
+    )
+    .unwrap()
+});
+
+/// Helper: increment GPU hash attempts counter.
+#[inline]
+pub fn node_gpu_hash_attempts_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_NODE_GPU_HASH_ATTEMPTS_TOTAL.inc();
+    }
+}
+
+/// Helper: increment GPU hash success counter.
+#[inline]
+pub fn node_gpu_hash_success_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_NODE_GPU_HASH_SUCCESS_TOTAL.inc();
+    }
+}
+
+/// Helper: increment GPU hash mismatch counter.
+#[inline]
+pub fn node_gpu_hash_mismatch_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_NODE_GPU_HASH_MISMATCH_TOTAL.inc();
+    }
+}
+
+/// Helper: increment GPU hash error counter.
+#[inline]
+pub fn node_gpu_hash_error_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_NODE_GPU_HASH_ERROR_TOTAL.inc();
+    }
+}
+
+/// Eagerly register T71.0 GPU hash metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t71_gpu_hash_metrics() {
+    let _ = &*EEZO_NODE_GPU_HASH_ATTEMPTS_TOTAL;
+    let _ = &*EEZO_NODE_GPU_HASH_SUCCESS_TOTAL;
+    let _ = &*EEZO_NODE_GPU_HASH_MISMATCH_TOTAL;
+    let _ = &*EEZO_NODE_GPU_HASH_ERROR_TOTAL;
+}
+
