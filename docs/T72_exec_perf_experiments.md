@@ -209,11 +209,11 @@ These files contain all `eezo_exec_*` metrics, `eezo_block_exec_seconds`, and `e
 
 ### What to Look For
 
-- **If `eezo_txs_included_total` grows faster and `eezo_exec_block_apply_seconds` per block stays small**, then we are block-timing bound rather than executor-bound. Reducing block target time should improve TPS.
+- **Block-timing bound**: If reducing `EEZO_BLOCK_TARGET_TIME_MS` from 1000ms to 500ms results in significantly higher TPS (e.g., >30% increase) while `eezo_exec_block_apply_seconds` per block remains similar, then we are block-timing bound rather than executor-bound.
 
-- **If we see many blocks with `eezo_exec_txs_per_block` near 0 or 1 even under heavy spam**, we are under-packing blocks. This suggests the block proposal frequency is too low relative to transaction arrival rate.
+- **Under-packing blocks**: If the `eezo_exec_txs_per_block` histogram shows many blocks with ≤1 tx even under heavy spam (e.g., >50% of blocks are near-empty), we are under-packing blocks. The block proposal frequency is too low relative to transaction arrival rate.
 
-- **If `eezo_exec_block_apply_seconds` grows proportionally with block size**, the executor is scaling well and is not the bottleneck.
+- **Executor scaling**: If `eezo_exec_block_apply_seconds_sum / eezo_exec_block_apply_seconds_count` (average apply time per block) grows proportionally with average transactions per block, the executor is scaling well. Compare this ratio across scenarios to verify.
 
 ### Comparing Runs
 

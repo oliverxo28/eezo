@@ -15,9 +15,18 @@ LABEL="$1"
 METRICS_URL="${2:-http://127.0.0.1:9898/metrics}"
 OUTFILE="/tmp/eezo-t72-${LABEL}-metrics.txt"
 
-# Fetch metrics and filter to executor-related lines
-curl -s "$METRICS_URL" | \
-  grep -E '^(eezo_txs_included_total|eezo_block_exec_seconds|eezo_exec_)' \
+# Fetch metrics (fail on HTTP errors)
+METRICS=$(curl -sf "$METRICS_URL") || {
+  echo "[t72] error: failed to fetch metrics from $METRICS_URL" >&2
+  exit 1
+}
+
+# Filter to executor-related lines:
+#  - eezo_txs_included_total (transaction counter)
+#  - eezo_block_exec_seconds* (block execution timing)
+#  - eezo_exec_* (executor metrics from T72.0)
+echo "$METRICS" | \
+  grep -E '^(eezo_txs_included_total |eezo_block_exec_seconds[_{ ]|eezo_exec_)' \
   > "$OUTFILE"
 
 echo "[t72] wrote $OUTFILE"
