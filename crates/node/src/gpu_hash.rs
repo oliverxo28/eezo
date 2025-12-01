@@ -1,5 +1,5 @@
 // =============================================================================
-// T71.0 — Safe GPU hashing adapter for the node
+// T71.0 / T71.1 — Safe GPU hashing adapter for the node
 //
 // This module provides a GPU-accelerated hashing option inside the node for
 // block commitments. Key properties:
@@ -12,6 +12,9 @@
 // The node can compute certain hashes (e.g. block tx list commitments) via
 // GPU when enabled. CPU remains the default and always-correct path.
 // If GPU disagrees with CPU, the node logs + counts it and falls back to CPU.
+//
+// T71.1: Wire to the real eezo-prover GPU backend (GpuBlake3Context) instead
+// of the stub. Node uses EEZO_NODE_GPU_HASH (not prover's EEZO_GPU_HASH_REAL).
 // =============================================================================
 
 use std::env;
@@ -58,10 +61,128 @@ impl NodeHashBackend {
     }
 }
 
+// =============================================================================
+// T71.1 — RealGpuHandle: thin wrapper over the prover's GPU hash backend
+// =============================================================================
+
+/// T71.1: Wrapper around the real GPU hash backend from eezo-prover.
+///
+/// This struct owns the prover's `GpuBlake3Context` and exposes a simple
+/// `hash_block_body` method that uses the batch hashing API.
+///
+/// When the `gpu-hash` feature is disabled, this is a stub that always fails.
+#[cfg(feature = "gpu-hash")]
+pub struct RealGpuHandle {
+    /// The underlying GPU context from eezo-prover.
+    ctx: eezo_prover::gpu_hash::GpuBlake3Context,
+}
+
+#[cfg(feature = "gpu-hash")]
+impl RealGpuHandle {
+    /// T71.1: Attempt to initialize the real GPU backend.
+    ///
+    /// This creates a `GpuBlake3Context` from the prover crate. We override
+    /// the prover's env var (EEZO_GPU_HASH_REAL) temporarily to "1" so that
+    /// the context attempts real GPU initialization, but this is controlled
+    /// by the node's EEZO_NODE_GPU_HASH env var at a higher level.
+    ///
+    /// Returns None if GPU initialization fails (logged + metric).
+    pub fn try_init() -> Option<Self> {
+        use eezo_prover::gpu_hash::GpuBlake3Context;
+
+        // T71.1: The prover's GpuBlake3Context::new() checks EEZO_GPU_HASH_REAL.
+        // We temporarily set it to "1" to request real GPU init, but only if
+        // the node's EEZO_NODE_GPU_HASH is shadow or prefer (already checked
+        // by caller). We restore the original value afterward.
+        let original_val = env::var("EEZO_GPU_HASH_REAL").ok();
+        env::set_var("EEZO_GPU_HASH_REAL", "1");
+
+        let result = GpuBlake3Context::new();
+
+        // Restore original env var
+        match original_val {
+            Some(v) => env::set_var("EEZO_GPU_HASH_REAL", v),
+            None => env::remove_var("EEZO_GPU_HASH_REAL"),
+        }
+
+        match result {
+            Ok(ctx) if ctx.is_available() => {
+                log::info!("node_gpu_hash: T71.1 real GPU backend initialized successfully");
+                Some(RealGpuHandle { ctx })
+            }
+            Ok(_) => {
+                log::warn!(
+                    "node_gpu_hash: T71.1 GPU context initialized but not usable; GPU disabled"
+                );
+                crate::metrics::node_gpu_hash_error_inc();
+                None
+            }
+            Err(e) => {
+                log::error!(
+                    "node_gpu_hash: T71.1 failed to initialize GPU backend: {}; GPU disabled",
+                    e
+                );
+                crate::metrics::node_gpu_hash_error_inc();
+                None
+            }
+        }
+    }
+
+    /// T71.1: Hash a block body using the real GPU backend.
+    ///
+    /// Uses the prover's `Blake3GpuBackend::hash_batch` API with a single
+    /// message. Returns the 32-byte digest on success.
+    pub fn hash_block_body(&self, bytes: &[u8]) -> Result<[u8; 32], String> {
+        use eezo_prover::gpu_hash::{Blake3GpuBackend, Blake3GpuBatch};
+
+        let offsets = [0u32];
+        let lens = [bytes.len() as u32];
+        let mut digests_out = [0u8; 32];
+
+        let mut batch = Blake3GpuBatch {
+            input_blob: bytes,
+            offsets: &offsets,
+            lens: &lens,
+            digests_out: &mut digests_out,
+        };
+
+        self.ctx
+            .hash_batch(&mut batch)
+            .map_err(|e| format!("GPU batch hash failed: {}", e))?;
+
+        Ok(digests_out)
+    }
+}
+
+/// T71.1: Stub RealGpuHandle when gpu-hash feature is disabled.
+#[cfg(not(feature = "gpu-hash"))]
+pub struct RealGpuHandle {
+    _private: (),
+}
+
+#[cfg(not(feature = "gpu-hash"))]
+impl RealGpuHandle {
+    /// T71.1: Stub init that always returns None (no GPU available).
+    pub fn try_init() -> Option<Self> {
+        log::info!("node_gpu_hash: T71.1 gpu-hash feature disabled; using CPU-only stub");
+        None
+    }
+
+    /// T71.1: Stub hash that always fails (should never be called).
+    #[allow(dead_code)]
+    pub fn hash_block_body(&self, _bytes: &[u8]) -> Result<[u8; 32], String> {
+        Err("GPU hashing not available (gpu-hash feature disabled)".to_string())
+    }
+}
+
+// =============================================================================
+// T71.1 — NodeHashEngine with optional RealGpuHandle
+// =============================================================================
+
 /// Engine for computing block body hashes with optional GPU acceleration.
 ///
-/// This wraps the prover's GPU hashing implementation (when the `gpu-hash`
-/// feature is enabled) and provides a safe API that:
+/// T71.1: This now wraps a real GPU handle from eezo-prover when available.
+/// The API provides a safe interface that:
 ///
 ///   1. Always computes the CPU digest as ground truth
 ///   2. Optionally runs GPU for comparison (shadow mode) or acceleration (prefer mode)
@@ -69,16 +190,19 @@ impl NodeHashBackend {
 ///   4. Logs and counts all GPU events for observability
 pub struct NodeHashEngine {
     backend: NodeHashBackend,
+    /// T71.1: Optional handle to the real GPU backend.
+    gpu: Option<RealGpuHandle>,
 }
 
-/// Global default engine, initialized once per process from env.
+/// Global default engine mode, initialized once per process from env.
 static DEFAULT_ENGINE: OnceLock<NodeHashBackend> = OnceLock::new();
 
 impl NodeHashEngine {
     /// Create a new engine from environment configuration.
     ///
-    /// Reads EEZO_NODE_GPU_HASH to determine the backend mode.
-    /// Logs the selected mode at startup.
+    /// T71.1: Reads EEZO_NODE_GPU_HASH to determine the backend mode.
+    /// When mode is shadow or prefer, attempts to initialize the real GPU backend.
+    /// Logs the selected mode and GPU status at startup.
     pub fn from_env() -> Self {
         let backend = *DEFAULT_ENGINE.get_or_init(|| {
             let mode = NodeHashBackend::from_env();
@@ -91,18 +215,42 @@ impl NodeHashEngine {
             mode
         });
 
-        NodeHashEngine { backend }
+        // T71.1: Initialize GPU handle if needed (only once per process)
+        let gpu = match backend {
+            NodeHashBackend::CpuOnly => None,
+            NodeHashBackend::CpuWithGpuShadow | NodeHashBackend::GpuPreferred => {
+                // We don't use GPU_HANDLE OnceLock here because RealGpuHandle
+                // is not Sync (it contains wgpu types). Instead, we try init
+                // each time from_env is called, but GpuBlake3Context::new()
+                // internally uses its own OnceLock for the actual GPU resources.
+                RealGpuHandle::try_init()
+            }
+        };
+
+        NodeHashEngine { backend, gpu }
     }
 
     /// Create an engine with a specific backend (for testing).
+    /// T71.1: When using GPU modes without the gpu-hash feature, GPU will be None.
     #[cfg(test)]
     pub fn with_backend(backend: NodeHashBackend) -> Self {
-        NodeHashEngine { backend }
+        NodeHashEngine { backend, gpu: None }
+    }
+
+    /// T71.1: Create an engine with a specific backend and GPU handle (for testing).
+    #[cfg(test)]
+    pub fn with_backend_and_gpu(backend: NodeHashBackend, gpu: Option<RealGpuHandle>) -> Self {
+        NodeHashEngine { backend, gpu }
     }
 
     /// Get the current backend mode.
     pub fn backend(&self) -> NodeHashBackend {
         self.backend
+    }
+
+    /// T71.1: Check if GPU backend is available.
+    pub fn has_gpu(&self) -> bool {
+        self.gpu.is_some()
     }
 
     /// Hash a slice of bytes representing a "block body" (e.g. concatenated tx encodings).
@@ -120,26 +268,28 @@ impl NodeHashEngine {
         // 1) Always compute CPU digest as ground truth
         let cpu_digest = *blake3::hash(bytes).as_bytes();
 
-        match self.backend {
-            NodeHashBackend::CpuOnly => {
-                // Pure CPU path - no GPU involvement
-                cpu_digest
-            }
-            NodeHashBackend::CpuWithGpuShadow | NodeHashBackend::GpuPreferred => {
-                // GPU comparison path
-                self.run_gpu_comparison(bytes, cpu_digest)
+        match (&self.backend, &self.gpu) {
+            // T71.1: CpuOnly mode or no GPU handle - pure CPU path
+            (NodeHashBackend::CpuOnly, _) | (_, None) => cpu_digest,
+            // T71.1: GPU modes with available handle - run comparison
+            (NodeHashBackend::CpuWithGpuShadow, Some(gpu))
+            | (NodeHashBackend::GpuPreferred, Some(gpu)) => {
+                self.run_gpu_comparison(gpu, bytes, cpu_digest)
             }
         }
     }
 
     /// Run GPU comparison and return the (always-canonical) CPU digest.
     ///
-    /// This function:
-    ///   1. Attempts GPU hashing
-    ///   2. Compares GPU result to CPU
-    ///   3. Logs and counts mismatches/errors
-    ///   4. Returns CPU digest (never GPU)
-    fn run_gpu_comparison(&self, bytes: &[u8], cpu_digest: [u8; 32]) -> [u8; 32] {
+    /// T71.1: This function uses the real GPU handle to compute a digest,
+    /// compares it to CPU, logs and counts mismatches/errors,
+    /// and always returns the CPU digest.
+    fn run_gpu_comparison(
+        &self,
+        gpu: &RealGpuHandle,
+        bytes: &[u8],
+        cpu_digest: [u8; 32],
+    ) -> [u8; 32] {
         use crate::metrics::{
             node_gpu_hash_attempts_inc, node_gpu_hash_error_inc, node_gpu_hash_mismatch_inc,
             node_gpu_hash_success_inc,
@@ -148,8 +298,8 @@ impl NodeHashEngine {
         // Increment attempt counter
         node_gpu_hash_attempts_inc();
 
-        // Try GPU hashing
-        match self.gpu_hash_internal(bytes) {
+        // T71.1: Try real GPU hashing via RealGpuHandle
+        match gpu.hash_block_body(bytes) {
             Ok(gpu_digest) => {
                 if gpu_digest == cpu_digest {
                     // GPU matches CPU - success
@@ -158,7 +308,7 @@ impl NodeHashEngine {
                     // GPU mismatch - log warning and count
                     node_gpu_hash_mismatch_inc();
                     log::warn!(
-                        "node_gpu_hash: mismatch between GPU and CPU digest (mode={:?}, bytes_len={})",
+                        "node_gpu_hash: T71.1 mismatch between GPU and CPU digest (mode={:?}, bytes_len={})",
                         self.backend,
                         bytes.len()
                     );
@@ -168,7 +318,7 @@ impl NodeHashEngine {
                 // GPU error - log and count, fallback to CPU
                 node_gpu_hash_error_inc();
                 log::error!(
-                    "node_gpu_hash: GPU hashing failed (mode={:?}, error={}), using CPU fallback",
+                    "node_gpu_hash: T71.1 GPU hashing failed (mode={:?}, error={}), using CPU fallback",
                     self.backend,
                     e
                 );
@@ -177,41 +327,6 @@ impl NodeHashEngine {
 
         // Always return CPU digest
         cpu_digest
-    }
-
-    /// Internal GPU hashing implementation.
-    ///
-    /// When the `gpu-hash` feature is enabled, this calls into the prover's
-    /// GPU batch hashing API. Otherwise, it just returns the CPU hash.
-    ///
-    /// TODO (T71.x): Wire in real GPU backend from eezo-prover when gpu-hash feature is active.
-    /// For now, we use a stub that just returns the CPU hash to exercise the adapter + metrics.
-    #[allow(unused_variables)]
-    fn gpu_hash_internal(&self, bytes: &[u8]) -> Result<[u8; 32], String> {
-        // TODO (T71.x): When gpu-hash feature is enabled, use the prover's GPU implementation.
-        // The code would look like:
-        //
-        // #[cfg(feature = "gpu-hash")]
-        // {
-        //     use eezo_prover::gpu_hash::{Blake3GpuBatch, default_batch_engine};
-        //     let offsets = [0u32];
-        //     let lens = [bytes.len() as u32];
-        //     let mut digests_out = [0u8; 32];
-        //     let mut batch = Blake3GpuBatch {
-        //         input_blob: bytes,
-        //         offsets: &offsets,
-        //         lens: &lens,
-        //         digests_out: &mut digests_out,
-        //     };
-        //     let engine = default_batch_engine();
-        //     engine.hash_batch(&mut batch).map_err(|e| format!("GPU batch hash failed: {}", e))?;
-        //     Ok(digests_out)
-        // }
-
-        // For T71.0: This is a stub that just returns the CPU hash.
-        // This exercises the adapter + metrics structure without requiring real GPU.
-        // Real GPU integration will be added in a follow-up T71.x task.
-        Ok(*blake3::hash(bytes).as_bytes())
     }
 }
 
@@ -314,8 +429,9 @@ mod tests {
 
     #[test]
     fn hash_block_body_shadow_mode_returns_cpu_digest() {
-        // In shadow mode without real GPU, the stub returns CPU hash,
-        // so result should still match direct blake3
+        // T71.1: In shadow mode without real GPU handle (gpu=None),
+        // the engine returns the CPU digest directly.
+        // This is the expected fallback behavior.
         let engine = NodeHashEngine::with_backend(NodeHashBackend::CpuWithGpuShadow);
 
         let test_data = b"shadow mode test data";
@@ -327,8 +443,9 @@ mod tests {
 
     #[test]
     fn hash_block_body_prefer_mode_returns_cpu_digest() {
-        // In prefer mode without real GPU, the stub returns CPU hash,
-        // so result should still match direct blake3
+        // T71.1: In prefer mode without real GPU handle (gpu=None),
+        // the engine returns the CPU digest directly.
+        // This is the expected fallback behavior.
         let engine = NodeHashEngine::with_backend(NodeHashBackend::GpuPreferred);
 
         let test_data = b"prefer mode test data";
@@ -336,5 +453,59 @@ mod tests {
         let result = engine.hash_block_body(test_data);
 
         assert_eq!(result, expected);
+    }
+
+    // =========================================================================
+    // T71.1: Additional tests for GPU handle behavior
+    // =========================================================================
+
+    #[test]
+    fn t71_1_engine_with_backend_has_no_gpu_by_default() {
+        // T71.1: with_backend creates an engine with gpu=None,
+        // so has_gpu() should return false.
+        let engine = NodeHashEngine::with_backend(NodeHashBackend::CpuWithGpuShadow);
+        assert!(!engine.has_gpu());
+
+        let engine = NodeHashEngine::with_backend(NodeHashBackend::GpuPreferred);
+        assert!(!engine.has_gpu());
+
+        let engine = NodeHashEngine::with_backend(NodeHashBackend::CpuOnly);
+        assert!(!engine.has_gpu());
+    }
+
+    #[test]
+    fn t71_1_cpu_only_mode_never_uses_gpu() {
+        // T71.1: In CpuOnly mode, even if somehow a GPU handle existed,
+        // the engine would not use it (the match pattern ignores it).
+        // Here we just verify CpuOnly mode works correctly.
+        let engine = NodeHashEngine::with_backend(NodeHashBackend::CpuOnly);
+
+        let test_data = b"cpu only mode never uses gpu";
+        let expected = *blake3::hash(test_data).as_bytes();
+        let result = engine.hash_block_body(test_data);
+
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn t71_1_hash_always_returns_cpu_digest() {
+        // T71.1: Invariant - hash_block_body always returns the CPU digest.
+        // This is true regardless of mode or GPU availability.
+        for mode in [
+            NodeHashBackend::CpuOnly,
+            NodeHashBackend::CpuWithGpuShadow,
+            NodeHashBackend::GpuPreferred,
+        ] {
+            let engine = NodeHashEngine::with_backend(mode);
+            let test_data = b"invariant test data for T71.1";
+            let expected = *blake3::hash(test_data).as_bytes();
+            let result = engine.hash_block_body(test_data);
+
+            assert_eq!(
+                result, expected,
+                "T71.1 invariant violated: mode={:?} did not return CPU digest",
+                mode
+            );
+        }
     }
 }
