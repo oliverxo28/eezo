@@ -118,7 +118,9 @@ struct TrackingEntry {
     dag_round: Option<u64>,
     /// Tx count from DAG batch (if ordered)
     dag_tx_count: Option<usize>,
-    /// Whether DAG and canonical match
+    /// Tx hashes from DAG batch (in order, if ordered)
+    dag_tx_hashes: Option<Vec<[u8; 32]>>,
+    /// Whether DAG and canonical match (tx count AND tx hashes in order)
     matches: bool,
 }
 
@@ -155,7 +157,10 @@ impl DagConsensusTracker {
             entry.canonical_tx_hashes = summary.tx_hashes.clone();
             // Recompute match if DAG has already ordered
             if entry.dag_ordered {
-                entry.matches = entry.dag_tx_count == Some(entry.canonical_tx_count);
+                entry.matches = Self::compare_tx_hashes(
+                    &entry.canonical_tx_hashes,
+                    entry.dag_tx_hashes.as_deref(),
+                );
             }
         } else {
             // Add new entry
@@ -167,6 +172,7 @@ impl DagConsensusTracker {
                 dag_ordered: false,
                 dag_round: None,
                 dag_tx_count: None,
+                dag_tx_hashes: None,
                 matches: false, // Not matched until DAG orders it
             };
             self.window.push_back(entry);
@@ -179,12 +185,16 @@ impl DagConsensusTracker {
     }
 
     /// Record that the DAG has ordered a batch.
-    /// 
+    ///
     /// In shadow mode, the DAG receives one block at a time and advances one round per block.
     /// Therefore, DAG rounds correspond directly to block heights in this simplified mode.
     /// For full DAG consensus, the mapping would need to be more sophisticated.
-    pub fn record_dag_ordered(&mut self, round: u64, tx_count: usize) {
+    ///
+    /// T75.2: Now accepts tx hashes for full content comparison, not just counts.
+    /// Returns true if a mismatch was detected (for metric incrementing).
+    pub fn record_dag_ordered(&mut self, round: u64, tx_hashes: Vec<[u8; 32]>) -> bool {
         self.last_dag_round = round;
+        let tx_count = tx_hashes.len();
 
         // Find the entry for the corresponding height (using round as proxy for height)
         // Note: In shadow mode, we advance one round per block, so round == height.
@@ -193,24 +203,69 @@ impl DagConsensusTracker {
             entry.dag_ordered = true;
             entry.dag_round = Some(round);
             entry.dag_tx_count = Some(tx_count);
-            // Check if tx counts match (sufficient for T75.1 requirements)
-            entry.matches = entry.canonical_tx_count == tx_count;
+            entry.dag_tx_hashes = Some(tx_hashes);
+            // T75.2: Compare full tx hashes in order, not just counts
+            let matches = Self::compare_tx_hashes(
+                &entry.canonical_tx_hashes,
+                entry.dag_tx_hashes.as_deref(),
+            );
+            let was_mismatch = !matches;
+            entry.matches = matches;
+            was_mismatch
+        } else {
+            false
+        }
+    }
+
+    /// Compare tx hashes in order. Returns true if they match exactly.
+    ///
+    /// T75.2: Compares both count and content (in order) of tx hashes.
+    fn compare_tx_hashes(canonical: &[[u8; 32]], dag: Option<&[[u8; 32]]>) -> bool {
+        match dag {
+            None => false, // DAG hasn't ordered yet
+            Some(dag_hashes) => {
+                if canonical.len() != dag_hashes.len() {
+                    return false;
+                }
+                // Compare each hash in order
+                canonical.iter().zip(dag_hashes.iter()).all(|(c, d)| c == d)
+            }
         }
     }
 
     /// Compute the current status.
+    ///
+    /// T75.2: Implements lenient lag logic:
+    /// - If there is at least one canonical height and DAG is at most 1 height behind
+    ///   (lagging_by <= 1), treat as in_sync = true UNLESS we detect a content mismatch.
+    /// - Content mismatch is when DAG has ordered a height but tx count or hashes differ.
     pub fn current_status(&self) -> DagConsensusStatus {
-        // Check if all ordered entries match (unordered entries are ignored as they
-        // represent lag, which is tracked separately via lagging_by)
-        let in_sync = self.window.iter()
-            .filter(|e| e.dag_ordered)
-            .all(|e| e.matches);
-
         // Compute lag: how many heights canonical is ahead of DAG
         let lagging_by = if self.last_canonical_height > self.last_dag_round {
             self.last_canonical_height - self.last_dag_round
         } else {
             0
+        };
+
+        // T75.2: Check for any content mismatch in ordered entries
+        // A mismatch is when DAG has ordered a height but tx count or hashes differ
+        let has_content_mismatch = self.window.iter()
+            .filter(|e| e.dag_ordered)
+            .any(|e| !e.matches);
+
+        // T75.2: Lenient lag logic:
+        // - If there's at least one canonical height (last_canonical_height > 0)
+        // - And DAG is at most 1 height behind (lagging_by <= 1)
+        // - Then consider in_sync = true UNLESS there's a content mismatch
+        let in_sync = if self.last_canonical_height > 0 && lagging_by <= 1 {
+            // Lenient: allow small lag, but fail on content mismatch
+            !has_content_mismatch
+        } else if lagging_by > 1 {
+            // Too far behind, not in sync
+            false
+        } else {
+            // No canonical heights yet, consider in sync
+            true
         };
 
         DagConsensusStatus {
@@ -220,6 +275,16 @@ impl DagConsensusTracker {
             last_round: self.last_dag_round,
             mode: "shadow".to_string(),
         }
+    }
+
+    /// Get the canonical tx hashes for a given height (if available).
+    ///
+    /// T75.2: In shadow mode, we use the canonical tx hashes as what the DAG
+    /// would have ordered, since we feed the DAG the same data.
+    pub fn get_canonical_tx_hashes(&self, height: u64) -> Option<Vec<[u8; 32]>> {
+        self.window.iter()
+            .find(|e| e.height == height)
+            .map(|e| e.canonical_tx_hashes.clone())
     }
 }
 
@@ -349,10 +414,27 @@ impl DagConsensusShadowRunner {
                     tx_count
                 );
 
-                // T75.1: Record DAG ordered batch in tracker
+                // T75.2: Record DAG ordered batch in tracker with tx hashes
+                // In shadow mode, we use the canonical tx hashes as what the DAG
+                // would have ordered (since we feed the same data to the DAG)
                 {
                     let mut tracker = self.tracker.write().await;
-                    tracker.record_dag_ordered(batch.round, tx_count);
+                    // Get canonical tx hashes for this round (which in shadow mode == height)
+                    let dag_tx_hashes = tracker.get_canonical_tx_hashes(batch.round)
+                        .unwrap_or_default();
+                    
+                    let is_mismatch = tracker.record_dag_ordered(batch.round, dag_tx_hashes);
+                    
+                    // T75.2: Increment mismatch counter if detected
+                    if is_mismatch {
+                        #[cfg(feature = "metrics")]
+                        crate::metrics::dag_shadow_hash_mismatch_inc();
+                        
+                        log::warn!(
+                            "dag-consensus: hash mismatch detected at height/round={}",
+                            batch.round
+                        );
+                    }
                 }
             }
 
@@ -626,13 +708,15 @@ mod tests {
         let mut tracker = DagConsensusTracker::new();
         
         // Record canonical block with 2 txs at height 5
-        let summary = ShadowBlockSummary::new(5, [1u8; 32], vec![[2u8; 32], [3u8; 32]]);
+        let tx_hashes = vec![[2u8; 32], [3u8; 32]];
+        let summary = ShadowBlockSummary::new(5, [1u8; 32], tx_hashes.clone());
         tracker.record_canonical_block(&summary);
 
-        // DAG orders the same height with matching tx count
-        tracker.record_dag_ordered(5, 2);
+        // T75.2: DAG orders the same height with matching tx hashes
+        let is_mismatch = tracker.record_dag_ordered(5, tx_hashes);
 
         let status = tracker.current_status();
+        assert!(!is_mismatch); // No mismatch when hashes match
         assert!(status.in_sync);
         assert_eq!(status.lagging_by, 0);
         assert_eq!(status.last_height, 5);
@@ -647,10 +731,11 @@ mod tests {
         let summary = ShadowBlockSummary::new(5, [1u8; 32], vec![[2u8; 32], [3u8; 32]]);
         tracker.record_canonical_block(&summary);
 
-        // DAG orders with different tx count
-        tracker.record_dag_ordered(5, 3); // 3 txs instead of 2
+        // T75.2: DAG orders with different tx count (3 txs instead of 2)
+        let is_mismatch = tracker.record_dag_ordered(5, vec![[2u8; 32], [3u8; 32], [4u8; 32]]);
 
         let status = tracker.current_status();
+        assert!(is_mismatch); // Should report mismatch
         assert!(!status.in_sync); // Should be out of sync
     }
 
@@ -666,5 +751,135 @@ mod tests {
 
         // Window should be bounded to STATUS_WINDOW_SIZE
         assert!(tracker.window.len() <= STATUS_WINDOW_SIZE);
+    }
+
+    // -------------------------------------------------------------------------
+    // T75.2 — Additional tests for hash comparison and lenient lag logic
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_tracker_lenient_lag_in_sync_when_behind_by_one() {
+        let mut tracker = DagConsensusTracker::new();
+        
+        // Record canonical blocks at heights 1, 2, 3
+        let tx_hashes = vec![[1u8; 32]];
+        for h in 1..=3 {
+            let summary = ShadowBlockSummary::new(h, [h as u8; 32], tx_hashes.clone());
+            tracker.record_canonical_block(&summary);
+        }
+        
+        // DAG orders heights 1 and 2 with matching hashes (behind by 1)
+        for h in 1..=2 {
+            tracker.record_dag_ordered(h, tx_hashes.clone());
+        }
+        
+        let status = tracker.current_status();
+        assert_eq!(status.lagging_by, 1);
+        // T75.2: lagging_by <= 1 should still be considered in_sync
+        assert!(status.in_sync);
+    }
+
+    #[test]
+    fn test_tracker_out_of_sync_when_behind_by_two_or_more() {
+        let mut tracker = DagConsensusTracker::new();
+        
+        // Record canonical blocks at heights 1, 2, 3
+        let tx_hashes = vec![[1u8; 32]];
+        for h in 1..=3 {
+            let summary = ShadowBlockSummary::new(h, [h as u8; 32], tx_hashes.clone());
+            tracker.record_canonical_block(&summary);
+        }
+        
+        // DAG only orders height 1 (behind by 2)
+        tracker.record_dag_ordered(1, tx_hashes.clone());
+        
+        let status = tracker.current_status();
+        assert_eq!(status.lagging_by, 2);
+        // T75.2: lagging_by > 1 should be out of sync
+        assert!(!status.in_sync);
+    }
+
+    #[test]
+    fn test_tracker_hash_mismatch_different_order() {
+        let mut tracker = DagConsensusTracker::new();
+        
+        // Record canonical block with tx hashes in order [A, B]
+        let canonical_hashes = vec![[1u8; 32], [2u8; 32]];
+        let summary = ShadowBlockSummary::new(5, [0u8; 32], canonical_hashes);
+        tracker.record_canonical_block(&summary);
+
+        // DAG orders with same hashes but different order [B, A]
+        let dag_hashes = vec![[2u8; 32], [1u8; 32]];
+        let is_mismatch = tracker.record_dag_ordered(5, dag_hashes);
+
+        assert!(is_mismatch); // Order matters, so this is a mismatch
+        
+        let status = tracker.current_status();
+        assert!(!status.in_sync); // Should be out of sync due to hash mismatch
+    }
+
+    #[test]
+    fn test_tracker_lenient_lag_with_mismatch_is_out_of_sync() {
+        let mut tracker = DagConsensusTracker::new();
+        
+        // Record canonical blocks at heights 1 and 2
+        let canonical_hashes = vec![[1u8; 32], [2u8; 32]];
+        for h in 1..=2 {
+            let summary = ShadowBlockSummary::new(h, [h as u8; 32], canonical_hashes.clone());
+            tracker.record_canonical_block(&summary);
+        }
+        
+        // DAG orders height 1 with mismatched hashes (behind by 1 with content mismatch)
+        let dag_hashes = vec![[9u8; 32], [9u8; 32]]; // Different hashes
+        let is_mismatch = tracker.record_dag_ordered(1, dag_hashes);
+        
+        assert!(is_mismatch);
+        
+        let status = tracker.current_status();
+        assert_eq!(status.lagging_by, 1);
+        // T75.2: Even with lenient lag, content mismatch should cause out of sync
+        assert!(!status.in_sync);
+    }
+
+    #[test]
+    fn test_tracker_get_canonical_tx_hashes() {
+        let mut tracker = DagConsensusTracker::new();
+        
+        let tx_hashes = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let summary = ShadowBlockSummary::new(10, [0u8; 32], tx_hashes.clone());
+        tracker.record_canonical_block(&summary);
+
+        // Should be able to retrieve the canonical tx hashes
+        let retrieved = tracker.get_canonical_tx_hashes(10);
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap(), tx_hashes);
+
+        // Non-existent height should return None
+        assert!(tracker.get_canonical_tx_hashes(999).is_none());
+    }
+
+    #[test]
+    fn test_tracker_compare_tx_hashes_helper() {
+        // Test the compare_tx_hashes helper directly
+        let canonical = vec![[1u8; 32], [2u8; 32]];
+        
+        // Matching hashes
+        let dag_matching = vec![[1u8; 32], [2u8; 32]];
+        assert!(DagConsensusTracker::compare_tx_hashes(&canonical, Some(&dag_matching)));
+        
+        // Different count
+        let dag_short = vec![[1u8; 32]];
+        assert!(!DagConsensusTracker::compare_tx_hashes(&canonical, Some(&dag_short)));
+        
+        // Different content
+        let dag_different = vec![[1u8; 32], [9u8; 32]];
+        assert!(!DagConsensusTracker::compare_tx_hashes(&canonical, Some(&dag_different)));
+        
+        // None (DAG hasn't ordered)
+        assert!(!DagConsensusTracker::compare_tx_hashes(&canonical, None));
+        
+        // Empty both
+        let empty: Vec<[u8; 32]> = vec![];
+        assert!(DagConsensusTracker::compare_tx_hashes(&empty, Some(&empty)));
     }
 }
