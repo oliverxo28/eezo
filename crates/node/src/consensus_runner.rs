@@ -113,10 +113,116 @@ fn compute_block_body_hash_with_gpu(blk_opt: &Option<Block>, height: u64) -> Opt
 use crate::executor::{Executor, ExecInput};
 use crate::executor::{SingleExecutor};
 use crate::executor::ParallelExecutor;
+// T73.3: STM executor (feature-gated)
+// When stm-exec feature is enabled, StmExecutor becomes available.
+// If EEZO_EXECUTOR_MODE=stm is set but stm-exec is not compiled,
+// build_executor() falls back to ParallelExecutor with a warning.
+#[cfg(feature = "stm-exec")]
+use crate::executor::StmExecutor;
+
 // T67.0: DAG runner handle for future DAG-aware block building
 use crate::dag_runner::DagRunnerHandle;
 // T69.0: DAG template policy gate
 use crate::dag_runner::{DagTemplatePolicy, evaluate_template_policy};
+
+// ============================================================================
+// T73.3: Executor Mode Selection
+// ============================================================================
+
+/// Executor mode enum for runtime selection.
+///
+/// Selected via `EEZO_EXECUTOR_MODE` environment variable:
+/// - `"single"` or `"s"` → SingleExecutor
+/// - `"parallel"` or `"p"` → ParallelExecutor  
+/// - `"stm"` or `"block-stm"` → StmExecutor (requires `stm-exec` feature)
+/// - Unset/unknown → default to Parallel
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutorMode {
+    Single,
+    Parallel,
+    Stm,
+}
+
+impl ExecutorMode {
+    /// Parse executor mode from environment variable `EEZO_EXECUTOR_MODE`.
+    ///
+    /// Returns the parsed mode or `None` if unset/unknown (caller decides default).
+    pub fn from_env() -> Option<Self> {
+        std::env::var("EEZO_EXECUTOR_MODE").ok().and_then(|v| {
+            match v.to_ascii_lowercase().as_str() {
+                "single" | "s" => Some(ExecutorMode::Single),
+                "parallel" | "p" => Some(ExecutorMode::Parallel),
+                "stm" | "block-stm" => Some(ExecutorMode::Stm),
+                _ => None,
+            }
+        })
+    }
+
+    /// Get the default executor mode (Parallel).
+    pub fn default_mode() -> Self {
+        ExecutorMode::Parallel
+    }
+}
+
+/// Build the executor based on the mode and thread count.
+///
+/// - If STM mode is requested but `stm-exec` feature is not enabled,
+///   logs a warning and falls back to Parallel.
+/// - Logs the selected mode at startup.
+fn build_executor(threads: usize) -> Box<dyn Executor> {
+    let env_val = std::env::var("EEZO_EXECUTOR_MODE").ok();
+    let mode = match &env_val {
+        Some(v) => {
+            match ExecutorMode::from_env() {
+                Some(m) => m,
+                None => {
+                    log::warn!(
+                        "executor: EEZO_EXECUTOR_MODE='{}' is not recognized, using default: parallel",
+                        v
+                    );
+                    ExecutorMode::default_mode()
+                }
+            }
+        }
+        None => {
+            log::info!("executor: EEZO_EXECUTOR_MODE not set, using default: parallel");
+            ExecutorMode::default_mode()
+        }
+    };
+
+    match mode {
+        ExecutorMode::Single => {
+            log::info!("executor: mode=single");
+            Box::new(SingleExecutor::new())
+        }
+        ExecutorMode::Parallel => {
+            log::info!("executor: mode=parallel threads={}", threads);
+            Box::new(ParallelExecutor::new(threads))
+        }
+        ExecutorMode::Stm => {
+            #[cfg(feature = "stm-exec")]
+            {
+                let exec = StmExecutor::from_env(threads);
+                log::info!(
+                    "executor: mode=stm threads={} max_retries={} wave_timeout_ms={}",
+                    exec.threads(),
+                    exec.config().max_retries,
+                    exec.config().wave_timeout_ms
+                );
+                Box::new(exec)
+            }
+            #[cfg(not(feature = "stm-exec"))]
+            {
+                log::warn!(
+                    "executor: STM mode requested but stm-exec feature is not enabled; \
+                     falling back to parallel"
+                );
+                log::info!("executor: mode=parallel threads={} (fallback from stm)", threads);
+                Box::new(ParallelExecutor::new(threads))
+            }
+        }
+    }
+}
 
 // T36.6 metrics hooks
 #[cfg(feature = "metrics")]
@@ -232,20 +338,11 @@ impl CoreRunnerHandle {
         let dag_template_policy = DagTemplatePolicy::from_env();
         log::info!("consensus: dag template policy = {:?}", dag_template_policy);
 
-        // T54: choose executor mode/threads from env (parallel vs single)
+        // T54/T73.3: choose executor mode/threads from env
         let exec_threads = std::env::var("EEZO_EXECUTOR_THREADS")
             .ok().and_then(|v| v.parse::<usize>().ok())
             .unwrap_or_else(num_cpus::get);
-        let exec_mode_parallel = std::env::var("EEZO_EXECUTOR_MODE")
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "parallel" | "p"))
-            .unwrap_or(true);
-        let exec: Box<dyn Executor> = if exec_mode_parallel {
-            log::info!("executor: mode=parallel threads={}", exec_threads);
-            Box::new(ParallelExecutor::new(exec_threads))
-        } else {
-            log::info!("executor: mode=single");
-            Box::new(SingleExecutor::new())
-        };
+        let exec: Box<dyn Executor> = build_executor(exec_threads);
 
         // T68.1: Clone the DAG handle for use inside the spawned task
         let dag_c = Arc::clone(&dag);
@@ -914,20 +1011,11 @@ impl CoreRunnerHandle {
         let dag_template_policy = DagTemplatePolicy::from_env();
         log::info!("consensus: dag template policy = {:?}", dag_template_policy);
 
-        // T54: choose executor mode/threads from env (parallel vs single)
+        // T54/T73.3: choose executor mode/threads from env
         let exec_threads = std::env::var("EEZO_EXECUTOR_THREADS")
             .ok().and_then(|v| v.parse::<usize>().ok())
             .unwrap_or_else(num_cpus::get);
-        let exec_mode_parallel = std::env::var("EEZO_EXECUTOR_MODE")
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "parallel" | "p"))
-            .unwrap_or(true);
-        let exec: Box<dyn Executor> = if exec_mode_parallel {
-            log::info!("executor: mode=parallel threads={}", exec_threads);
-            Box::new(ParallelExecutor::new(exec_threads))
-        } else {
-            log::info!("executor: mode=single");
-            Box::new(SingleExecutor::new())
-        };
+        let exec: Box<dyn Executor> = build_executor(exec_threads);
 
         // T68.1: Clone the DAG handle for use inside the spawned task
         let dag_c = Arc::clone(&dag);
@@ -1617,5 +1705,70 @@ impl CoreRunnerHandle {
     pub async fn snapshot_accounts_supply(&self) -> (eezo_ledger::Accounts, eezo_ledger::Supply) {
         let g = self.node.lock().await;
         (g.accounts.clone(), g.supply.clone())
+    }
+}
+
+// ============================================================================
+// T73.3: Unit Tests for Executor Mode Selection
+// ============================================================================
+
+#[cfg(test)]
+mod executor_mode_tests {
+    use super::ExecutorMode;
+    use std::sync::Mutex;
+    
+    // Mutex to serialize env var access across tests
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_executor_mode_default() {
+        assert_eq!(ExecutorMode::default_mode(), ExecutorMode::Parallel);
+    }
+
+    #[test]
+    fn test_executor_mode_parsing() {
+        // Serialize all env var tests to avoid race conditions
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Test single mode
+        std::env::set_var("EEZO_EXECUTOR_MODE", "single");
+        assert_eq!(ExecutorMode::from_env(), Some(ExecutorMode::Single));
+        
+        std::env::set_var("EEZO_EXECUTOR_MODE", "s");
+        assert_eq!(ExecutorMode::from_env(), Some(ExecutorMode::Single));
+        
+        std::env::set_var("EEZO_EXECUTOR_MODE", "SINGLE");
+        assert_eq!(ExecutorMode::from_env(), Some(ExecutorMode::Single));
+        
+        // Test parallel mode
+        std::env::set_var("EEZO_EXECUTOR_MODE", "parallel");
+        assert_eq!(ExecutorMode::from_env(), Some(ExecutorMode::Parallel));
+        
+        std::env::set_var("EEZO_EXECUTOR_MODE", "p");
+        assert_eq!(ExecutorMode::from_env(), Some(ExecutorMode::Parallel));
+        
+        std::env::set_var("EEZO_EXECUTOR_MODE", "PARALLEL");
+        assert_eq!(ExecutorMode::from_env(), Some(ExecutorMode::Parallel));
+        
+        // Test STM mode
+        std::env::set_var("EEZO_EXECUTOR_MODE", "stm");
+        assert_eq!(ExecutorMode::from_env(), Some(ExecutorMode::Stm));
+        
+        std::env::set_var("EEZO_EXECUTOR_MODE", "block-stm");
+        assert_eq!(ExecutorMode::from_env(), Some(ExecutorMode::Stm));
+        
+        std::env::set_var("EEZO_EXECUTOR_MODE", "STM");
+        assert_eq!(ExecutorMode::from_env(), Some(ExecutorMode::Stm));
+        
+        // Test unknown values
+        std::env::set_var("EEZO_EXECUTOR_MODE", "unknown");
+        assert_eq!(ExecutorMode::from_env(), None);
+        
+        std::env::set_var("EEZO_EXECUTOR_MODE", "");
+        assert_eq!(ExecutorMode::from_env(), None);
+        
+        // Test unset
+        std::env::remove_var("EEZO_EXECUTOR_MODE");
+        assert_eq!(ExecutorMode::from_env(), None);
     }
 }
