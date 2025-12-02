@@ -447,16 +447,7 @@ impl Executor for StmExecutor {
             .as_millis() as u64;
 
         if input.txs.is_empty() {
-            // Empty block - emit zero metrics for consistency
-            #[cfg(feature = "metrics")]
-            {
-                crate::metrics::stm_block_waves_inc(0);
-                crate::metrics::stm_block_conflicts_inc(0);
-                crate::metrics::stm_block_retries_inc(0);
-                crate::metrics::stm_observe_waves_per_block(0);
-                crate::metrics::stm_observe_conflicts_per_block(0);
-                crate::metrics::stm_observe_retries_per_block(0);
-            }
+            // Empty block - skip metrics for empty blocks to avoid skewing histograms
             let header = Self::build_block_header(input.height, prev, &[], timestamp_ms);
             let block = Block { header, txs: Vec::new() };
             return ExecOutcome::new(Ok(block), start.elapsed(), 0);
