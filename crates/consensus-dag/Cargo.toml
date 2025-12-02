@@ -1,0 +1,46 @@
+[package]
+name = "consensus-dag"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Core deps
+blake3.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+bincode = "1.3"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Collections
+dashmap = "6"
+parking_lot = "0.12"
+
+# Logging
+log = "0.4"
+
+# Ledger types for executor shim (A17)
+eezo-ledger = { path = "../ledger" }
+
+# Optional metrics (must be enabled via features using dep:<name>)
+prometheus = { version = "0.13", optional = true }
+lazy_static = { version = "1.4", optional = true }
+
+[features]
+# Default matches node defaults for workspace consistency
+default = ["eth-ssz", "checkpoints"]
+
+# enable optional deps explicitly so Cargo is happy
+metrics = ["dep:prometheus", "dep:lazy_static"]
+
+# alias kept for compatibility (optional)
+prometheus = ["dep:prometheus"]
+
+# Forward ledger features for BlockHeader compatibility
+checkpoints = ["eezo-ledger/checkpoints"]
+eth-ssz = ["eezo-ledger/eth-ssz"]
