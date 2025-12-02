@@ -35,3 +35,6 @@ Thumbs.db
 # Test database artifacts
 t29_9-*/
 **/t29_9-*/
+
+# Test artifacts
+crates/node/t29_9-*/

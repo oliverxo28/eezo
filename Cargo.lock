@@ -1633,6 +1633,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "clap",
+ "consensus-dag",
  "dashmap 6.1.0",
  "dirs",
  "eezo-crypto",
