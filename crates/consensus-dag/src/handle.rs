@@ -164,7 +164,9 @@ pub struct DagConsensusHandle {
     /// DAG vertex storage
     store: Arc<DagStore>,
 
-    /// Payload builder (for digest computation)
+    /// Payload builder for digest computation.
+    /// Currently not used directly (payloads compute their own digest),
+    /// but reserved for future integration with mempool peek operations.
     #[allow(dead_code)]
     builder: Arc<PayloadBuilder>,
 
@@ -215,7 +217,7 @@ impl DagConsensusHandle {
     ///
     /// Returns the VertexId of the created vertex on success.
     pub fn submit_payload(&self, payload: DagPayload) -> Result<VertexId, DagError> {
-        // Validate payload size
+        // Validate payload size (target_payload_bytes used as maximum limit)
         if payload.data.len() > self.config.target_payload_bytes {
             return Err(DagError::PayloadTooLarge {
                 size: payload.data.len(),
@@ -490,7 +492,9 @@ mod tests {
         let initial_stats = handle.stats();
         assert_eq!(initial_stats.vertices_stored, 0);
         assert_eq!(initial_stats.batches_ordered, 0);
-        assert_eq!(initial_stats.current_round, 0); // Not yet submitted
+        // Stats current_round is 0 initially (from DagStats::default),
+        // updated to actual round (1) on first submit_payload
+        assert_eq!(initial_stats.current_round, 0);
 
         // Submit a payload
         let author = AuthorId([1u8; 32]);

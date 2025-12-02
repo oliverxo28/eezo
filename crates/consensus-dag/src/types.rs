@@ -267,6 +267,9 @@ mod hex {
 ///
 /// This is intentionally small and stable: it represents the knobs the node
 /// will eventually pass in when constructing the DAG consensus layer.
+///
+/// Note: Some fields like `max_payload_txs` are configuration hints that may
+/// be used by the builder/executor layers rather than enforced by the handle.
 #[derive(Clone, Debug)]
 pub struct DagConsensusConfig {
     /// Maximum number of parent vertices that can be referenced (default: 10)
@@ -275,7 +278,8 @@ pub struct DagConsensusConfig {
     /// Maximum round gap allowed between a vertex and its parents (default: 5)
     pub max_round_gap: u64,
 
-    /// Maximum transactions per payload (default: 50,000 - from builder.rs)
+    /// Maximum transactions per payload (default: 50,000 - from builder.rs).
+    /// Used by builder/executor_shim layers for serialization limits.
     pub max_payload_txs: usize,
 
     /// GC safety margin: rounds kept after commit (default: 10 - from store.rs)
@@ -284,7 +288,7 @@ pub struct DagConsensusConfig {
     /// Ordering threshold: distinct producers required per round (default: 1)
     pub ordering_threshold: usize,
 
-    /// Target payload size in bytes (default: 1MB - from builder.rs)
+    /// Target payload size in bytes, also used as maximum limit (default: 1MB - from builder.rs)
     pub target_payload_bytes: usize,
 }
 
