@@ -3032,9 +3032,6 @@ async fn main() -> anyhow::Result<()> {
 			});
         let (pk, sk) = eezo_wallet::node_keys::load_or_create_mldsa44(&keydir, true)
 		    .map_err(|e| anyhow::anyhow!("wallet key load failed: {e}"))?;
-        // Clone cfg before using it so we can create a second SingleNode in DAG mode
-        let cfg_for_dag = cfg.clone();
-        let single: SingleNode = SingleNode::new(cfg, sk.clone(), pk.clone());
 
         // Read consensus mode from env and log it
         let consensus_mode = env_consensus_mode();
@@ -3046,6 +3043,7 @@ async fn main() -> anyhow::Result<()> {
 
         match consensus_mode {
             ConsensusMode::Hotstuff => {
+                let single: SingleNode = SingleNode::new(cfg, sk, pk);
                 // NEW: pass the DB (Some(persistence.clone())) so T36.5 can read real roots/timestamp
                 let runner = CoreRunnerHandle::spawn(single, Some(persistence.clone()), tick_ms, rollback_on_error);
                 (Some(runner), None)
@@ -3068,6 +3066,12 @@ async fn main() -> anyhow::Result<()> {
                     "dag: spawning with shadow_max_txs={} (set EEZO_DAG_SHADOW_MAX_TXS to change)",
                     dag_shadow_max_txs
                 );
+                
+                // Clone cfg for creating a second SingleNode for the DAG runner
+                let cfg_for_dag = cfg.clone();
+                
+                // Create the "real" SingleNode for the core runner
+                let single: SingleNode = SingleNode::new(cfg, sk.clone(), pk.clone());
                 
                 // Create a second SingleNode for the DAG runner (used for dry-run/preview)
                 let dag_node = SingleNode::new(cfg_for_dag, sk.clone(), pk.clone());
@@ -3114,9 +3118,6 @@ async fn main() -> anyhow::Result<()> {
             });
         let (pk, sk) = eezo_wallet::node_keys::load_or_create_mldsa44(&keydir, true)
             .map_err(|e| anyhow::anyhow!("wallet key load failed: {e}"))?;
-        // Clone cfg before using it so we can create a second SingleNode in DAG mode
-        let cfg_for_dag = cfg.clone();
-        let single: SingleNode = SingleNode::new(cfg, sk.clone(), pk.clone());
 
         // Read consensus mode from env and log it (DAG wiring comes next)
         let consensus_mode = env_consensus_mode();
@@ -3127,6 +3128,7 @@ async fn main() -> anyhow::Result<()> {
 
         match consensus_mode {
             ConsensusMode::Hotstuff => {
+                let single: SingleNode = SingleNode::new(cfg, sk, pk);
                 let runner = CoreRunnerHandle::spawn(single, tick_ms, rollback_on_error);
                 (Some(runner), None)
             }
@@ -3149,6 +3151,12 @@ async fn main() -> anyhow::Result<()> {
                     "dag: spawning with shadow_max_txs={} (set EEZO_DAG_SHADOW_MAX_TXS to change)",
                     dag_shadow_max_txs
                 );
+                
+                // Clone cfg for creating a second SingleNode for the DAG runner
+                let cfg_for_dag = cfg.clone();
+                
+                // Create the "real" SingleNode for the core runner
+                let single: SingleNode = SingleNode::new(cfg, sk.clone(), pk.clone());
                 
                 // Create a second SingleNode for the DAG runner (used for dry-run/preview)
                 let dag_node = SingleNode::new(cfg_for_dag, sk.clone(), pk.clone());
