@@ -344,11 +344,11 @@ impl DagConsensusHandle {
 
         // Try to order
         if let Some(bundle) = self.orderer.try_order_round(&self.store, current_round) {
-            // T74.3: Record metrics for ordered batch
-            let vertex_count = bundle.vertices.len() as u64;
-            
             // Create batch and enqueue
             let batch = OrderedBatch::from_bundle(bundle);
+            
+            // T74.3: Get vertex count from the batch for metrics (after batch creation)
+            let vertex_count = batch.vertex_count() as u64;
 
             {
                 let mut queue = self.ordered_queue.write();

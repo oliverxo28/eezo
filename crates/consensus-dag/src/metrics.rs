@@ -97,9 +97,13 @@ lazy_static! {
 
     // -------------------------------------------------------------------------
     // Legacy/Existing Metrics (kept for compatibility)
+    // NOTE: DAG_ROUND and DAG_CURRENT_ROUND track similar values. DAG_ROUND is 
+    // kept for backward compatibility with existing dashboards. New integrations
+    // should prefer DAG_CURRENT_ROUND (eezo_dag_current_round).
     // -------------------------------------------------------------------------
 
     /// Current round number (legacy, kept for backward compatibility)
+    /// @deprecated Use DAG_CURRENT_ROUND (eezo_dag_current_round) instead
     pub static ref DAG_ROUND: IntGauge = register_int_gauge_with_registry!(
         "eezo_dag_round",
         "Current DAG round number",
@@ -205,7 +209,8 @@ pub fn dag_order_fail_inc() {
 /// Set the current round gauge
 #[cfg(feature = "metrics")]
 pub fn dag_current_round_set(round: u64) {
-    DAG_CURRENT_ROUND.set(round as i64);
+    // Use saturating conversion to prevent overflow (max i64 is ~9.2e18)
+    DAG_CURRENT_ROUND.set(round.min(i64::MAX as u64) as i64);
 }
 
 /// Increment the pending vertices gauge
@@ -215,9 +220,12 @@ pub fn dag_pending_vertices_inc() {
 }
 
 /// Decrement the pending vertices gauge by a given amount
+/// Note: Gauge may go negative if decrement exceeds current value,
+/// which can happen due to equivocation detection removing vertices.
 #[cfg(feature = "metrics")]
 pub fn dag_pending_vertices_dec(count: u64) {
-    DAG_PENDING_VERTICES.sub(count as i64);
+    // Use saturating conversion to prevent overflow
+    DAG_PENDING_VERTICES.sub(count.min(i64::MAX as u64) as i64);
 }
 
 /// Observe the number of vertices in a round
