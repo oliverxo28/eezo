@@ -1939,3 +1939,66 @@ pub fn register_t73_stm_metrics() {
 pub fn register_t73_stm_metrics() {
     // No metrics to register when the feature is off.
 }
+// -----------------------------------------------------------------------------
+// T75.1 — Shadow DAG consensus sync metrics
+// -----------------------------------------------------------------------------
+
+/// Gauge: Whether shadow DAG is in sync with canonical consensus.
+/// 1 = in sync, 0 = out of sync or mismatched.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_SHADOW_IN_SYNC: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_shadow_in_sync",
+        "Whether shadow DAG consensus is in sync with canonical (1=yes, 0=no)"
+    )
+    .unwrap()
+});
+
+/// Gauge: How many block heights the shadow DAG is behind canonical consensus.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_SHADOW_LAG_BLOCKS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_shadow_lag_blocks",
+        "Number of block heights shadow DAG is behind canonical consensus"
+    )
+    .unwrap()
+});
+
+/// Helper: Set the shadow DAG in_sync gauge.
+#[inline]
+pub fn dag_shadow_sync_set(in_sync: bool) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_SHADOW_IN_SYNC.set(if in_sync { 1 } else { 0 });
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = in_sync;
+    }
+}
+
+/// Helper: Set the shadow DAG lag gauge.
+#[inline]
+pub fn dag_shadow_lag_set(lag: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_SHADOW_LAG_BLOCKS.set(lag as i64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = lag;
+    }
+}
+
+/// Eagerly register T75.1 shadow DAG metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_dag_shadow_metrics() {
+    let _ = &*EEZO_DAG_SHADOW_IN_SYNC;
+    let _ = &*EEZO_DAG_SHADOW_LAG_BLOCKS;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_dag_shadow_metrics() {
+    // No metrics to register when the feature is off.
+}

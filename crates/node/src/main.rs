@@ -777,6 +777,44 @@ async fn dag_block_compare_handler() -> Response {
         .into_response()
 }
 
+/// T75.1: GET /dag/consensus_status
+///
+/// Returns the status of the shadow DAG consensus compared to canonical consensus.
+/// When dag-consensus feature is enabled and shadow mode is active, returns:
+/// - in_sync: whether DAG and canonical have matching tx counts
+/// - lagging_by: how many heights DAG is behind
+/// - last_height: last canonical height seen
+/// - last_round: last DAG round observed
+/// - mode: "shadow"
+///
+/// When dag-consensus feature is not enabled or mode is off, returns:
+/// - mode: "off"
+#[cfg(feature = "dag-consensus")]
+async fn dag_consensus_status_handler(State(state): State<AppState>) -> Response {
+    if let Some(tracker) = state.shadow_dag_tracker.as_ref() {
+        let tracker = tracker.read().await;
+        let status = tracker.current_status();
+        (StatusCode::OK, Json(status)).into_response()
+    } else {
+        // Shadow mode not enabled or tracker not available
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "mode": "off" })),
+        )
+            .into_response()
+    }
+}
+
+#[cfg(not(feature = "dag-consensus"))]
+async fn dag_consensus_status_handler() -> Response {
+    // dag-consensus feature not compiled
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "mode": "off" })),
+    )
+        .into_response()
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct NodeIdentity {
     node_id: String,
@@ -1213,6 +1251,10 @@ struct AppState {
     // this sender is used to feed committed block info to the shadow DAG runner.
     #[cfg(feature = "dag-consensus")]
     shadow_dag_sender: Option<tokio::sync::mpsc::Sender<crate::dag_consensus_runner::ShadowBlockSummary>>,
+    // T75.1: Optional tracker for shadow DAG consensus status
+    // Used by GET /dag/consensus_status endpoint to query sync status.
+    #[cfg(feature = "dag-consensus")]
+    shadow_dag_tracker: Option<Arc<tokio::sync::RwLock<crate::dag_consensus_runner::DagConsensusTracker>>>,
 }
 
 struct RecentBlocks {
@@ -3459,19 +3501,24 @@ async fn main() -> anyhow::Result<()> {
     // This runs the consensus-dag crate in parallel with Hotstuff/STM but only
     // observes block commits - it never affects the canonical consensus path.
     #[cfg(feature = "dag-consensus")]
-    let shadow_dag_sender = crate::dag_consensus_runner::spawn_shadow_dag_if_enabled();
+    let shadow_dag_handle = crate::dag_consensus_runner::spawn_shadow_dag_if_enabled();
 
     // T75.0: Attach shadow DAG sender to core runner so it can feed committed blocks
     #[cfg(all(feature = "dag-consensus", feature = "pq44-runtime"))]
     {
         if let Some(core) = core_runner.clone() {
-            core.set_shadow_dag_sender(shadow_dag_sender.clone()).await;
+            let sender = shadow_dag_handle.as_ref().map(|h| h.sender.clone());
+            core.set_shadow_dag_sender(sender).await;
         }
     }
 
+    // T75.1: Extract tracker for HTTP endpoint
+    #[cfg(feature = "dag-consensus")]
+    let shadow_dag_tracker = shadow_dag_handle.as_ref().map(|h| h.tracker.clone());
+
     // When dag-consensus feature is not compiled, we don't have a sender
     #[cfg(not(feature = "dag-consensus"))]
-    let shadow_dag_sender: Option<tokio::sync::mpsc::Sender<()>> = {
+    let _shadow_dag_unused: Option<()> = {
         // If someone sets EEZO_DAG_CONSENSUS_MODE=shadow but the feature is not compiled,
         // log a clear warning.
         if std::env::var("EEZO_DAG_CONSENSUS_MODE")
@@ -3532,7 +3579,10 @@ async fn main() -> anyhow::Result<()> {
         datadir: Some(std::path::PathBuf::from(cfg.datadir.clone())),
         // T75.0: Shadow DAG sender (only when dag-consensus feature is enabled)
         #[cfg(feature = "dag-consensus")]
-        shadow_dag_sender,
+        shadow_dag_sender: shadow_dag_handle.as_ref().map(|h| h.sender.clone()),
+        // T75.1: Shadow DAG tracker (only when dag-consensus feature is enabled)
+        #[cfg(feature = "dag-consensus")]
+        shadow_dag_tracker,
     };
     println!(
         "✅ AppState initialized: ready_flag={}, version={}, git_sha={:?}",
@@ -3728,6 +3778,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/dag/block_dry_run", get(dag_block_dry_run_handler))
 		.route("/dag/block_template", get(dag_block_template_handler))
 		.route("/dag/block_compare", get(dag_block_compare_handler))
+        // T75.1: Shadow DAG consensus status endpoint
+        .route("/dag/consensus_status", get(dag_consensus_status_handler))
         // T30 tx endpoints
         .route("/tx", post(post_tx))
         .route("/tx_batch", post(post_tx_batch)) // <-- ADDED
