@@ -5,6 +5,7 @@ members = [
   "crates/serde",
   "crates/net",
   "crates/ledger",
+  "crates/consensus-dag",  # DAG consensus (T74.1 - feature-gated)
   "crates/node",     # node crate
   "fuzz",            # fuzz targets
   "crates/eezo-kats",
