@@ -77,7 +77,7 @@ const STATUS_WINDOW_SIZE: usize = 256;
 /// Status of the shadow DAG consensus compared to canonical consensus.
 #[derive(Clone, Debug, Serialize)]
 pub struct DagConsensusStatus {
-    /// True if for all known heights, DAG and canonical have same tx count and order
+    /// True if for all ordered heights, DAG and canonical have same tx count
     pub in_sync: bool,
     /// Number of heights canonical is ahead of DAG
     pub lagging_by: u64,
@@ -179,25 +179,32 @@ impl DagConsensusTracker {
     }
 
     /// Record that the DAG has ordered a batch.
-    /// For simplicity, we associate the batch with the current round's height.
+    /// 
+    /// In shadow mode, the DAG receives one block at a time and advances one round per block.
+    /// Therefore, DAG rounds correspond directly to block heights in this simplified mode.
+    /// For full DAG consensus, the mapping would need to be more sophisticated.
     pub fn record_dag_ordered(&mut self, round: u64, tx_count: usize) {
         self.last_dag_round = round;
 
         // Find the entry for the corresponding height (using round as proxy for height)
-        // In shadow mode, rounds and heights should be roughly 1:1
+        // Note: In shadow mode, we advance one round per block, so round == height.
+        // This assumption is valid because we call handle.advance_round() after each block.
         if let Some(entry) = self.window.iter_mut().find(|e| e.height == round) {
             entry.dag_ordered = true;
             entry.dag_round = Some(round);
             entry.dag_tx_count = Some(tx_count);
-            // Check if tx counts match
+            // Check if tx counts match (sufficient for T75.1 requirements)
             entry.matches = entry.canonical_tx_count == tx_count;
         }
     }
 
     /// Compute the current status.
     pub fn current_status(&self) -> DagConsensusStatus {
-        // Check if all entries in the window are in sync
-        let in_sync = self.window.iter().all(|e| !e.dag_ordered || e.matches);
+        // Check if all ordered entries match (unordered entries are ignored as they
+        // represent lag, which is tracked separately via lagging_by)
+        let in_sync = self.window.iter()
+            .filter(|e| e.dag_ordered)
+            .all(|e| e.matches);
 
         // Compute lag: how many heights canonical is ahead of DAG
         let lagging_by = if self.last_canonical_height > self.last_dag_round {
