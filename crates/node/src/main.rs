@@ -100,6 +100,10 @@ mod consensus_runner;
 #[cfg(feature = "pq44-runtime")]
 mod dag_runner;
 
+// T75.0: Shadow DAG consensus runner module (only when dag-consensus feature is enabled)
+#[cfg(feature = "dag-consensus")]
+mod dag_consensus_runner;
+
 // T36.6: expose bridge metrics immediately at boot
 // metrics registrars used at boot
 #[cfg(feature = "metrics")]
@@ -1203,7 +1207,12 @@ struct AppState {
     pub next_suite_id: Option<u8>,
     pub dual_accept_until: Option<u64>, // block height
     // T36.8: base datadir for runtime artifacts (`<datadir>/proof/...`)
-    pub datadir: Option<std::path::PathBuf>,	
+    pub datadir: Option<std::path::PathBuf>,
+    // T75.0: Optional sender for shadow DAG consensus
+    // When dag-consensus feature is enabled and EEZO_DAG_CONSENSUS_MODE=shadow,
+    // this sender is used to feed committed block info to the shadow DAG runner.
+    #[cfg(feature = "dag-consensus")]
+    shadow_dag_sender: Option<tokio::sync::mpsc::Sender<crate::dag_consensus_runner::ShadowBlockSummary>>,
 }
 
 struct RecentBlocks {
@@ -3446,6 +3455,37 @@ async fn main() -> anyhow::Result<()> {
         // If there is no core_runner at all (pure DAG mode), we don't call set_dag_runner.
     }
 
+    // T75.0: Spawn shadow DAG consensus runner if enabled.
+    // This runs the consensus-dag crate in parallel with Hotstuff/STM but only
+    // observes block commits - it never affects the canonical consensus path.
+    #[cfg(feature = "dag-consensus")]
+    let shadow_dag_sender = crate::dag_consensus_runner::spawn_shadow_dag_if_enabled();
+
+    // T75.0: Attach shadow DAG sender to core runner so it can feed committed blocks
+    #[cfg(all(feature = "dag-consensus", feature = "pq44-runtime"))]
+    {
+        if let Some(core) = core_runner.clone() {
+            core.set_shadow_dag_sender(shadow_dag_sender.clone()).await;
+        }
+    }
+
+    // When dag-consensus feature is not compiled, we don't have a sender
+    #[cfg(not(feature = "dag-consensus"))]
+    let shadow_dag_sender: Option<tokio::sync::mpsc::Sender<()>> = {
+        // If someone sets EEZO_DAG_CONSENSUS_MODE=shadow but the feature is not compiled,
+        // log a clear warning.
+        if std::env::var("EEZO_DAG_CONSENSUS_MODE")
+            .map(|v| v.trim().to_ascii_lowercase() == "shadow")
+            .unwrap_or(false)
+        {
+            log::warn!(
+                "dag-consensus: shadow mode requested but dag-consensus feature is not compiled; \
+                 running without DAG shadow"
+            );
+        }
+        None
+    };
+
     // 4️⃣ Pass both handles into AppState
     let state = AppState {
         runtime_config: runtime_config.clone(),
@@ -3490,6 +3530,9 @@ async fn main() -> anyhow::Result<()> {
         dual_accept_until,
         // T36.8: plumb CLI/env-configured datadir into AppState
         datadir: Some(std::path::PathBuf::from(cfg.datadir.clone())),
+        // T75.0: Shadow DAG sender (only when dag-consensus feature is enabled)
+        #[cfg(feature = "dag-consensus")]
+        shadow_dag_sender,
     };
     println!(
         "✅ AppState initialized: ready_flag={}, version={}, git_sha={:?}",

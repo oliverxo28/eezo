@@ -23,6 +23,10 @@ use eezo_ledger::consensus_api::{SlotOutcome, NoOpReason};
 use eezo_ledger::Block; // Keep this import, as we'll need it to reconstruct the Block
 use eezo_ledger::SignedTx; // T66.0: used by collect_block_txs_from_mempool()
 
+// T75.0: Import shadow DAG types when dag-consensus feature is enabled
+#[cfg(feature = "dag-consensus")]
+use crate::dag_consensus_runner::ShadowBlockSummary;
+
 /// T60.0 — helper: log a compact summary of block tx hashes.
 /// This does **not** change behaviour; it only logs.
 fn log_block_shadow_debug(prefix: &str, height: u64, blk_opt: &Option<Block>) {
@@ -297,6 +301,10 @@ pub struct CoreRunnerHandle {
     // Stored behind a Mutex so we can attach it after construction.
     #[allow(dead_code)]
     dag: Arc<Mutex<Option<Arc<DagRunnerHandle>>>>,
+    // T75.0: optional shadow DAG sender for feeding committed blocks to shadow consensus
+    // Stored behind a Mutex so we can attach it after construction.
+    #[cfg(feature = "dag-consensus")]
+    shadow_dag_sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<ShadowBlockSummary>>>>,
     join: tokio::task::JoinHandle<()>,
 }
 impl CoreRunnerHandle {
@@ -311,6 +319,9 @@ impl CoreRunnerHandle {
         let node_c = Arc::clone(&node);
         // T67.0: start with no DAG handle; it can be attached later
         let dag = Arc::new(Mutex::new(None));
+        // T75.0: start with no shadow DAG sender; it can be attached later
+        #[cfg(feature = "dag-consensus")]
+        let shadow_dag_sender = Arc::new(Mutex::new(None));
         // Note: db_c is not available in this cfg block
 
         // 1️⃣ Add MAX_TX reading at struct init (persistence disabled path)
@@ -346,6 +357,9 @@ impl CoreRunnerHandle {
 
         // T68.1: Clone the DAG handle for use inside the spawned task
         let dag_c = Arc::clone(&dag);
+        // T75.0: Clone shadow DAG sender for use inside the spawned task
+        #[cfg(feature = "dag-consensus")]
+        let shadow_dag_c = Arc::clone(&shadow_dag_sender);
 
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
@@ -621,6 +635,37 @@ impl CoreRunnerHandle {
                         // T71.0: GPU hash comparison (optional, controlled by EEZO_NODE_GPU_HASH)
                         // This exercises the GPU hashing path without changing consensus behaviour.
                         let _ = compute_block_body_hash_with_gpu(&blk_opt, height);
+
+                        // T75.0: Send committed block to shadow DAG (if enabled)
+                        // This must not block or affect the main consensus path.
+                        #[cfg(feature = "dag-consensus")]
+                        {
+                            if let Some(ref blk) = blk_opt {
+                                // Try to get the shadow DAG sender
+                                let sender_opt: Option<tokio::sync::mpsc::Sender<ShadowBlockSummary>> = 
+                                    shadow_dag_c.lock().await.clone();
+                                if let Some(sender) = sender_opt {
+                                    // Build the summary
+                                    let block_hash = blk.header.hash();
+                                    let tx_hashes: Vec<[u8; 32]> = blk.txs.iter().map(|tx| tx.hash()).collect();
+                                    let summary = ShadowBlockSummary {
+                                        height,
+                                        block_hash,
+                                        tx_hashes,
+                                        round: None,
+                                        timestamp_ms: Some(blk.header.timestamp_ms),
+                                    };
+
+                                    // Send non-blocking; log warning if channel is full/closed
+                                    if let Err(e) = sender.try_send(summary) {
+                                        log::warn!(
+                                            "dag-consensus: shadow send failed at height={}: {}",
+                                            height, e
+                                        );
+                                    }
+                                }
+                            }
+                        }
 
                         // update committed height gauge and mempool metrics
                         #[cfg(feature = "metrics")]
@@ -970,6 +1015,8 @@ impl CoreRunnerHandle {
             #[cfg(feature = "persistence")] // Ensure db is only included when feature is on
             db: None, // This branch explicitly lacks persistence
             dag,
+            #[cfg(feature = "dag-consensus")]
+            shadow_dag_sender,
             join,
         })
     }
@@ -984,6 +1031,9 @@ impl CoreRunnerHandle {
         let db_c = db.clone();
         // T67.0: start with no DAG handle; it can be attached later
         let dag = Arc::new(Mutex::new(None));
+        // T75.0: start with no shadow DAG sender; it can be attached later
+        #[cfg(feature = "dag-consensus")]
+        let shadow_dag_sender = Arc::new(Mutex::new(None));
         // Clone Option<Arc<Persistence>> for the loop
 
         // 1️⃣ Add MAX_TX reading at struct init (persistence enabled path)
@@ -1019,6 +1069,9 @@ impl CoreRunnerHandle {
 
         // T68.1: Clone the DAG handle for use inside the spawned task
         let dag_c = Arc::clone(&dag);
+        // T75.0: Clone shadow DAG sender for use inside the spawned task
+        #[cfg(feature = "dag-consensus")]
+        let shadow_dag_c = Arc::clone(&shadow_dag_sender);
 
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
@@ -1274,6 +1327,37 @@ impl CoreRunnerHandle {
                         // T71.0: GPU hash comparison (optional, controlled by EEZO_NODE_GPU_HASH)
                         // This exercises the GPU hashing path without changing consensus behaviour.
                         let _ = compute_block_body_hash_with_gpu(&blk_opt, height);
+
+                        // T75.0: Send committed block to shadow DAG (if enabled)
+                        // This must not block or affect the main consensus path.
+                        #[cfg(feature = "dag-consensus")]
+                        {
+                            if let Some(ref blk) = blk_opt {
+                                // Try to get the shadow DAG sender
+                                let sender_opt: Option<tokio::sync::mpsc::Sender<ShadowBlockSummary>> = 
+                                    shadow_dag_c.lock().await.clone();
+                                if let Some(sender) = sender_opt {
+                                    // Build the summary
+                                    let block_hash = blk.header.hash();
+                                    let tx_hashes: Vec<[u8; 32]> = blk.txs.iter().map(|tx| tx.hash()).collect();
+                                    let summary = ShadowBlockSummary {
+                                        height,
+                                        block_hash,
+                                        tx_hashes,
+                                        round: None,
+                                        timestamp_ms: Some(blk.header.timestamp_ms),
+                                    };
+
+                                    // Send non-blocking; log warning if channel is full/closed
+                                    if let Err(e) = sender.try_send(summary) {
+                                        log::warn!(
+                                            "dag-consensus: shadow send failed at height={}: {}",
+                                            height, e
+                                        );
+                                    }
+                                }
+                            }
+                        }
 
                         // update committed height gauge
                         #[cfg(feature = "metrics")]
@@ -1554,6 +1638,8 @@ impl CoreRunnerHandle {
             node,
             db,
             dag,
+            #[cfg(feature = "dag-consensus")]
+            shadow_dag_sender,
             join,
         })
     }
@@ -1577,6 +1663,23 @@ impl CoreRunnerHandle {
             }
         }
     }
+
+    /// T75.0: attach the shadow DAG sender for feeding committed blocks to shadow consensus.
+    ///
+    /// This is called from main.rs after the shadow DAG runner is spawned.
+    /// The sender is used to send ShadowBlockSummary on each block commit.
+    #[cfg(feature = "dag-consensus")]
+    pub async fn set_shadow_dag_sender(
+        self: &Arc<Self>,
+        sender: Option<tokio::sync::mpsc::Sender<ShadowBlockSummary>>,
+    ) {
+        {
+            let mut guard = self.shadow_dag_sender.lock().await;
+            *guard = sender;
+        }
+        log::info!("consensus: core_runner: shadow DAG sender attached");
+    }
+
     /// Request stop and wait for the loop to finish.
     pub async fn stop(self: &Arc<Self>) {
         // Use Relaxed ordering
