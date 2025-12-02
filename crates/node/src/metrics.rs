@@ -1780,3 +1780,162 @@ pub fn register_t72_exec_perf_metrics() {
 pub fn register_t72_exec_perf_metrics() {
     // No metrics to register when the feature is off.
 }
+
+// -----------------------------------------------------------------------------
+// T73.4 — STM-specific metrics and instrumentation
+// -----------------------------------------------------------------------------
+
+/// Counter: Total number of STM waves processed across all blocks.
+#[cfg(feature = "metrics")]
+pub static EEZO_STM_BLOCK_WAVES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_stm_block_waves_total",
+        "Total number of STM waves processed across all blocks"
+    )
+    .unwrap()
+});
+
+/// Counter: Total number of conflicts detected by STM (per tx, summed across blocks).
+#[cfg(feature = "metrics")]
+pub static EEZO_STM_BLOCK_CONFLICTS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_stm_block_conflicts_total",
+        "Total number of conflicts detected by STM (per tx, summed across blocks)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total number of transaction retries due to conflicts.
+#[cfg(feature = "metrics")]
+pub static EEZO_STM_BLOCK_RETRIES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_stm_block_retries_total",
+        "Total number of transaction retries due to conflicts"
+    )
+    .unwrap()
+});
+
+/// Histogram: Distribution of "waves per block" when STM is used.
+#[cfg(feature = "metrics")]
+pub static EEZO_STM_WAVES_PER_BLOCK: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_stm_waves_per_block",
+        "Distribution of waves per block when STM is used"
+    )
+    .unwrap()
+});
+
+/// Histogram: Distribution of total conflicts per block.
+#[cfg(feature = "metrics")]
+pub static EEZO_STM_CONFLICTS_PER_BLOCK: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_stm_conflicts_per_block",
+        "Distribution of total conflicts per block"
+    )
+    .unwrap()
+});
+
+/// Histogram: Distribution of total retries per block.
+#[cfg(feature = "metrics")]
+pub static EEZO_STM_RETRIES_PER_BLOCK: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_stm_retries_per_block",
+        "Distribution of total retries per block"
+    )
+    .unwrap()
+});
+
+/// Helper: Increment STM block waves counter.
+#[inline]
+pub fn stm_block_waves_inc(by: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STM_BLOCK_WAVES_TOTAL.inc_by(by);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = by;
+    }
+}
+
+/// Helper: Increment STM block conflicts counter.
+#[inline]
+pub fn stm_block_conflicts_inc(by: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STM_BLOCK_CONFLICTS_TOTAL.inc_by(by);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = by;
+    }
+}
+
+/// Helper: Increment STM block retries counter.
+#[inline]
+pub fn stm_block_retries_inc(by: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STM_BLOCK_RETRIES_TOTAL.inc_by(by);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = by;
+    }
+}
+
+/// Helper: Observe waves per block histogram.
+#[inline]
+pub fn stm_observe_waves_per_block(waves: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STM_WAVES_PER_BLOCK.observe(waves as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = waves;
+    }
+}
+
+/// Helper: Observe conflicts per block histogram.
+#[inline]
+pub fn stm_observe_conflicts_per_block(conflicts: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STM_CONFLICTS_PER_BLOCK.observe(conflicts as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = conflicts;
+    }
+}
+
+/// Helper: Observe retries per block histogram.
+#[inline]
+pub fn stm_observe_retries_per_block(retries: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STM_RETRIES_PER_BLOCK.observe(retries as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = retries;
+    }
+}
+
+/// Eagerly register T73.4 STM metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t73_stm_metrics() {
+    let _ = &*EEZO_STM_BLOCK_WAVES_TOTAL;
+    let _ = &*EEZO_STM_BLOCK_CONFLICTS_TOTAL;
+    let _ = &*EEZO_STM_BLOCK_RETRIES_TOTAL;
+    let _ = &*EEZO_STM_WAVES_PER_BLOCK;
+    let _ = &*EEZO_STM_CONFLICTS_PER_BLOCK;
+    let _ = &*EEZO_STM_RETRIES_PER_BLOCK;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t73_stm_metrics() {
+    // No metrics to register when the feature is off.
+}
