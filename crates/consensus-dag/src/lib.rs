@@ -65,6 +65,9 @@ pub use executor_shim::{DagExecutorShim, ExecutorShimError};
 // Re-export handle types
 pub use handle::{DagConsensusHandle, DagPayload, OrderedBatch, DagStats, DagError};
 
+// Re-export metrics registration function (T74.3)
+pub use crate::metrics::register_dag_metrics;
+
 /// Initialize the DAG consensus system
 pub fn initialize() -> (DagStore, OrderingEngine, DAWorker) {
     #[cfg(feature = "metrics")]

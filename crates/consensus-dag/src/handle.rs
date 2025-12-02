@@ -18,6 +18,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::builder::PayloadBuilder;
+use crate::metrics;
 use crate::order::OrderingEngine;
 use crate::store::DagStore;
 use crate::types::{AuthorId, DagConsensusConfig, DagNode, OrderedBundle, PayloadId, Round, VertexId};
@@ -252,6 +253,11 @@ impl DagConsensusHandle {
             stats.current_round = current_round.as_u64();
         }
 
+        // T74.3: Update metrics on vertex submit
+        metrics::dag_vertices_inc();
+        metrics::dag_pending_vertices_inc();
+        metrics::dag_current_round_set(current_round.as_u64());
+
         // Try to order current round
         self.try_order_current_round();
 
@@ -282,6 +288,10 @@ impl DagConsensusHandle {
 
         let mut stats = self.stats.write();
         stats.current_round = round.as_u64();
+
+        // T74.3: Update metrics on round advance
+        metrics::dag_round_advance_inc();
+        metrics::dag_current_round_set(round.as_u64());
     }
 
     /// Get the current round number.
@@ -336,6 +346,9 @@ impl DagConsensusHandle {
         if let Some(bundle) = self.orderer.try_order_round(&self.store, current_round) {
             // Create batch and enqueue
             let batch = OrderedBatch::from_bundle(bundle);
+            
+            // T74.3: Get vertex count from the batch for metrics (after batch creation)
+            let vertex_count = batch.vertex_count() as u64;
 
             {
                 let mut queue = self.ordered_queue.write();
@@ -353,6 +366,12 @@ impl DagConsensusHandle {
                 let mut stats = self.stats.write();
                 stats.batches_ordered += 1;
             }
+
+            // T74.3: Update metrics on successful ordering
+            metrics::dag_vertices_ordered_inc(vertex_count);
+            metrics::dag_pending_vertices_dec(vertex_count);
+            metrics::observe_vertices_per_round(vertex_count);
+            metrics::dag_current_round_set(current_round.as_u64());
         }
     }
 }
@@ -548,5 +567,46 @@ mod tests {
         let stats = handle.stats();
         assert_eq!(stats.vertices_stored, 2);
         assert_eq!(stats.batches_ordered, 2);
+    }
+
+    /// T74.3: Test that metrics are updated on submit and order.
+    /// This test calls the metrics helper functions and verifies no panics occur.
+    #[test]
+    fn test_dag_metrics_increment_on_submit_and_order() {
+        use crate::metrics;
+
+        // Initialize metrics
+        metrics::register_dag_metrics();
+
+        let config = DagConsensusConfig::default();
+        let handle = DagConsensusHandle::new(config);
+
+        // Use different authors to avoid equivocation detection
+        let author1 = AuthorId([1u8; 32]);
+        let author2 = AuthorId([2u8; 32]);
+        let author3 = AuthorId([3u8; 32]);
+
+        // Submit payloads from different authors - this should increment vertices counter
+        let payload1 = DagPayload::new(vec![1, 2, 3], author1);
+        let _vertex1 = handle.submit_payload(payload1).unwrap();
+
+        let payload2 = DagPayload::new(vec![4, 5, 6], author2);
+        let _vertex2 = handle.submit_payload(payload2).unwrap();
+
+        // Try to get ordered batch - this should update ordered vertices counter
+        let batch = handle.try_next_ordered_batch();
+        assert!(batch.is_some(), "Expected batch to be ordered");
+
+        // Advance round - this should increment round advance counter
+        handle.advance_round();
+
+        // Submit another payload in new round
+        let payload3 = DagPayload::new(vec![7, 8, 9], author3);
+        let _vertex3 = handle.submit_payload(payload3).unwrap();
+
+        // Stats verification
+        let stats = handle.stats();
+        assert_eq!(stats.vertices_stored, 3);
+        assert_eq!(stats.current_round, 2);
     }
 }
