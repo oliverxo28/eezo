@@ -1462,11 +1462,22 @@ async fn post_tx(
                     }
                 })
                 .await;
-                true        
+            
+            // T73.fix: In DAG mode, also submit to the shared mempool so the DAG runner
+            // can sample tx hashes for vertex payload construction.
+            // This is read-only from consensus perspective - the core runner's mempool
+            // is the source of truth for block production.
+            if state.dag_runner.is_some() {
+                let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+                // Best-effort: ignore duplicate/rate-limit errors since the core runner
+                // already accepted the tx.
+                let _ = state.mempool.submit(ip, hash32, raw).await;
+            }
+            
+            true        
         } else if state.dag_runner.is_some() {
-            // DAG mode: Submit tx to the shared mempool for shadow payload sampling.
-            // This is read-only from consensus perspective - we just make txs available
-            // for the DAG runner to sample from when building vertices.
+            // DAG mode without core runner (shouldn't happen after T73.fix, but keep for safety):
+            // Submit tx to the shared mempool for shadow payload sampling.
             let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
             match state.mempool.submit(ip, hash32, raw).await {
                 Ok(()) => {
@@ -3021,7 +3032,9 @@ async fn main() -> anyhow::Result<()> {
 			});
         let (pk, sk) = eezo_wallet::node_keys::load_or_create_mldsa44(&keydir, true)
 		    .map_err(|e| anyhow::anyhow!("wallet key load failed: {e}"))?;
-        let single: SingleNode = SingleNode::new(cfg, sk, pk);
+        // Clone cfg before using it so we can create a second SingleNode in DAG mode
+        let cfg_for_dag = cfg.clone();
+        let single: SingleNode = SingleNode::new(cfg, sk.clone(), pk.clone());
 
         // Read consensus mode from env and log it
         let consensus_mode = env_consensus_mode();
@@ -3038,18 +3051,36 @@ async fn main() -> anyhow::Result<()> {
                 (Some(runner), None)
             }
             ConsensusMode::Dag => {
+                // T73.fix: In DAG mode, we need BOTH runners:
+                // - CoreRunnerHandle: for actual block production (drains mempool, executes blocks, commits to ledger)
+                // - DagRunnerHandle: for DAG vertex management and shadow block generation
+                //
+                // We create two separate SingleNode instances. The CoreRunnerHandle's node
+                // is the "real" ledger that accumulates state. The DagRunnerHandle's node
+                // is used for dry-run/preview purposes only.
+                
                 // T57.2: Read shadow sampling config from env
-				let dag_shadow_max_txs: usize = std::env::var("EEZO_DAG_SHADOW_MAX_TXS")
-				    .ok()
-					.and_then(|s| s.parse().ok())
-					.unwrap_or(128);
-				log::info!(
-				    "dag: spawning with shadow_max_txs={} (set EEZO_DAG_SHADOW_MAX_TXS to change)",
-					dag_shadow_max_txs
-				);
-                // The 'mempool' variable is now in scope
-                let dag = DagRunnerHandle::spawn(single, mempool.clone(), dag_shadow_max_txs);
-                (None, Some(dag)) 				
+                let dag_shadow_max_txs: usize = std::env::var("EEZO_DAG_SHADOW_MAX_TXS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(128);
+                log::info!(
+                    "dag: spawning with shadow_max_txs={} (set EEZO_DAG_SHADOW_MAX_TXS to change)",
+                    dag_shadow_max_txs
+                );
+                
+                // Create a second SingleNode for the DAG runner (used for dry-run/preview)
+                let dag_node = SingleNode::new(cfg_for_dag, sk.clone(), pk.clone());
+                
+                // Spawn the DAG runner first (for vertex management)
+                let dag = DagRunnerHandle::spawn(dag_node, mempool.clone(), dag_shadow_max_txs);
+                
+                // Spawn the core runner (for actual block production)
+                // It will use the DAG handle as a tx source via set_dag_runner() later
+                let runner = CoreRunnerHandle::spawn(single, Some(persistence.clone()), tick_ms, rollback_on_error);
+                
+                log::info!("dag: both CoreRunnerHandle and DagRunnerHandle spawned for DAG mode");
+                (Some(runner), Some(dag))
             }
         }
     };
@@ -3083,7 +3114,9 @@ async fn main() -> anyhow::Result<()> {
             });
         let (pk, sk) = eezo_wallet::node_keys::load_or_create_mldsa44(&keydir, true)
             .map_err(|e| anyhow::anyhow!("wallet key load failed: {e}"))?;
-        let single: SingleNode = SingleNode::new(cfg, sk, pk);
+        // Clone cfg before using it so we can create a second SingleNode in DAG mode
+        let cfg_for_dag = cfg.clone();
+        let single: SingleNode = SingleNode::new(cfg, sk.clone(), pk.clone());
 
         // Read consensus mode from env and log it (DAG wiring comes next)
         let consensus_mode = env_consensus_mode();
@@ -3097,21 +3130,38 @@ async fn main() -> anyhow::Result<()> {
                 let runner = CoreRunnerHandle::spawn(single, tick_ms, rollback_on_error);
                 (Some(runner), None)
             }
-        ConsensusMode::Dag => {
-            // T57.2: Read shadow sampling config from env
-            let dag_shadow_max_txs: usize = std::env::var("EEZO_DAG_SHADOW_MAX_TXS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(128);
-            
-            log::info!(
-                "dag: spawning with shadow_max_txs={} (set EEZO_DAG_SHADOW_MAX_TXS to change)",
-                dag_shadow_max_txs
-            );
-            
-            // The 'mempool' variable is now in scope
-            let dag = DagRunnerHandle::spawn(single, mempool.clone(), dag_shadow_max_txs);
-            (None, Some(dag))				
+            ConsensusMode::Dag => {
+                // T73.fix: In DAG mode, we need BOTH runners:
+                // - CoreRunnerHandle: for actual block production (drains mempool, executes blocks, commits to ledger)
+                // - DagRunnerHandle: for DAG vertex management and shadow block generation
+                //
+                // We create two separate SingleNode instances. The CoreRunnerHandle's node
+                // is the "real" ledger that accumulates state. The DagRunnerHandle's node
+                // is used for dry-run/preview purposes only.
+                
+                // T57.2: Read shadow sampling config from env
+                let dag_shadow_max_txs: usize = std::env::var("EEZO_DAG_SHADOW_MAX_TXS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(128);
+                
+                log::info!(
+                    "dag: spawning with shadow_max_txs={} (set EEZO_DAG_SHADOW_MAX_TXS to change)",
+                    dag_shadow_max_txs
+                );
+                
+                // Create a second SingleNode for the DAG runner (used for dry-run/preview)
+                let dag_node = SingleNode::new(cfg_for_dag, sk.clone(), pk.clone());
+                
+                // Spawn the DAG runner first (for vertex management)
+                let dag = DagRunnerHandle::spawn(dag_node, mempool.clone(), dag_shadow_max_txs);
+                
+                // Spawn the core runner (for actual block production)
+                // It will use the DAG handle as a tx source via set_dag_runner() later
+                let runner = CoreRunnerHandle::spawn(single, tick_ms, rollback_on_error);
+                
+                log::info!("dag: both CoreRunnerHandle and DagRunnerHandle spawned for DAG mode");
+                (Some(runner), Some(dag))
             }
         }
     };
