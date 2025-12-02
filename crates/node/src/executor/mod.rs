@@ -92,30 +92,11 @@ mod equivalence_tests {
     /// This mirrors what the consensus runner does after execute_block returns.
     fn apply_block_to_node(node: &mut SingleNode, block: &eezo_ledger::Block) {
         for tx in &block.txs {
-            let sender = sender_from_pubkey_first20(tx).unwrap();
-            apply_tx(&mut node.accounts, &mut node.supply, sender, &tx.core).unwrap();
+            let sender = sender_from_pubkey_first20(tx)
+                .expect("Failed to derive sender from pubkey");
+            apply_tx(&mut node.accounts, &mut node.supply, sender, &tx.core)
+                .expect("Failed to apply tx to node state");
         }
-    }
-
-    /// Helper: Compare two account states for equality.
-    #[allow(dead_code)]
-    fn accounts_equal(a: &Accounts, b: &Accounts, addresses: &[Address]) -> bool {
-        for addr in addresses {
-            let acct_a = a.get(addr);
-            let acct_b = b.get(addr);
-            if acct_a.balance != acct_b.balance || acct_a.nonce != acct_b.nonce {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Helper: Compare two supply states for equality.
-    #[allow(dead_code)]
-    fn supply_equal(a: &Supply, b: &Supply) -> bool {
-        a.native_mint_total == b.native_mint_total
-            && a.bridge_mint_total == b.bridge_mint_total
-            && a.burn_total == b.burn_total
     }
 
     // ========================================================================
