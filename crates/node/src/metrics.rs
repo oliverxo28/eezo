@@ -1964,6 +1964,17 @@ pub static EEZO_DAG_SHADOW_LAG_BLOCKS: Lazy<IntGauge> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Counter: Total number of hash mismatches detected between canonical and shadow DAG.
+/// Incremented when tx count differs or tx hashes differ at a height where both have data.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_SHADOW_HASH_MISMATCH_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_shadow_hash_mismatch_total",
+        "Total hash mismatches between canonical and shadow DAG (tx count or tx hashes differ)"
+    )
+    .unwrap()
+});
+
 /// Helper: Set the shadow DAG in_sync gauge.
 #[inline]
 pub fn dag_shadow_sync_set(in_sync: bool) {
@@ -1990,11 +2001,21 @@ pub fn dag_shadow_lag_set(lag: u64) {
     }
 }
 
-/// Eagerly register T75.1 shadow DAG metrics so they appear on /metrics at boot.
+/// Helper: Increment the shadow DAG hash mismatch counter.
+#[inline]
+pub fn dag_shadow_hash_mismatch_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_SHADOW_HASH_MISMATCH_TOTAL.inc();
+    }
+}
+
+/// Eagerly register T75.1/T75.2 shadow DAG metrics so they appear on /metrics at boot.
 #[cfg(feature = "metrics")]
 pub fn register_dag_shadow_metrics() {
     let _ = &*EEZO_DAG_SHADOW_IN_SYNC;
     let _ = &*EEZO_DAG_SHADOW_LAG_BLOCKS;
+    let _ = &*EEZO_DAG_SHADOW_HASH_MISMATCH_TOTAL;
 }
 
 /// No-op version when metrics feature is disabled.
