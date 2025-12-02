@@ -1,4 +1,4 @@
-//! dag_consensus_runner.rs — T75.0: Shadow DAG consensus runner
+//! dag_consensus_runner.rs — T75.0/T75.1: Shadow DAG consensus runner
 //!
 //! Runs the new consensus-dag::DagConsensusHandle inside the node in a
 //! completely safe shadow mode:
@@ -7,12 +7,16 @@
 //! - consensus-dag receives the same block/tx flow and orders "shadow" batches.
 //! - We observe DAG behaviour via metrics and logs, but it never changes what gets committed.
 //!
+//! T75.1: Adds comparison tracking between canonical blocks and shadow DAG batches.
+//!
 //! This module is only compiled when the `dag-consensus` feature is enabled.
 
 #![cfg(feature = "dag-consensus")]
 
+use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
+use serde::Serialize;
 
 use consensus_dag::{DagConsensusConfig, DagConsensusHandle, DagPayload, register_dag_metrics};
 use consensus_dag::types::AuthorId;
@@ -64,6 +68,168 @@ impl ShadowBlockSummary {
 }
 
 // ---------------------------------------------------------------------------
+// T75.1: DagConsensusStatus and tracking window
+// ---------------------------------------------------------------------------
+
+/// Maximum number of heights to track in the sliding window.
+const STATUS_WINDOW_SIZE: usize = 256;
+
+/// Status of the shadow DAG consensus compared to canonical consensus.
+#[derive(Clone, Debug, Serialize)]
+pub struct DagConsensusStatus {
+    /// True if for all ordered heights, DAG and canonical have same tx count
+    pub in_sync: bool,
+    /// Number of heights canonical is ahead of DAG
+    pub lagging_by: u64,
+    /// Last canonical block height processed
+    pub last_height: u64,
+    /// Last DAG round observed
+    pub last_round: u64,
+    /// Current mode (shadow or off)
+    pub mode: String,
+}
+
+impl Default for DagConsensusStatus {
+    fn default() -> Self {
+        Self {
+            in_sync: true,
+            lagging_by: 0,
+            last_height: 0,
+            last_round: 0,
+            mode: "shadow".to_string(),
+        }
+    }
+}
+
+/// Entry in the tracking window for comparing canonical vs DAG
+#[derive(Clone, Debug)]
+struct TrackingEntry {
+    /// Block height
+    height: u64,
+    /// Block hash (canonical)
+    block_hash: [u8; 32],
+    /// Tx count from canonical block
+    canonical_tx_count: usize,
+    /// Tx hashes from canonical block (in order)
+    canonical_tx_hashes: Vec<[u8; 32]>,
+    /// Whether DAG has ordered this height
+    dag_ordered: bool,
+    /// DAG round when ordered (if ordered)
+    dag_round: Option<u64>,
+    /// Tx count from DAG batch (if ordered)
+    dag_tx_count: Option<usize>,
+    /// Whether DAG and canonical match
+    matches: bool,
+}
+
+/// Shared status tracker for shadow DAG consensus.
+/// Uses a sliding window to compare canonical blocks with DAG ordered batches.
+pub struct DagConsensusTracker {
+    /// Sliding window of tracking entries (most recent at back)
+    window: VecDeque<TrackingEntry>,
+    /// Last canonical height seen
+    last_canonical_height: u64,
+    /// Last DAG round observed
+    last_dag_round: u64,
+}
+
+impl DagConsensusTracker {
+    pub fn new() -> Self {
+        Self {
+            window: VecDeque::with_capacity(STATUS_WINDOW_SIZE),
+            last_canonical_height: 0,
+            last_dag_round: 0,
+        }
+    }
+
+    /// Record a canonical block from the main consensus path.
+    pub fn record_canonical_block(&mut self, summary: &ShadowBlockSummary) {
+        // Update last canonical height
+        self.last_canonical_height = summary.height;
+
+        // Check if we already have an entry for this height
+        if let Some(entry) = self.window.iter_mut().find(|e| e.height == summary.height) {
+            // Update existing entry
+            entry.block_hash = summary.block_hash;
+            entry.canonical_tx_count = summary.tx_hashes.len();
+            entry.canonical_tx_hashes = summary.tx_hashes.clone();
+            // Recompute match if DAG has already ordered
+            if entry.dag_ordered {
+                entry.matches = entry.dag_tx_count == Some(entry.canonical_tx_count);
+            }
+        } else {
+            // Add new entry
+            let entry = TrackingEntry {
+                height: summary.height,
+                block_hash: summary.block_hash,
+                canonical_tx_count: summary.tx_hashes.len(),
+                canonical_tx_hashes: summary.tx_hashes.clone(),
+                dag_ordered: false,
+                dag_round: None,
+                dag_tx_count: None,
+                matches: false, // Not matched until DAG orders it
+            };
+            self.window.push_back(entry);
+
+            // Trim window if too large
+            while self.window.len() > STATUS_WINDOW_SIZE {
+                self.window.pop_front();
+            }
+        }
+    }
+
+    /// Record that the DAG has ordered a batch.
+    /// 
+    /// In shadow mode, the DAG receives one block at a time and advances one round per block.
+    /// Therefore, DAG rounds correspond directly to block heights in this simplified mode.
+    /// For full DAG consensus, the mapping would need to be more sophisticated.
+    pub fn record_dag_ordered(&mut self, round: u64, tx_count: usize) {
+        self.last_dag_round = round;
+
+        // Find the entry for the corresponding height (using round as proxy for height)
+        // Note: In shadow mode, we advance one round per block, so round == height.
+        // This assumption is valid because we call handle.advance_round() after each block.
+        if let Some(entry) = self.window.iter_mut().find(|e| e.height == round) {
+            entry.dag_ordered = true;
+            entry.dag_round = Some(round);
+            entry.dag_tx_count = Some(tx_count);
+            // Check if tx counts match (sufficient for T75.1 requirements)
+            entry.matches = entry.canonical_tx_count == tx_count;
+        }
+    }
+
+    /// Compute the current status.
+    pub fn current_status(&self) -> DagConsensusStatus {
+        // Check if all ordered entries match (unordered entries are ignored as they
+        // represent lag, which is tracked separately via lagging_by)
+        let in_sync = self.window.iter()
+            .filter(|e| e.dag_ordered)
+            .all(|e| e.matches);
+
+        // Compute lag: how many heights canonical is ahead of DAG
+        let lagging_by = if self.last_canonical_height > self.last_dag_round {
+            self.last_canonical_height - self.last_dag_round
+        } else {
+            0
+        };
+
+        DagConsensusStatus {
+            in_sync,
+            lagging_by,
+            last_height: self.last_canonical_height,
+            last_round: self.last_dag_round,
+            mode: "shadow".to_string(),
+        }
+    }
+}
+
+impl Default for DagConsensusTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DagConsensusShadowRunner
 // ---------------------------------------------------------------------------
 
@@ -75,6 +241,7 @@ impl ShadowBlockSummary {
 /// - Receives ShadowBlockSummary messages via an mpsc channel
 /// - Converts each summary into a DagPayload and submits to the handle
 /// - Polls for ordered batches and logs/emits metrics
+/// - Tracks sync status between canonical and DAG (T75.1)
 ///
 /// The shadow DAG must never:
 /// - Reject a block
@@ -89,14 +256,17 @@ pub struct DagConsensusShadowRunner {
     receiver: mpsc::Receiver<ShadowBlockSummary>,
     /// Static author ID for this node's shadow payloads
     author: AuthorId,
+    /// Shared tracker for status (T75.1)
+    tracker: Arc<RwLock<DagConsensusTracker>>,
 }
 
 impl DagConsensusShadowRunner {
     /// Create a new shadow DAG runner with the given configuration.
     ///
-    /// Returns a tuple of (runner, sender). The sender should be passed to the
+    /// Returns a tuple of (runner, sender, tracker). The sender should be passed to the
     /// main consensus runner so it can send committed block summaries.
-    pub fn new(config: DagConsensusConfig) -> (Self, mpsc::Sender<ShadowBlockSummary>) {
+    /// The tracker is shared and can be used to query status from HTTP endpoints.
+    pub fn new(config: DagConsensusConfig) -> (Self, mpsc::Sender<ShadowBlockSummary>, Arc<RwLock<DagConsensusTracker>>) {
         // Use a reasonable buffer size for the channel
         // This should be large enough to not block the main consensus path
         let (sender, receiver) = mpsc::channel(256);
@@ -106,14 +276,16 @@ impl DagConsensusShadowRunner {
         let author = AuthorId([0u8; 32]);
 
         let handle = DagConsensusHandle::new(config);
+        let tracker = Arc::new(RwLock::new(DagConsensusTracker::new()));
 
         let runner = Self {
             handle,
             receiver,
             author,
+            tracker: Arc::clone(&tracker),
         };
 
-        (runner, sender)
+        (runner, sender, tracker)
     }
 
     /// Run the shadow DAG runner event loop.
@@ -136,6 +308,12 @@ impl DagConsensusShadowRunner {
                     break;
                 }
             };
+
+            // T75.1: Record the canonical block in the tracker
+            {
+                let mut tracker = self.tracker.write().await;
+                tracker.record_canonical_block(&summary);
+            }
 
             // Convert the block summary into a DAG payload
             let payload = self.summary_to_payload(&summary);
@@ -161,16 +339,39 @@ impl DagConsensusShadowRunner {
 
             // Poll for ordered batches and log them
             while let Some(batch) = self.handle.try_next_ordered_batch() {
+                let tx_count = batch.bundles.iter().map(|b| b.tx_count).sum::<usize>();
+                
                 log::debug!(
-                    "dag-consensus: shadow batch ordered (round={}, blocks={}, total_vertices={})",
+                    "dag-consensus: shadow batch ordered (round={}, blocks={}, total_vertices={}, tx_count={})",
                     batch.round,
                     batch.bundles.len(),
-                    batch.vertex_count()
+                    batch.vertex_count(),
+                    tx_count
                 );
+
+                // T75.1: Record DAG ordered batch in tracker
+                {
+                    let mut tracker = self.tracker.write().await;
+                    tracker.record_dag_ordered(batch.round, tx_count);
+                }
             }
 
             // Advance round after each block (since we receive one block at a time)
             self.handle.advance_round();
+
+            // T75.1: Update metrics after processing each block
+            {
+                let tracker = self.tracker.read().await;
+                let status = tracker.current_status();
+                
+                #[cfg(feature = "metrics")]
+                {
+                    crate::metrics::dag_shadow_sync_set(status.in_sync);
+                    crate::metrics::dag_shadow_lag_set(status.lagging_by);
+                }
+                
+                let _ = status; // silence unused warning when metrics disabled
+            }
 
             // Optionally commit rounds for GC (every N rounds to avoid overhead)
             // Use the default gc_depth from DagConsensusConfig for consistency
@@ -254,17 +455,25 @@ impl Default for DagConsensusMode {
 // Helper: spawn shadow DAG runner
 // ---------------------------------------------------------------------------
 
+/// Result of spawning the shadow DAG runner.
+pub struct ShadowDagHandle {
+    /// Sender for block summaries
+    pub sender: mpsc::Sender<ShadowBlockSummary>,
+    /// Shared tracker for status queries
+    pub tracker: Arc<RwLock<DagConsensusTracker>>,
+}
+
 /// Spawn the shadow DAG consensus runner if enabled.
 ///
-/// Returns an optional sender that the main consensus runner can use to send
-/// committed block summaries. Returns None if shadow DAG is not enabled.
+/// Returns an optional handle containing the sender and tracker.
+/// Returns None if shadow DAG is not enabled.
 ///
 /// This function:
 /// 1. Checks if EEZO_DAG_CONSENSUS_MODE=shadow
-/// 2. Registers DAG metrics
-/// 3. Creates the runner and sender
+/// 2. Registers DAG metrics (including T75.1 shadow sync metrics)
+/// 3. Creates the runner, sender, and tracker
 /// 4. Spawns the runner on the tokio runtime
-pub fn spawn_shadow_dag_if_enabled() -> Option<mpsc::Sender<ShadowBlockSummary>> {
+pub fn spawn_shadow_dag_if_enabled() -> Option<ShadowDagHandle> {
     let mode = DagConsensusMode::from_env();
 
     match mode {
@@ -273,18 +482,20 @@ pub fn spawn_shadow_dag_if_enabled() -> Option<mpsc::Sender<ShadowBlockSummary>>
             None
         }
         DagConsensusMode::Shadow => {
-            // Register DAG metrics
+            // Register DAG metrics (including T75.1 shadow sync metrics)
             register_dag_metrics();
+            #[cfg(feature = "metrics")]
+            crate::metrics::register_dag_shadow_metrics();
 
             // Create runner with default config
             let config = DagConsensusConfig::default();
-            let (runner, sender) = DagConsensusShadowRunner::new(config);
+            let (runner, sender, tracker) = DagConsensusShadowRunner::new(config);
 
             // Spawn the runner
             tokio::spawn(runner.run());
 
             log::info!("dag-consensus: shadow runner spawned");
-            Some(sender)
+            Some(ShadowDagHandle { sender, tracker })
         }
     }
 }
@@ -347,9 +558,9 @@ mod tests {
     }
 
     #[test]
-    fn test_runner_creates_with_sender() {
+    fn test_runner_creates_with_sender_and_tracker() {
         let config = DagConsensusConfig::default();
-        let (_runner, sender) = DagConsensusShadowRunner::new(config);
+        let (_runner, sender, _tracker) = DagConsensusShadowRunner::new(config);
 
         // Sender should be usable
         assert!(!sender.is_closed());
@@ -358,7 +569,7 @@ mod tests {
     #[test]
     fn test_summary_to_payload_format() {
         let config = DagConsensusConfig::default();
-        let (runner, _sender) = DagConsensusShadowRunner::new(config);
+        let (runner, _sender, _tracker) = DagConsensusShadowRunner::new(config);
 
         let summary = ShadowBlockSummary::new(
             42,
@@ -383,5 +594,77 @@ mod tests {
 
         // Check second tx hash
         assert_eq!(&payload.data[72..104], &[0xEF; 32]);
+    }
+
+    #[test]
+    fn test_tracker_initial_status() {
+        let tracker = DagConsensusTracker::new();
+        let status = tracker.current_status();
+
+        assert!(status.in_sync);
+        assert_eq!(status.lagging_by, 0);
+        assert_eq!(status.last_height, 0);
+        assert_eq!(status.last_round, 0);
+        assert_eq!(status.mode, "shadow");
+    }
+
+    #[test]
+    fn test_tracker_record_canonical_block() {
+        let mut tracker = DagConsensusTracker::new();
+        
+        let summary = ShadowBlockSummary::new(10, [1u8; 32], vec![[2u8; 32], [3u8; 32]]);
+        tracker.record_canonical_block(&summary);
+
+        let status = tracker.current_status();
+        assert_eq!(status.last_height, 10);
+        // DAG hasn't ordered yet, so lagging_by = 10 - 0 = 10
+        assert_eq!(status.lagging_by, 10);
+    }
+
+    #[test]
+    fn test_tracker_in_sync_after_dag_orders() {
+        let mut tracker = DagConsensusTracker::new();
+        
+        // Record canonical block with 2 txs at height 5
+        let summary = ShadowBlockSummary::new(5, [1u8; 32], vec![[2u8; 32], [3u8; 32]]);
+        tracker.record_canonical_block(&summary);
+
+        // DAG orders the same height with matching tx count
+        tracker.record_dag_ordered(5, 2);
+
+        let status = tracker.current_status();
+        assert!(status.in_sync);
+        assert_eq!(status.lagging_by, 0);
+        assert_eq!(status.last_height, 5);
+        assert_eq!(status.last_round, 5);
+    }
+
+    #[test]
+    fn test_tracker_out_of_sync_on_mismatch() {
+        let mut tracker = DagConsensusTracker::new();
+        
+        // Record canonical block with 2 txs at height 5
+        let summary = ShadowBlockSummary::new(5, [1u8; 32], vec![[2u8; 32], [3u8; 32]]);
+        tracker.record_canonical_block(&summary);
+
+        // DAG orders with different tx count
+        tracker.record_dag_ordered(5, 3); // 3 txs instead of 2
+
+        let status = tracker.current_status();
+        assert!(!status.in_sync); // Should be out of sync
+    }
+
+    #[test]
+    fn test_tracker_window_bounded() {
+        let mut tracker = DagConsensusTracker::new();
+        
+        // Add more than STATUS_WINDOW_SIZE entries
+        for i in 0..(STATUS_WINDOW_SIZE + 50) {
+            let summary = ShadowBlockSummary::new(i as u64, [i as u8; 32], vec![]);
+            tracker.record_canonical_block(&summary);
+        }
+
+        // Window should be bounded to STATUS_WINDOW_SIZE
+        assert!(tracker.window.len() <= STATUS_WINDOW_SIZE);
     }
 }
