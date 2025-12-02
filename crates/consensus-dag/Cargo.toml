@@ -44,4 +44,3 @@ prometheus = ["dep:prometheus"]
 # Forward ledger features for BlockHeader compatibility
 checkpoints = ["eezo-ledger/checkpoints"]
 eth-ssz = ["eezo-ledger/eth-ssz"]
-ledger-types = []

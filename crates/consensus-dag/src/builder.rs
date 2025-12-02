@@ -21,16 +21,7 @@ pub trait MempoolPeek {
     fn peek_by_bytes(&self, target_bytes: usize) -> Vec<SignedTx>;
 }
 
-/// Placeholder SignedTx type for when eezo-ledger is not available
-#[cfg(not(feature = "ledger-types"))]
-use serde::{Deserialize, Serialize};
-#[cfg(not(feature = "ledger-types"))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SignedTx {
-    pub data: Vec<u8>,
-}
-
-#[cfg(feature = "ledger-types")]
+// Use SignedTx from eezo-ledger
 pub use eezo_ledger::SignedTx;
 
 /// PayloadBuilder: Constructs transaction batches for DAG vertices.
@@ -205,6 +196,8 @@ mod tests {
     /// A16 Test: MempoolPeek trait with mock implementation
     #[test]
     fn test_mempool_peek_integration() {
+        use eezo_ledger::{Address, tx_types::TxCore};
+        
         // Mock mempool for testing
         struct MockMempool {
             txs: Vec<SignedTx>,
@@ -218,8 +211,26 @@ mod tests {
         
         let mock_mempool = MockMempool {
             txs: vec![
-                SignedTx { data: vec![1, 2, 3] },
-                SignedTx { data: vec![4, 5, 6] },
+                SignedTx {
+                    core: TxCore {
+                        to: Address([0u8; 20]),
+                        amount: 100,
+                        fee: 1,
+                        nonce: 0,
+                    },
+                    pubkey: vec![0u8; 32],
+                    sig: vec![0u8; 64],
+                },
+                SignedTx {
+                    core: TxCore {
+                        to: Address([1u8; 20]),
+                        amount: 200,
+                        fee: 2,
+                        nonce: 1,
+                    },
+                    pubkey: vec![0u8; 32],
+                    sig: vec![0u8; 64],
+                },
             ],
         };
         

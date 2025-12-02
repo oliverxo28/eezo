@@ -44,7 +44,7 @@ pub struct DagExecutorShim {
     
     /// Current height (incremented per block)
     current_height: u64,
-	
+    
     /// Optional execution hook supplied by the node.
     /// Signature: (height, &txs) -> Result<(), String>
     /// Node will point this to its STM facade (apply_block_stm).
@@ -65,16 +65,18 @@ impl DagExecutorShim {
             da_worker,
             payload_timeout_secs,
             current_height: 0,
-			exec_hook: None,
+            exec_hook: None,
         }
     }
+    
     /// Provide the node-side execution hook (e.g., STM apply).
     pub fn set_exec_hook(
         &mut self,
         hook: std::sync::Arc<dyn Fn(u64, &[SignedTx]) -> Result<(), String> + Send + Sync>,
     ) {
         self.exec_hook = Some(hook);
-    }	
+    }
+    
     
     /// Process an OrderedBundle: wait for payloads, execute, finalize.
     /// 
