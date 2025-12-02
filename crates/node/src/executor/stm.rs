@@ -3,6 +3,8 @@
 //! T73.2: This module provides the `StmExecutor` struct that implements the
 //! `Executor` trait for Block-STM parallel execution.
 //!
+//! T73.6: Multi-wave parallelism using rayon's par_iter() for speculative execution.
+//!
 //! ## Conflict Model
 //!
 //! A conflict occurs when:
@@ -19,7 +21,7 @@
 //! ## Wave Scheduling
 //!
 //! 1. All transactions start in wave 0
-//! 2. Execute speculatively, recording read/write sets
+//! 2. Execute speculatively in parallel, recording read/write sets
 //! 3. Detect conflicts between concurrent transactions
 //! 4. Conflicting transactions (higher index) are scheduled for retry
 //! 5. Continue until all transactions are committed or max retries reached
@@ -27,10 +29,12 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use rayon::prelude::*;
+
 use eezo_ledger::consensus::SingleNode;
-use eezo_ledger::{Address, Accounts, Supply, SignedTx, Block};
+use eezo_ledger::{Address, Account, Accounts, Supply, SignedTx, Block};
 use eezo_ledger::block::{BlockHeader, txs_root};
-use eezo_ledger::tx::{apply_tx, validate_tx_stateful};
+use eezo_ledger::tx::{apply_tx, validate_tx_stateful, TxStateError};
 use eezo_ledger::sender_from_pubkey_first20;
 
 use crate::executor::{ExecInput, ExecOutcome, Executor};
@@ -61,6 +65,22 @@ pub enum TxStatus {
     Aborted,
 }
 
+/// Speculative execution result for a single transaction.
+/// Holds the state changes that would be applied if this tx commits.
+#[derive(Clone, Debug)]
+struct SpeculativeResult {
+    /// Sender address
+    sender: Address,
+    /// Receiver address  
+    receiver: Address,
+    /// New sender account state after tx
+    sender_account: Account,
+    /// New receiver account state after tx
+    receiver_account: Account,
+    /// Fee burned
+    fee: u128,
+}
+
 /// Per-transaction execution context.
 #[derive(Clone, Debug)]
 struct TxContext {
@@ -74,6 +94,8 @@ struct TxContext {
     write_set: HashSet<StateKey>,
     /// Current status
     status: TxStatus,
+    /// Speculative result (only set if status == Committed)
+    spec_result: Option<SpeculativeResult>,
 }
 
 impl TxContext {
@@ -84,12 +106,14 @@ impl TxContext {
             read_set: HashSet::new(),
             write_set: HashSet::new(),
             status: TxStatus::NeedsRetry,
+            spec_result: None,
         }
     }
 
     fn reset_for_retry(&mut self) {
         self.read_set.clear();
         self.write_set.clear();
+        self.spec_result = None;
         self.attempt += 1;
     }
 }
@@ -192,10 +216,93 @@ impl StmExecutor {
         &self.config
     }
 
-    /// Execute a single transaction speculatively.
+    /// Execute a single transaction speculatively against a snapshot.
+    ///
+    /// This method is used for parallel execution: it reads from the provided
+    /// snapshot, computes the state changes, and returns the result without
+    /// mutating the base state. The caller is responsible for applying the
+    /// result in order.
+    ///
+    /// Returns TxContext with status and speculative result (if committed).
+    fn execute_tx_speculative_parallel(
+        tx: &SignedTx,
+        tx_idx: usize,
+        attempt: u16,
+        accounts: &Accounts,
+        supply: &Supply,
+    ) -> TxContext {
+        let mut ctx = TxContext::new(tx_idx);
+        ctx.attempt = attempt;
+
+        // Derive sender from pubkey
+        let sender = match sender_from_pubkey_first20(tx) {
+            Some(s) => s,
+            None => {
+                ctx.status = TxStatus::Failed("Invalid sender (cannot derive from pubkey)".to_string());
+                return ctx;
+            }
+        };
+
+        // Record read set: sender account (for balance/nonce check)
+        ctx.read_set.insert(StateKey::Account(sender));
+        // Receiver is also read (to get current balance for credit)
+        ctx.read_set.insert(StateKey::Account(tx.core.to));
+
+        // Validate the transaction statefully against the snapshot
+        // BadNonce and InsufficientFunds are temporary failures that should be retried
+        // (they may succeed after earlier txs commit and update the state)
+        if let Err(e) = validate_tx_stateful(accounts, sender, &tx.core) {
+            match e {
+                TxStateError::BadNonce { .. } | TxStateError::InsufficientFunds { .. } => {
+                    // Temporary failure - can be retried in a later wave
+                    // Mark as NeedsRetry so the tx is scheduled for retry
+                    ctx.status = TxStatus::NeedsRetry;
+                }
+                TxStateError::InvalidSender => {
+                    // Permanent failure - cannot be recovered
+                    ctx.status = TxStatus::Failed(format!("{:?}", e));
+                }
+            }
+            return ctx;
+        }
+
+        // Compute the state changes speculatively (without mutating accounts/supply)
+        let sender_acc = accounts.get(&sender);
+        let receiver_acc = accounts.get(&tx.core.to);
+        
+        let need = tx.core.amount.saturating_add(tx.core.fee);
+        
+        // Compute new sender state
+        let mut new_sender = sender_acc.clone();
+        new_sender.balance = new_sender.balance.saturating_sub(need);
+        new_sender.nonce = new_sender.nonce.saturating_add(1);
+        
+        // Compute new receiver state
+        let mut new_receiver = receiver_acc.clone();
+        new_receiver.balance = new_receiver.balance.saturating_add(tx.core.amount);
+        
+        // Record write set: sender, receiver, and supply (for fee burn)
+        ctx.write_set.insert(StateKey::Account(sender));
+        ctx.write_set.insert(StateKey::Account(tx.core.to));
+        ctx.write_set.insert(StateKey::Supply);
+        
+        // Store the speculative result
+        ctx.spec_result = Some(SpeculativeResult {
+            sender,
+            receiver: tx.core.to,
+            sender_account: new_sender,
+            receiver_account: new_receiver,
+            fee: tx.core.fee,
+        });
+
+        ctx.status = TxStatus::Committed;
+        ctx
+    }
+
+    /// Execute a single transaction speculatively (mutable version).
     ///
     /// Records the read/write sets and applies state changes to the shadow state.
-    /// Returns the updated context with status.
+    /// This is the legacy method used for sequential fallback.
     fn execute_tx_speculative(
         tx: &SignedTx,
         ctx: &mut TxContext,
@@ -242,26 +349,33 @@ impl StmExecutor {
     /// - tx_j reads a key that tx_i (i < j) writes, OR
     /// - tx_j writes a key that tx_i (i < j) writes
     ///
+    /// Only considers transactions in the current wave (pending_indices).
     /// Returns indices of transactions that need retry.
-    fn detect_conflicts(contexts: &[TxContext]) -> Vec<usize> {
+    fn detect_conflicts_in_wave(contexts: &[TxContext], pending_indices: &[usize]) -> Vec<usize> {
         let mut conflicts = Vec::new();
+        let pending_set: HashSet<usize> = pending_indices.iter().cloned().collect();
         
-        // Track committed writes by tx index
+        // Track committed writes by tx index (only for this wave)
         let mut committed_writes: HashMap<StateKey, usize> = HashMap::new();
 
-        for ctx in contexts.iter() {
+        // Process in index order for determinism
+        let mut sorted_pending: Vec<usize> = pending_indices.to_vec();
+        sorted_pending.sort();
+
+        for &tx_idx in &sorted_pending {
+            let ctx = &contexts[tx_idx];
+            
             if ctx.status != TxStatus::Committed {
                 continue;
             }
 
-            let tx_idx = ctx.tx_idx;
             let mut has_conflict = false;
 
             // Check read-after-write conflicts: did we read something written by an earlier tx?
             for key in &ctx.read_set {
                 if let Some(&writer_idx) = committed_writes.get(key) {
-                    if writer_idx < tx_idx {
-                        // Conflict: we read a key that was written by an earlier tx
+                    if writer_idx < tx_idx && pending_set.contains(&writer_idx) {
+                        // Conflict: we read a key that was written by an earlier tx in this wave
                         has_conflict = true;
                         break;
                     }
@@ -272,8 +386,8 @@ impl StmExecutor {
             if !has_conflict {
                 for key in &ctx.write_set {
                     if let Some(&writer_idx) = committed_writes.get(key) {
-                        if writer_idx < tx_idx {
-                            // Conflict: we wrote a key that was written by an earlier tx
+                        if writer_idx < tx_idx && pending_set.contains(&writer_idx) {
+                            // Conflict: we wrote a key that was written by an earlier tx in this wave
                             has_conflict = true;
                             break;
                         }
@@ -294,20 +408,25 @@ impl StmExecutor {
         conflicts
     }
 
-    /// Execute all transactions using wave-based STM.
+    /// Legacy conflict detection for unit tests.
+    /// Detects conflicts across all contexts (not wave-scoped).
+    fn detect_conflicts(contexts: &[TxContext]) -> Vec<usize> {
+        let all_indices: Vec<usize> = contexts.iter().map(|c| c.tx_idx).collect();
+        Self::detect_conflicts_in_wave(contexts, &all_indices)
+    }
+
+    /// Execute all transactions using wave-based STM with parallel execution.
     ///
-    /// This implementation executes transactions in order to ensure
-    /// semantic equivalence with sequential execution. The conflict detection
-    /// logic is included for future parallel execution enhancements.
+    /// T73.6: This implementation uses rayon's par_iter() for true parallel
+    /// execution within each wave, while maintaining determinism.
     ///
-    /// ## Current Behavior (T73.2)
-    /// - Sequential execution in transaction index order
-    /// - Guaranteed to produce same results as SingleExecutor
-    /// - Conflict detection is demonstrated in unit tests
-    ///
-    /// ## Future Enhancement (T73.3+)
-    /// - True parallel execution with MVHashMap
-    /// - Multiple waves with conflict-driven retries
+    /// ## Algorithm
+    /// 1. Clone state snapshot for speculative execution
+    /// 2. Execute pending txs in parallel against the snapshot
+    /// 3. Collect results and detect conflicts deterministically
+    /// 4. Apply non-conflicting results in tx index order
+    /// 5. Mark conflicting txs for retry in next wave
+    /// 6. Repeat until all txs are committed/failed or max retries reached
     ///
     /// Returns (contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block)
     fn execute_stm(
@@ -330,56 +449,138 @@ impl StmExecutor {
         let mut conflicts_this_block: u64 = 0;
         let mut retries_this_block: u64 = 0;
 
+        // Track which txs have been finally committed (won't be retried)
+        let mut finally_committed: HashSet<usize> = HashSet::new();
+
         // Wave-based execution loop
-        let mut wave = 0;
         loop {
-            wave += 1;
             waves_this_block += 1;
-            log::debug!("STM: starting wave {}", wave);
+            log::debug!("STM: starting wave {}", waves_this_block);
 
             // Find transactions that need execution in this wave
-            let pending: Vec<usize> = contexts
+            let pending: Vec<(usize, u16)> = contexts
                 .iter()
                 .filter(|c| c.status == TxStatus::NeedsRetry)
-                .map(|c| c.tx_idx)
+                .map(|c| (c.tx_idx, c.attempt))
                 .collect();
 
             if pending.is_empty() {
                 break;
             }
 
-            // Execute transactions in index order for correctness
-            // This ensures the same state transitions as sequential execution
-            for &tx_idx in &pending {
-                let ctx = &mut contexts[tx_idx];
-                
-                if ctx.attempt >= self.config.max_retries as u16 {
-                    ctx.status = TxStatus::Aborted;
-                    log::warn!("STM: tx {} aborted after {} retries", tx_idx, ctx.attempt);
-                    continue;
+            // Check for max retries before execution
+            let mut aborted_count = 0;
+            for &(tx_idx, attempt) in &pending {
+                if attempt >= self.config.max_retries as u16 {
+                    contexts[tx_idx].status = TxStatus::Aborted;
+                    log::warn!("STM: tx {} aborted after {} retries", tx_idx, attempt);
+                    aborted_count += 1;
                 }
+            }
+            
+            // Filter out aborted txs
+            let pending: Vec<(usize, u16)> = pending
+                .into_iter()
+                .filter(|&(tx_idx, _)| contexts[tx_idx].status == TxStatus::NeedsRetry)
+                .collect();
+            
+            if pending.is_empty() {
+                break;
+            }
 
-                // Track retries (attempt > 0 means this is a retry)
-                if ctx.attempt > 0 {
+            // Count retries (attempt > 0 means this is a retry)
+            for &(_, attempt) in &pending {
+                if attempt > 0 {
                     retries_this_block += 1;
-                }
-
-                ctx.reset_for_retry();
-                Self::execute_tx_speculative(&txs[tx_idx], ctx, accounts, supply);
-
-                // If committed, record the tx
-                if ctx.status == TxStatus::Committed {
-                    committed_txs.push(txs[tx_idx].clone());
                 }
             }
 
-            // For T73.2: Sequential execution mode has no conflicts.
-            // detect_conflicts() is tested in unit tests and will be used
-            // in T73.3+ when we implement true parallel execution.
-            // When parallel execution is enabled, conflicts will be detected here
-            // and conflicting transactions will be marked for retry.
-            break;
+            // T73.6: Execute transactions in parallel using rayon
+            // Each tx reads from the current snapshot and computes speculative results
+            let snapshot_accounts = accounts.clone();
+            let snapshot_supply = supply.clone();
+            
+            let wave_results: Vec<TxContext> = pending
+                .par_iter()
+                .map(|&(tx_idx, attempt)| {
+                    Self::execute_tx_speculative_parallel(
+                        &txs[tx_idx],
+                        tx_idx,
+                        attempt,
+                        &snapshot_accounts,
+                        &snapshot_supply,
+                    )
+                })
+                .collect();
+
+            // Create a map from tx_idx to result for quick lookup
+            let mut result_map: HashMap<usize, TxContext> = HashMap::new();
+            for result in wave_results {
+                result_map.insert(result.tx_idx, result);
+            }
+
+            // Update contexts with parallel results
+            for (&tx_idx, result) in &result_map {
+                contexts[tx_idx] = result.clone();
+            }
+
+            // Detect conflicts deterministically (lower index wins)
+            // Build a sorted list of tx indices for deterministic processing
+            let mut pending_indices: Vec<usize> = pending.iter().map(|&(idx, _)| idx).collect();
+            pending_indices.sort();
+
+            // Use wave-scoped conflict detection to only consider txs in this wave
+            let conflicts = Self::detect_conflicts_in_wave(&contexts, &pending_indices);
+            let conflict_set: HashSet<usize> = conflicts.into_iter().collect();
+            conflicts_this_block += conflict_set.len() as u64;
+
+            // Process results in tx index order
+            for tx_idx in pending_indices {
+                let ctx = &mut contexts[tx_idx];
+                
+                if ctx.status != TxStatus::Committed {
+                    // Failed txs stay failed
+                    continue;
+                }
+
+                if conflict_set.contains(&tx_idx) {
+                    // This tx has a conflict with an earlier tx
+                    // Mark for retry and increment attempt counter
+                    ctx.status = TxStatus::NeedsRetry;
+                    ctx.attempt += 1;
+                    ctx.spec_result = None;
+                    log::debug!("STM: tx {} conflicts, scheduling retry (attempt {})", tx_idx, ctx.attempt);
+                } else {
+                    // No conflict - apply the speculative result to actual state
+                    if let Some(ref spec) = ctx.spec_result {
+                        accounts.put(spec.sender, spec.sender_account.clone());
+                        accounts.put(spec.receiver, spec.receiver_account.clone());
+                        supply.apply_burn(spec.fee);
+                    }
+                    
+                    // Record as finally committed
+                    if !finally_committed.contains(&tx_idx) {
+                        finally_committed.insert(tx_idx);
+                        committed_txs.push(txs[tx_idx].clone());
+                    }
+                }
+            }
+
+            // Safety: break if no more pending txs
+            let still_pending = contexts
+                .iter()
+                .filter(|c| c.status == TxStatus::NeedsRetry)
+                .count();
+            if still_pending == 0 {
+                break;
+            }
         }
+
+        // Sort committed_txs by their original index to maintain order
+        // (they may have been committed across different waves)
+        committed_txs.sort_by_key(|tx| {
+            txs.iter().position(|t| t.hash() == tx.hash()).unwrap_or(usize::MAX)
+        });
 
         log::debug!(
             "STM: completed {} waves, {} committed, {} failed/aborted, {} conflicts, {} retries",
