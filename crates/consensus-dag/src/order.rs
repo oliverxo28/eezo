@@ -18,7 +18,9 @@ fn ordering_threshold() -> usize {
 
 /// OrderingEngine: Deterministically orders DAG vertices.
 pub struct OrderingEngine {
-    threshold: usize,
+    /// Threshold for distinct producers required to finalize a round.
+    /// Made public for DagConsensusHandle to configure.
+    pub threshold: usize,
 }
 
 impl OrderingEngine {
