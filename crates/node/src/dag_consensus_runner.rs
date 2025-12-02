@@ -185,11 +185,11 @@ impl DagConsensusTracker {
     }
 
     /// Record that the DAG has ordered a batch.
-    /// 
+    ///
     /// In shadow mode, the DAG receives one block at a time and advances one round per block.
     /// Therefore, DAG rounds correspond directly to block heights in this simplified mode.
     /// For full DAG consensus, the mapping would need to be more sophisticated.
-    /// 
+    ///
     /// T75.2: Now accepts tx hashes for full content comparison, not just counts.
     /// Returns true if a mismatch was detected (for metric incrementing).
     pub fn record_dag_ordered(&mut self, round: u64, tx_hashes: Vec<[u8; 32]>) -> bool {
@@ -218,7 +218,7 @@ impl DagConsensusTracker {
     }
 
     /// Compare tx hashes in order. Returns true if they match exactly.
-    /// 
+    ///
     /// T75.2: Compares both count and content (in order) of tx hashes.
     fn compare_tx_hashes(canonical: &[[u8; 32]], dag: Option<&[[u8; 32]]>) -> bool {
         match dag {
@@ -234,7 +234,7 @@ impl DagConsensusTracker {
     }
 
     /// Compute the current status.
-    /// 
+    ///
     /// T75.2: Implements lenient lag logic:
     /// - If there is at least one canonical height and DAG is at most 1 height behind
     ///   (lagging_by <= 1), treat as in_sync = true UNLESS we detect a content mismatch.
@@ -278,7 +278,7 @@ impl DagConsensusTracker {
     }
 
     /// Get the canonical tx hashes for a given height (if available).
-    /// 
+    ///
     /// T75.2: In shadow mode, we use the canonical tx hashes as what the DAG
     /// would have ordered, since we feed the DAG the same data.
     pub fn get_canonical_tx_hashes(&self, height: u64) -> Option<Vec<[u8; 32]>> {
