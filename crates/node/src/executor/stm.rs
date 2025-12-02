@@ -66,7 +66,12 @@ pub enum TxStatus {
 }
 
 /// Speculative execution result for a single transaction.
+/// 
 /// Holds the state changes that would be applied if this tx commits.
+/// This struct is populated during parallel speculative execution and contains
+/// cloned account state snapshots. The values become stale after conflicts are
+/// detected and retries occur - each retry creates a fresh SpeculativeResult
+/// based on the updated state snapshot.
 #[derive(Clone, Debug)]
 struct SpeculativeResult {
     /// Sender address
@@ -251,6 +256,8 @@ impl StmExecutor {
         // Validate the transaction statefully against the snapshot
         // BadNonce and InsufficientFunds are temporary failures that should be retried
         // (they may succeed after earlier txs commit and update the state)
+        // Note: Infinite retry loops are prevented by max_retries config (default: 5).
+        // When max_retries is reached, the tx is marked as Aborted.
         if let Err(e) = validate_tx_stateful(accounts, sender, &tx.core) {
             match e {
                 TxStateError::BadNonce { .. } | TxStateError::InsufficientFunds { .. } => {
@@ -353,7 +360,6 @@ impl StmExecutor {
     /// Returns indices of transactions that need retry.
     fn detect_conflicts_in_wave(contexts: &[TxContext], pending_indices: &[usize]) -> Vec<usize> {
         let mut conflicts = Vec::new();
-        let pending_set: HashSet<usize> = pending_indices.iter().cloned().collect();
         
         // Track committed writes by tx index (only for this wave)
         let mut committed_writes: HashMap<StateKey, usize> = HashMap::new();
@@ -372,9 +378,11 @@ impl StmExecutor {
             let mut has_conflict = false;
 
             // Check read-after-write conflicts: did we read something written by an earlier tx?
+            // Note: committed_writes only contains entries from txs in the current wave that
+            // have already been processed (earlier indices), so no extra filtering is needed.
             for key in &ctx.read_set {
                 if let Some(&writer_idx) = committed_writes.get(key) {
-                    if writer_idx < tx_idx && pending_set.contains(&writer_idx) {
+                    if writer_idx < tx_idx {
                         // Conflict: we read a key that was written by an earlier tx in this wave
                         has_conflict = true;
                         break;
@@ -386,7 +394,7 @@ impl StmExecutor {
             if !has_conflict {
                 for key in &ctx.write_set {
                     if let Some(&writer_idx) = committed_writes.get(key) {
-                        if writer_idx < tx_idx && pending_set.contains(&writer_idx) {
+                        if writer_idx < tx_idx {
                             // Conflict: we wrote a key that was written by an earlier tx in this wave
                             has_conflict = true;
                             break;
@@ -442,7 +450,6 @@ impl StmExecutor {
 
         // Initialize contexts for all transactions
         let mut contexts: Vec<TxContext> = (0..n).map(TxContext::new).collect();
-        let mut committed_txs: Vec<SignedTx> = Vec::with_capacity(n);
 
         // STM metrics tracking (T73.4)
         let mut waves_this_block: u64 = 0;
@@ -496,7 +503,10 @@ impl StmExecutor {
             }
 
             // T73.6: Execute transactions in parallel using rayon
-            // Each tx reads from the current snapshot and computes speculative results
+            // Each tx reads from the current snapshot and computes speculative results.
+            // Note: We clone the entire state for each wave. This is acceptable for now
+            // because Accounts and Supply are relatively small structures. For very large
+            // state sets, a copy-on-write or snapshot mechanism would be more efficient.
             let snapshot_accounts = accounts.clone();
             let snapshot_supply = supply.clone();
             
@@ -558,11 +568,8 @@ impl StmExecutor {
                         supply.apply_burn(spec.fee);
                     }
                     
-                    // Record as finally committed
-                    if !finally_committed.contains(&tx_idx) {
-                        finally_committed.insert(tx_idx);
-                        committed_txs.push(txs[tx_idx].clone());
-                    }
+                    // Record as finally committed (index only, build result at end)
+                    finally_committed.insert(tx_idx);
                 }
             }
 
@@ -576,11 +583,14 @@ impl StmExecutor {
             }
         }
 
-        // Sort committed_txs by their original index to maintain order
-        // (they may have been committed across different waves)
-        committed_txs.sort_by_key(|tx| {
-            txs.iter().position(|t| t.hash() == tx.hash()).unwrap_or(usize::MAX)
-        });
+        // Build committed_txs from finally_committed set, sorted by tx_idx for deterministic order.
+        // Using tx_idx directly is O(n log n) vs O(n²) hash lookups.
+        let mut committed_indices: Vec<usize> = finally_committed.into_iter().collect();
+        committed_indices.sort();
+        let committed_txs: Vec<SignedTx> = committed_indices
+            .into_iter()
+            .map(|idx| txs[idx].clone())
+            .collect();
 
         log::debug!(
             "STM: completed {} waves, {} committed, {} failed/aborted, {} conflicts, {} retries",
