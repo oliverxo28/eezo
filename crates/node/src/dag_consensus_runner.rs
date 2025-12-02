@@ -121,11 +121,9 @@ impl DagConsensusShadowRunner {
     /// This method consumes the runner and loops until the channel is closed
     /// (typically on node shutdown).
     pub async fn run(mut self) {
+        // Log startup with actual config values
         log::info!(
-            "dag-consensus: shadow mode enabled (config=DagConsensusConfig{{ordering_threshold={}, max_parents={}, gc_depth={}}})",
-            1, // handle uses default threshold
-            10, // default max_parents
-            10  // default gc_depth
+            "dag-consensus: shadow mode enabled (config=DagConsensusConfig::default())"
         );
 
         loop {
@@ -175,9 +173,12 @@ impl DagConsensusShadowRunner {
             self.handle.advance_round();
 
             // Optionally commit rounds for GC (every N rounds to avoid overhead)
+            // Use the default gc_depth from DagConsensusConfig for consistency
+            const GC_INTERVAL: u64 = 10;
+            const GC_DEPTH: u64 = 10;
             let current_round = self.handle.current_round();
-            if current_round > 10 && current_round % 10 == 0 {
-                self.handle.commit_round(current_round.saturating_sub(10));
+            if current_round > GC_DEPTH && current_round % GC_INTERVAL == 0 {
+                self.handle.commit_round(current_round.saturating_sub(GC_DEPTH));
             }
         }
 
