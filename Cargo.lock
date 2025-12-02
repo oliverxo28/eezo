@@ -1095,6 +1095,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "consensus-dag"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "blake3",
+ "bytes",
+ "dashmap 6.1.0",
+ "eezo-ledger",
+ "lazy_static",
+ "log",
+ "parking_lot",
+ "prometheus",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "const-hex"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5572,6 +5591,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2 0.6.1",
