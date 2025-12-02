@@ -259,6 +259,48 @@ mod hex {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// High-level configuration for DAG consensus.
+///
+/// This is intentionally small and stable: it represents the knobs the node
+/// will eventually pass in when constructing the DAG consensus layer.
+#[derive(Clone, Debug)]
+pub struct DagConsensusConfig {
+    /// Maximum number of parent vertices that can be referenced (default: 10)
+    pub max_parents: usize,
+
+    /// Maximum round gap allowed between a vertex and its parents (default: 5)
+    pub max_round_gap: u64,
+
+    /// Maximum transactions per payload (default: 50,000 - from builder.rs)
+    pub max_payload_txs: usize,
+
+    /// GC safety margin: rounds kept after commit (default: 10 - from store.rs)
+    pub gc_depth: u64,
+
+    /// Ordering threshold: distinct producers required per round (default: 1)
+    pub ordering_threshold: usize,
+
+    /// Target payload size in bytes (default: 1MB - from builder.rs)
+    pub target_payload_bytes: usize,
+}
+
+impl Default for DagConsensusConfig {
+    fn default() -> Self {
+        Self {
+            max_parents: 10,
+            max_round_gap: 5,
+            max_payload_txs: 50_000,       // from builder.rs MAX_TXS_PER_PAYLOAD
+            gc_depth: 10,                  // from store.rs safety_margin
+            ordering_threshold: 1,         // from order.rs ordering_threshold()
+            target_payload_bytes: 1_048_576, // from builder.rs (1MB)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,5 +359,18 @@ mod tests {
         assert_eq!(bundle.vertices.len(), 2);
         assert_eq!(bundle.tx_count, 10);
         assert!(!bundle.is_empty());
+    }
+
+    #[test]
+    fn test_dag_consensus_config_default() {
+        let config = DagConsensusConfig::default();
+        
+        // Verify defaults match known internal constants
+        assert_eq!(config.max_parents, 10);
+        assert_eq!(config.max_round_gap, 5);
+        assert_eq!(config.max_payload_txs, 50_000);
+        assert_eq!(config.gc_depth, 10);
+        assert_eq!(config.ordering_threshold, 1);
+        assert_eq!(config.target_payload_bytes, 1_048_576);
     }
 }
