@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use serde::Serialize;
 
-use consensus_dag::{DagConsensusConfig, DagConsensusHandle, DagPayload, register_dag_metrics};
+use consensus_dag::{DagConsensusConfig, DagConsensusHandle, DagPayload, DagError, OrderedBatch, register_dag_metrics};
 use consensus_dag::types::AuthorId;
 
 // ---------------------------------------------------------------------------
@@ -505,6 +505,87 @@ pub enum DagConsensusMode {
     Off,
     /// DAG consensus runs in shadow mode (observes but doesn't affect consensus)
     Shadow,
+}
+
+// ---------------------------------------------------------------------------
+// T76.1: Hybrid DAG consensus — wrapper for consuming ordered batches
+// ---------------------------------------------------------------------------
+
+/// T76.1: Handle for hybrid DAG consensus mode.
+///
+/// This wraps a DagConsensusHandle and provides:
+/// - A method to consume the next ordered batch (non-blocking)
+/// - A shadow block sender to feed committed blocks into the DAG
+/// - A tracker for status queries
+///
+/// In hybrid mode:
+/// - DAG provides ordered batches for tx ordering
+/// - Hotstuff still performs the canonical commit
+pub struct HybridDagHandle {
+    /// The underlying DAG consensus handle
+    handle: DagConsensusHandle,
+    /// Sender for shadow block summaries (for shadow tracking)
+    sender: mpsc::Sender<ShadowBlockSummary>,
+    /// Shared tracker for status queries
+    tracker: Arc<RwLock<DagConsensusTracker>>,
+}
+
+impl HybridDagHandle {
+    /// Create a new hybrid DAG handle with the given configuration.
+    pub fn new(config: DagConsensusConfig) -> Self {
+        // Use a reasonable buffer size for the channel
+        let (sender, _receiver) = mpsc::channel(256);
+        let tracker = Arc::new(RwLock::new(DagConsensusTracker::new()));
+        let handle = DagConsensusHandle::new(config);
+        
+        Self {
+            handle,
+            sender,
+            tracker,
+        }
+    }
+
+    /// Try to consume the next ordered batch from the DAG.
+    ///
+    /// Non-blocking: returns `None` if there is no ordered batch available.
+    /// Used by CoreRunnerHandle in hybrid mode to get DAG-ordered transactions.
+    pub fn try_next_ordered_batch(&self) -> Option<OrderedBatch> {
+        self.handle.try_next_ordered_batch()
+    }
+
+    /// Get the sender for shadow block summaries.
+    ///
+    /// This is used to feed committed blocks back into the DAG for shadow tracking.
+    pub fn sender(&self) -> mpsc::Sender<ShadowBlockSummary> {
+        self.sender.clone()
+    }
+
+    /// Get the shared tracker for status queries.
+    pub fn tracker(&self) -> Arc<RwLock<DagConsensusTracker>> {
+        Arc::clone(&self.tracker)
+    }
+
+    /// Get the current round number.
+    pub fn current_round(&self) -> u64 {
+        self.handle.current_round()
+    }
+
+    /// Advance to the next round.
+    pub fn advance_round(&self) {
+        self.handle.advance_round();
+    }
+
+    /// Submit a payload to the DAG.
+    ///
+    /// This is used by the shadow runner to feed payloads into the DAG.
+    pub fn submit_payload(&self, payload: DagPayload) -> Result<consensus_dag::types::VertexId, DagError> {
+        self.handle.submit_payload(payload)
+    }
+
+    /// Commit a round (triggers GC if appropriate).
+    pub fn commit_round(&self, round: u64) {
+        self.handle.commit_round(round);
+    }
 }
 
 impl DagConsensusMode {

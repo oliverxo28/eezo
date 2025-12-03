@@ -168,6 +168,125 @@ impl ExecutorMode {
     }
 }
 
+// ============================================================================
+// T76.1: Consensus Mode Selection
+// ============================================================================
+
+/// Consensus mode enum for runtime selection.
+///
+/// Selected via `EEZO_CONSENSUS_MODE` environment variable:
+/// - `"hotstuff"` or `"hs"` or unset → Hotstuff (default)
+/// - `"dag"` → Dag
+/// - `"dag-hybrid"` or `"dag_hybrid"` → DagHybrid
+/// - Unknown strings → Hotstuff with warning
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsensusMode {
+    /// Traditional Hotstuff-style consensus (default)
+    Hotstuff,
+    /// DAG mode: DAG is used for tx source + dry-run + shadow consensus
+    Dag,
+    /// Hybrid mode: DAG provides ordered batches, Hotstuff still commits
+    DagHybrid,
+}
+
+impl std::fmt::Display for ConsensusMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConsensusMode::Hotstuff => write!(f, "Hotstuff"),
+            ConsensusMode::Dag => write!(f, "Dag"),
+            ConsensusMode::DagHybrid => write!(f, "DagHybrid"),
+        }
+    }
+}
+
+impl ConsensusMode {
+    /// Parse consensus mode from environment variable `EEZO_CONSENSUS_MODE`.
+    ///
+    /// - Empty string or unset → Hotstuff
+    /// - "hotstuff" or "hs" → Hotstuff
+    /// - "dag" → Dag
+    /// - "dag-hybrid" or "dag_hybrid" → DagHybrid
+    /// - Unknown strings → Hotstuff with warning logged
+    pub fn from_env() -> Self {
+        Self::from_env_with_log(true)
+    }
+
+    /// Parse consensus mode from env, optionally logging unknown values.
+    ///
+    /// Used by from_env() with logging enabled, and by tests without logging.
+    pub fn from_env_with_log(log_unknown: bool) -> Self {
+        match std::env::var("EEZO_CONSENSUS_MODE") {
+            Ok(v) => Self::parse_with_log(&v, log_unknown),
+            Err(_) => ConsensusMode::Hotstuff,
+        }
+    }
+
+    /// Parse a string into a ConsensusMode.
+    ///
+    /// - Empty string → Hotstuff
+    /// - "hotstuff" or "hs" → Hotstuff
+    /// - "dag" → Dag
+    /// - "dag-hybrid" or "dag_hybrid" → DagHybrid
+    /// - Unknown → Hotstuff with optional warning
+    fn parse_with_log(s: &str, log_unknown: bool) -> Self {
+        let s = s.trim().to_ascii_lowercase();
+        match s.as_str() {
+            "" | "hotstuff" | "hs" => ConsensusMode::Hotstuff,
+            "dag" => ConsensusMode::Dag,
+            "dag-hybrid" | "dag_hybrid" => ConsensusMode::DagHybrid,
+            _ => {
+                if log_unknown {
+                    log::warn!(
+                        "consensus: EEZO_CONSENSUS_MODE='{}' is not recognized, using default: hotstuff",
+                        s
+                    );
+                }
+                ConsensusMode::Hotstuff
+            }
+        }
+    }
+
+    /// Get the default consensus mode (Hotstuff).
+    pub fn default_mode() -> Self {
+        ConsensusMode::Hotstuff
+    }
+}
+
+impl Default for ConsensusMode {
+    fn default() -> Self {
+        ConsensusMode::Hotstuff
+    }
+}
+
+// ============================================================================
+// T76.1: DAG Ordering Enable Gate
+// ============================================================================
+
+/// T76.1: Parse the EEZO_DAG_ORDERING_ENABLED environment variable.
+///
+/// Returns `true` if the value is "1", "true", "on", or "yes" (case-insensitive).
+/// Returns `false` otherwise (unset, empty, or any other value).
+///
+/// When false: even if EEZO_CONSENSUS_MODE=dag-hybrid, behaviour is the same as hotstuff.
+/// When true and mode is dag-hybrid: enable hybrid behaviour (DAG ordering + Hotstuff commit).
+pub fn dag_ordering_enabled() -> bool {
+    std::env::var("EEZO_DAG_ORDERING_ENABLED")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+        .unwrap_or(false)
+}
+
+/// T76.1: Log the consensus mode and DAG ordering status at startup.
+///
+/// Call this once during node initialization to provide clear visibility into
+/// the selected consensus configuration.
+pub fn log_consensus_config(mode: ConsensusMode, dag_ordering: bool) {
+    log::info!(
+        "main: consensus_mode={}, dag_ordering_enabled={}",
+        mode,
+        dag_ordering
+    );
+}
+
 /// Build the executor based on the mode and thread count.
 ///
 /// - If STM mode is requested but `stm-exec` feature is not enabled,
@@ -285,6 +404,9 @@ enum BlockTxSource {
     /// as a thin wrapper that falls back to mempool. Real DAG usage will land
     /// in T68.1+.
     DagCandidate,
+    /// T76.1: Hybrid mode - use ordered batches from DAG consensus first,
+    /// fallback to mempool if no batch available.
+    DagHybrid,
 }
 /// Drives a `SingleNode` by calling `run_one_slot()` on a fixed cadence.
 /// No networking, no HTTP, no persistence here. Pure runner.
@@ -305,6 +427,11 @@ pub struct CoreRunnerHandle {
     // Stored behind a Mutex so we can attach it after construction.
     #[cfg(feature = "dag-consensus")]
     shadow_dag_sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<ShadowBlockSummary>>>>,
+    // T76.1: optional hybrid DAG handle for consuming ordered batches
+    // Stored behind a Mutex so we can attach it after construction.
+    #[cfg(feature = "dag-consensus")]
+    #[allow(dead_code)]
+    hybrid_dag_handle: Arc<Mutex<Option<Arc<crate::dag_consensus_runner::HybridDagHandle>>>>,
     join: tokio::task::JoinHandle<()>,
 }
 impl CoreRunnerHandle {
@@ -322,6 +449,9 @@ impl CoreRunnerHandle {
         // T75.0: start with no shadow DAG sender; it can be attached later
         #[cfg(feature = "dag-consensus")]
         let shadow_dag_sender = Arc::new(Mutex::new(None));
+        // T76.1: start with no hybrid DAG handle; it can be attached later
+        #[cfg(feature = "dag-consensus")]
+        let hybrid_dag_handle = Arc::new(Mutex::new(None));
         // Note: db_c is not available in this cfg block
 
         // 1️⃣ Add MAX_TX reading at struct init (persistence disabled path)
@@ -329,19 +459,32 @@ impl CoreRunnerHandle {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(usize::MAX);
-		// T68.0: select block tx source from env (default: mempool).
-        let block_tx_source = match std::env::var("EEZO_BLOCK_TX_SOURCE")
-            .unwrap_or_else(|_| "mempool".to_string())
-            .to_lowercase()
-            .as_str()
-        {
-            "dag" | "dagcandidate" => {
-                log::info!("consensus: block tx source = DAG candidate (with mempool fallback)");
-                BlockTxSource::DagCandidate
-            }
-            _ => {
-                log::info!("consensus: block tx source = mempool (default)");
-                BlockTxSource::Mempool
+
+        // T76.1: Parse consensus mode and DAG ordering enabled
+        let consensus_mode = ConsensusMode::from_env();
+        let dag_ordering = dag_ordering_enabled();
+        log_consensus_config(consensus_mode, dag_ordering);
+
+        // T68.0/T76.1: select block tx source based on consensus mode and env
+        let block_tx_source = if consensus_mode == ConsensusMode::DagHybrid && dag_ordering {
+            // T76.1: Hybrid mode with ordering enabled
+            log::info!("consensus: block tx source = DAG hybrid (ordered batches with fallback)");
+            BlockTxSource::DagHybrid
+        } else {
+            // Legacy: respect EEZO_BLOCK_TX_SOURCE for backward compatibility
+            match std::env::var("EEZO_BLOCK_TX_SOURCE")
+                .unwrap_or_else(|_| "mempool".to_string())
+                .to_lowercase()
+                .as_str()
+            {
+                "dag" | "dagcandidate" => {
+                    log::info!("consensus: block tx source = DAG candidate (with mempool fallback)");
+                    BlockTxSource::DagCandidate
+                }
+                _ => {
+                    log::info!("consensus: block tx source = mempool (default)");
+                    BlockTxSource::Mempool
+                }
             }
         };
 
@@ -360,6 +503,9 @@ impl CoreRunnerHandle {
         // T75.0: Clone shadow DAG sender for use inside the spawned task
         #[cfg(feature = "dag-consensus")]
         let shadow_dag_c = Arc::clone(&shadow_dag_sender);
+        // T76.1: Clone hybrid DAG handle for use inside the spawned task
+        #[cfg(feature = "dag-consensus")]
+        let hybrid_dag_c = Arc::clone(&hybrid_dag_handle);
 
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
@@ -401,9 +547,62 @@ impl CoreRunnerHandle {
                 #[cfg(feature = "metrics")]
                 let dag_prepare_start = std::time::Instant::now();
 
-                // T68.1 + T69.0: If DAG source is selected, try to fetch txs from DAG first.
+                // T76.1: If DagHybrid source is selected, try to consume ordered batches from DAG consensus first.
+                // This takes priority over DagCandidate path.
+                #[cfg(feature = "dag-consensus")]
+                let hybrid_txs: Option<Vec<SignedTx>> = if matches!(block_tx_source, BlockTxSource::DagHybrid) {
+                    // Try to get hybrid DAG handle
+                    let hybrid_opt: Option<Arc<crate::dag_consensus_runner::HybridDagHandle>> = hybrid_dag_c.lock().await.clone();
+                    if let Some(hybrid_handle) = hybrid_opt {
+                        // Try to consume an ordered batch from DAG consensus
+                        if let Some(batch) = hybrid_handle.try_next_ordered_batch() {
+                            log::debug!(
+                                "dag_hybrid: consumed ordered batch (round={}, vertices={}, tx_count={})",
+                                batch.round,
+                                batch.vertex_count(),
+                                batch.tx_count()
+                            );
+                            
+                            // T76.1: Convert ordered batch to tx list
+                            // For now, we need to collect txs from mempool based on the batch
+                            // In a full implementation, the ordered batch would contain tx hashes
+                            // that we'd look up in mempool. For T76.1 skeleton, we fall through
+                            // to use DAG candidate path (same as DagCandidate) for tx collection.
+                            
+                            // Increment hybrid batches used metric
+                            #[cfg(feature = "metrics")]
+                            crate::metrics::dag_hybrid_batches_used_inc();
+                            
+                            // Advance the DAG round after consuming the batch
+                            hybrid_handle.advance_round();
+                            
+                            // For now, we still use the DagCandidate path to get actual txs
+                            // The ordered batch tells us ordering is ready, but actual tx bytes
+                            // come from the DAG runner / mempool.
+                            // Fall through to the DagCandidate path below.
+                            None // Signal to use DagCandidate fallback
+                        } else {
+                            log::debug!("dag_hybrid: no ordered batch available, will fallback");
+                            // Increment fallback metric
+                            #[cfg(feature = "metrics")]
+                            crate::metrics::dag_hybrid_fallback_inc();
+                            None
+                        }
+                    } else {
+                        log::debug!("dag_hybrid: DagHybrid selected but no hybrid DAG handle attached");
+                        // Increment fallback metric
+                        #[cfg(feature = "metrics")]
+                        crate::metrics::dag_hybrid_fallback_inc();
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // T68.1 + T69.0: If DAG source is selected (DagCandidate or DagHybrid fallback), 
+                // try to fetch txs from DAG first.
                 // T69.0: Also evaluate the template quality gate if policy is not "off".
-                let dag_txs: Option<Vec<SignedTx>> = if matches!(block_tx_source, BlockTxSource::DagCandidate) {
+                let dag_txs: Option<Vec<SignedTx>> = if matches!(block_tx_source, BlockTxSource::DagCandidate | BlockTxSource::DagHybrid) {
                     // Try to get DAG handle
                     let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
                     if let Some(dag_handle) = dag_opt {
@@ -455,7 +654,7 @@ impl CoreRunnerHandle {
 
                 // T70.0: Record DAG prepare time (only when DAG source is enabled)
                 #[cfg(feature = "metrics")]
-                if matches!(block_tx_source, BlockTxSource::DagCandidate) {
+                if matches!(block_tx_source, BlockTxSource::DagCandidate | BlockTxSource::DagHybrid) {
                     let dag_prepare_elapsed = dag_prepare_start.elapsed().as_secs_f64();
                     crate::metrics::observe_block_dag_prepare_seconds(dag_prepare_elapsed);
                 }
@@ -1017,6 +1216,8 @@ impl CoreRunnerHandle {
             dag,
             #[cfg(feature = "dag-consensus")]
             shadow_dag_sender,
+            #[cfg(feature = "dag-consensus")]
+            hybrid_dag_handle,
             join,
         })
     }
@@ -1034,6 +1235,9 @@ impl CoreRunnerHandle {
         // T75.0: start with no shadow DAG sender; it can be attached later
         #[cfg(feature = "dag-consensus")]
         let shadow_dag_sender = Arc::new(Mutex::new(None));
+        // T76.1: start with no hybrid DAG handle; it can be attached later
+        #[cfg(feature = "dag-consensus")]
+        let hybrid_dag_handle = Arc::new(Mutex::new(None));
         // Clone Option<Arc<Persistence>> for the loop
 
         // 1️⃣ Add MAX_TX reading at struct init (persistence enabled path)
@@ -1041,19 +1245,32 @@ impl CoreRunnerHandle {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(usize::MAX);
-		// T68.0: select block tx source from env (default: mempool).
-        let block_tx_source = match std::env::var("EEZO_BLOCK_TX_SOURCE")
-            .unwrap_or_else(|_| "mempool".to_string())
-            .to_lowercase()
-            .as_str()
-        {
-            "dag" | "dagcandidate" => {
-                log::info!("consensus: block tx source = DAG candidate (with mempool fallback)");
-                BlockTxSource::DagCandidate
-            }
-            _ => {
-                log::info!("consensus: block tx source = mempool (default)");
-                BlockTxSource::Mempool
+
+        // T76.1: Parse consensus mode and DAG ordering enabled
+        let consensus_mode = ConsensusMode::from_env();
+        let dag_ordering = dag_ordering_enabled();
+        log_consensus_config(consensus_mode, dag_ordering);
+
+        // T68.0/T76.1: select block tx source based on consensus mode and env
+        let block_tx_source = if consensus_mode == ConsensusMode::DagHybrid && dag_ordering {
+            // T76.1: Hybrid mode with ordering enabled
+            log::info!("consensus: block tx source = DAG hybrid (ordered batches with fallback)");
+            BlockTxSource::DagHybrid
+        } else {
+            // Legacy: respect EEZO_BLOCK_TX_SOURCE for backward compatibility
+            match std::env::var("EEZO_BLOCK_TX_SOURCE")
+                .unwrap_or_else(|_| "mempool".to_string())
+                .to_lowercase()
+                .as_str()
+            {
+                "dag" | "dagcandidate" => {
+                    log::info!("consensus: block tx source = DAG candidate (with mempool fallback)");
+                    BlockTxSource::DagCandidate
+                }
+                _ => {
+                    log::info!("consensus: block tx source = mempool (default)");
+                    BlockTxSource::Mempool
+                }
             }
         };
 
@@ -1072,6 +1289,9 @@ impl CoreRunnerHandle {
         // T75.0: Clone shadow DAG sender for use inside the spawned task
         #[cfg(feature = "dag-consensus")]
         let shadow_dag_c = Arc::clone(&shadow_dag_sender);
+        // T76.1: Clone hybrid DAG handle for use inside the spawned task
+        #[cfg(feature = "dag-consensus")]
+        let hybrid_dag_c = Arc::clone(&hybrid_dag_handle);
 
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
@@ -1097,9 +1317,51 @@ impl CoreRunnerHandle {
                 #[cfg(feature = "metrics")]
                 let dag_prepare_start = std::time::Instant::now();
 
-                // T68.1 + T69.0: If DAG source is selected, try to fetch txs from DAG first.
-                // T69.0: Also evaluate the template quality gate if policy is not "off".
-                let dag_txs: Option<Vec<SignedTx>> = if matches!(block_tx_source, BlockTxSource::DagCandidate) {
+                // T76.1: If DagHybrid source is selected, try to consume ordered batches from DAG consensus first.
+                #[cfg(feature = "dag-consensus")]
+                let _hybrid_txs: Option<Vec<SignedTx>> = if matches!(block_tx_source, BlockTxSource::DagHybrid) {
+                    // Try to get hybrid DAG handle
+                    let hybrid_opt: Option<Arc<crate::dag_consensus_runner::HybridDagHandle>> = hybrid_dag_c.lock().await.clone();
+                    if let Some(hybrid_handle) = hybrid_opt {
+                        // Try to consume an ordered batch from DAG consensus
+                        if let Some(batch) = hybrid_handle.try_next_ordered_batch() {
+                            log::debug!(
+                                "dag_hybrid: consumed ordered batch (round={}, vertices={}, tx_count={})",
+                                batch.round,
+                                batch.vertex_count(),
+                                batch.tx_count()
+                            );
+                            
+                            // Increment hybrid batches used metric
+                            #[cfg(feature = "metrics")]
+                            crate::metrics::dag_hybrid_batches_used_inc();
+                            
+                            // Advance the DAG round after consuming the batch
+                            hybrid_handle.advance_round();
+                            
+                            // Fall through to the DagCandidate path for actual tx collection
+                            None
+                        } else {
+                            log::debug!("dag_hybrid: no ordered batch available, will fallback");
+                            // Increment fallback metric
+                            #[cfg(feature = "metrics")]
+                            crate::metrics::dag_hybrid_fallback_inc();
+                            None
+                        }
+                    } else {
+                        log::debug!("dag_hybrid: DagHybrid selected but no hybrid DAG handle attached");
+                        // Increment fallback metric
+                        #[cfg(feature = "metrics")]
+                        crate::metrics::dag_hybrid_fallback_inc();
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // T68.1 + T69.0: If DAG source is selected (DagCandidate or DagHybrid fallback), 
+                // try to fetch txs from DAG first.
+                let dag_txs: Option<Vec<SignedTx>> = if matches!(block_tx_source, BlockTxSource::DagCandidate | BlockTxSource::DagHybrid) {
                     // Try to get DAG handle
                     let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
                     if let Some(dag_handle) = dag_opt {
@@ -1151,7 +1413,7 @@ impl CoreRunnerHandle {
 
                 // T70.0: Record DAG prepare time (only when DAG source is enabled)
                 #[cfg(feature = "metrics")]
-                if matches!(block_tx_source, BlockTxSource::DagCandidate) {
+                if matches!(block_tx_source, BlockTxSource::DagCandidate | BlockTxSource::DagHybrid) {
                     let dag_prepare_elapsed = dag_prepare_start.elapsed().as_secs_f64();
                     crate::metrics::observe_block_dag_prepare_seconds(dag_prepare_elapsed);
                 }
@@ -1640,6 +1902,8 @@ impl CoreRunnerHandle {
             dag,
             #[cfg(feature = "dag-consensus")]
             shadow_dag_sender,
+            #[cfg(feature = "dag-consensus")]
+            hybrid_dag_handle,
             join,
         })
     }
@@ -1712,12 +1976,12 @@ impl CoreRunnerHandle {
                 Self::collect_from_mempool(guard, block_max_tx)
             }
 
-            BlockTxSource::DagCandidate => {
-                // T68.0: For now, DagCandidate is just a thin wrapper over the mempool
-                // behaviour. Real DAG-driven tx selection will arrive in T68.1+.
+            BlockTxSource::DagCandidate | BlockTxSource::DagHybrid => {
+                // T68.0/T76.1: For DagCandidate and DagHybrid, this is a thin wrapper over mempool.
+                // Real DAG-driven tx selection happens in the spawn loop before this is called.
                 // NOTE: This path is only used by the non-persistence spawn variant.
                 // The persistence-enabled spawn uses collect_block_txs_with_dag_fallback.
-                log::debug!("dag_tx_source: DagCandidate mode selected → using mempool (T68.0 stub)");
+                log::debug!("dag_tx_source: DAG mode selected → using mempool (T68.0/T76.1 stub)");
                 Self::collect_from_mempool(guard, block_max_tx)
             }
         }
@@ -1742,8 +2006,8 @@ impl CoreRunnerHandle {
                 Self::collect_from_mempool(guard, block_max_tx)
             }
 
-            BlockTxSource::DagCandidate => {
-                // T68.1: Check if we got txs from DAG
+            BlockTxSource::DagCandidate | BlockTxSource::DagHybrid => {
+                // T68.1/T76.1: Check if we got txs from DAG
                 if let Some(mut txs) = dag_txs {
                     if !txs.is_empty() {
                         // Apply max_tx cap if configured.
@@ -1773,7 +2037,7 @@ impl CoreRunnerHandle {
                     }
                 }
 
-                // T68.1: DAG returned None or empty - fall back to mempool
+                // T68.1/T76.1: DAG returned None or empty - fall back to mempool
                 log::info!("dag_tx_source: DAG candidate empty/unavailable, falling back to mempool");
 
                 // T68.1: Update metrics - fallback to mempool
@@ -1873,5 +2137,207 @@ mod executor_mode_tests {
         // Test unset
         std::env::remove_var("EEZO_EXECUTOR_MODE");
         assert_eq!(ExecutorMode::from_env(), None);
+    }
+}
+
+// ============================================================================
+// T76.1: Unit Tests for Consensus Mode Selection
+// ============================================================================
+
+#[cfg(test)]
+mod consensus_mode_tests {
+    use super::{ConsensusMode, dag_ordering_enabled};
+    use std::sync::Mutex;
+    
+    // Mutex to serialize env var access across tests
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_consensus_mode_default() {
+        assert_eq!(ConsensusMode::default_mode(), ConsensusMode::Hotstuff);
+        assert_eq!(ConsensusMode::default(), ConsensusMode::Hotstuff);
+    }
+
+    #[test]
+    fn test_consensus_mode_display() {
+        assert_eq!(format!("{}", ConsensusMode::Hotstuff), "Hotstuff");
+        assert_eq!(format!("{}", ConsensusMode::Dag), "Dag");
+        assert_eq!(format!("{}", ConsensusMode::DagHybrid), "DagHybrid");
+    }
+
+    #[test]
+    fn test_consensus_mode_parsing_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Unset defaults to Hotstuff
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::Hotstuff);
+    }
+
+    #[test]
+    fn test_consensus_mode_parsing_empty() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Empty string defaults to Hotstuff
+        std::env::set_var("EEZO_CONSENSUS_MODE", "");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::Hotstuff);
+        
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+    }
+
+    #[test]
+    fn test_consensus_mode_parsing_hotstuff() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // "hotstuff" → Hotstuff
+        std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::Hotstuff);
+        
+        // "hs" → Hotstuff
+        std::env::set_var("EEZO_CONSENSUS_MODE", "hs");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::Hotstuff);
+        
+        // Case insensitive
+        std::env::set_var("EEZO_CONSENSUS_MODE", "HOTSTUFF");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::Hotstuff);
+        
+        std::env::set_var("EEZO_CONSENSUS_MODE", "HS");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::Hotstuff);
+        
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+    }
+
+    #[test]
+    fn test_consensus_mode_parsing_dag() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // "dag" → Dag
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::Dag);
+        
+        // Case insensitive
+        std::env::set_var("EEZO_CONSENSUS_MODE", "DAG");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::Dag);
+        
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+    }
+
+    #[test]
+    fn test_consensus_mode_parsing_dag_hybrid() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // "dag-hybrid" → DagHybrid
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag-hybrid");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::DagHybrid);
+        
+        // "dag_hybrid" → DagHybrid
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag_hybrid");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::DagHybrid);
+        
+        // Case insensitive
+        std::env::set_var("EEZO_CONSENSUS_MODE", "DAG-HYBRID");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::DagHybrid);
+        
+        std::env::set_var("EEZO_CONSENSUS_MODE", "DAG_HYBRID");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::DagHybrid);
+        
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+    }
+
+    #[test]
+    fn test_consensus_mode_parsing_unknown_falls_back_to_hotstuff() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Unknown strings should fall back to Hotstuff
+        std::env::set_var("EEZO_CONSENSUS_MODE", "unknown");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::Hotstuff);
+        
+        std::env::set_var("EEZO_CONSENSUS_MODE", "invalid-mode");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::Hotstuff);
+        
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag-");
+        assert_eq!(ConsensusMode::from_env_with_log(false), ConsensusMode::Hotstuff);
+        
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+    }
+
+    #[test]
+    fn test_dag_ordering_enabled_default_false() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Unset defaults to false
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+        assert!(!dag_ordering_enabled());
+    }
+
+    #[test]
+    fn test_dag_ordering_enabled_empty_is_false() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Empty string is false
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "");
+        assert!(!dag_ordering_enabled());
+        
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+    }
+
+    #[test]
+    fn test_dag_ordering_enabled_true_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // "1" → true
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "1");
+        assert!(dag_ordering_enabled());
+        
+        // "true" → true
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
+        assert!(dag_ordering_enabled());
+        
+        // "on" → true
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "on");
+        assert!(dag_ordering_enabled());
+        
+        // "yes" → true
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "yes");
+        assert!(dag_ordering_enabled());
+        
+        // Case insensitive
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "TRUE");
+        assert!(dag_ordering_enabled());
+        
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "ON");
+        assert!(dag_ordering_enabled());
+        
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "YES");
+        assert!(dag_ordering_enabled());
+        
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+    }
+
+    #[test]
+    fn test_dag_ordering_enabled_false_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // "0" → false
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "0");
+        assert!(!dag_ordering_enabled());
+        
+        // "false" → false
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "false");
+        assert!(!dag_ordering_enabled());
+        
+        // "off" → false
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "off");
+        assert!(!dag_ordering_enabled());
+        
+        // "no" → false
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "no");
+        assert!(!dag_ordering_enabled());
+        
+        // Unknown → false
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "unknown");
+        assert!(!dag_ordering_enabled());
+        
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
     }
 }
