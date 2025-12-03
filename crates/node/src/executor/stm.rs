@@ -684,6 +684,10 @@ impl Executor for StmExecutor {
             crate::metrics::stm_observe_retries_per_block(retries_this_block);
         }
 
+        // T72.metrics.fix: Record transactions per block histogram
+        // This is called unconditionally (via no-op stub when metrics disabled)
+        crate::metrics::observe_exec_txs_per_block(tx_count as u64);
+
         // Build the block
         let header = Self::build_block_header(input.height, prev, &committed_txs, timestamp_ms);
         let block = Block { header, txs: committed_txs };
