@@ -56,15 +56,20 @@ pub struct ExecOutcome {
     pub tx_count: usize,
 
     /// T76.4: Number of transactions that succeeded apply.
-    /// Only populated when `partial_failure_ok` was set in input.
+    /// In legacy mode (partial_failure_ok=false), this equals tx_count since the block
+    /// only succeeds if all transactions succeed.
     pub apply_ok: usize,
 
     /// T76.4: Number of transactions that failed apply.
-    /// Only populated when `partial_failure_ok` was set in input.
+    /// In legacy mode (partial_failure_ok=false), this is 0 since any failure causes
+    /// the entire block to fail (and tx_count becomes 0).
     pub apply_fail: usize,
 }
 
 impl ExecOutcome {
+    /// Create an ExecOutcome for legacy mode where all included txs must have succeeded.
+    /// This constructor assumes apply_ok = tx_count and apply_fail = 0, which is correct
+    /// for legacy mode where any tx failure causes the entire block to fail.
     pub fn new(result: Result<Block, String>, elapsed: Duration, tx_count: usize) -> Self {
         Self { result, elapsed, tx_count, apply_ok: tx_count, apply_fail: 0 }
     }

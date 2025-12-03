@@ -12,8 +12,8 @@
 
 use std::collections::HashSet;
 use std::env;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use rayon::prelude::*;
 use smallvec::SmallVec;
 
@@ -482,10 +482,10 @@ impl Executor for ParallelExecutor {
                         Ok(()) => {
                             apply_ok_count.fetch_add(1, Ordering::Relaxed);
                         }
-                        Err(_e) => {
+                        Err(e) => {
                             apply_fail_count.fetch_add(1, Ordering::Relaxed);
-                            // In partial failure mode, we log but don't abort
-                            log::debug!("parallel executor: tx apply skipped (partial mode)");
+                            // In partial failure mode, we log the error but don't abort
+                            log::debug!("parallel executor: tx apply skipped (partial mode): {:?}", e);
                         }
                     }
                 });
