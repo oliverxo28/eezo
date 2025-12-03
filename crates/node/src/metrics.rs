@@ -2023,3 +2023,58 @@ pub fn register_dag_shadow_metrics() {
 pub fn register_dag_shadow_metrics() {
     // No metrics to register when the feature is off.
 }
+
+// -----------------------------------------------------------------------------
+// T76.1 — DAG Hybrid mode metrics
+// -----------------------------------------------------------------------------
+
+/// Counter: Blocks built from DAG consensus ordered batches in hybrid mode.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_BATCHES_USED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_batches_used_total",
+        "Blocks built from DAG consensus ordered batches (hybrid mode)"
+    )
+    .unwrap()
+});
+
+/// Counter: Hybrid mode fallbacks to mempool/legacy tx source.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_FALLBACK_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_fallback_total",
+        "Hybrid mode fallbacks to mempool/legacy tx source"
+    )
+    .unwrap()
+});
+
+/// Helper: Increment hybrid batches used counter.
+#[inline]
+pub fn dag_hybrid_batches_used_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_BATCHES_USED_TOTAL.inc();
+    }
+}
+
+/// Helper: Increment hybrid fallback counter.
+#[inline]
+pub fn dag_hybrid_fallback_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_FALLBACK_TOTAL.inc();
+    }
+}
+
+/// Eagerly register T76.1 DAG hybrid mode metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_dag_hybrid_metrics() {
+    let _ = &*EEZO_DAG_HYBRID_BATCHES_USED_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_FALLBACK_TOTAL;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_dag_hybrid_metrics() {
+    // No metrics to register when the feature is off.
+}
