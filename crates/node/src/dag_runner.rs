@@ -805,7 +805,9 @@ struct SignedTxEnvelopeFull {
 /// Parse raw tx bytes (JSON envelope) into a ledger SignedTx for execution.
 ///
 /// Returns None if parsing fails or required fields are missing/invalid.
-fn parse_signed_tx_from_envelope(bytes: &[u8]) -> Option<SignedTx> {
+///
+/// T76.3: Made pub(crate) so consensus_runner can use it for hybrid tx decoding.
+pub(crate) fn parse_signed_tx_from_envelope(bytes: &[u8]) -> Option<SignedTx> {
     let env: SignedTxEnvelopeFull = serde_json::from_slice(bytes).ok()?;
 
     // Parse numeric fields
