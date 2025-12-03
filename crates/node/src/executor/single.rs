@@ -141,6 +141,6 @@ impl Executor for SingleExecutor {
             Err(e) => Err(format!("{}", e)),
         };
 
-        ExecOutcome { result, elapsed, tx_count }
+        ExecOutcome::new(result, elapsed, tx_count)
     }
 }
