@@ -31,6 +31,48 @@ use crate::dag_consensus_runner::ShadowBlockSummary;
 #[cfg(feature = "dag-consensus")]
 use crate::dag_consensus_runner::HybridDagHandle;
 
+// T76.5: HybridBatchStats — statistics for structured logging per batch
+#[cfg(feature = "dag-consensus")]
+#[derive(Debug, Clone, Default)]
+pub struct HybridBatchStats {
+    /// Total number of tx hashes in the original batch
+    pub n: usize,
+    /// Number of hashes filtered by de-dup (already committed)
+    pub filtered_seen: usize,
+    /// Number of candidate hashes after de-dup filtering
+    pub candidate: usize,
+    /// Number of transactions with bytes successfully used (decoded)
+    pub used: usize,
+    /// Number of transactions dropped by nonce prefilter
+    pub bad_nonce_pref: usize,
+    /// Number of tx hashes with missing bytes
+    pub missing: usize,
+    /// Number of decode errors
+    pub decode_err: usize,
+    /// Total size in bytes of decoded transactions
+    pub size_bytes: usize,
+}
+
+#[cfg(feature = "dag-consensus")]
+impl HybridBatchStats {
+    /// Format the stats as the required structured log line per T76.5 spec.
+    pub fn to_log_string(&self, apply_ok: usize, apply_fail: usize) -> String {
+        format!(
+            "hybrid: n={} filtered_seen={} candidate={} used={} bad_nonce_pref={} missing={} decode_err={} apply_ok={} apply_fail={} size_bytes={}",
+            self.n,
+            self.filtered_seen,
+            self.candidate,
+            self.used,
+            self.bad_nonce_pref,
+            self.missing,
+            self.decode_err,
+            apply_ok,
+            apply_fail,
+            self.size_bytes
+        )
+    }
+}
+
 /// T60.0 — helper: log a compact summary of block tx hashes.
 /// This does **not** change behaviour; it only logs.
 fn log_block_shadow_debug(prefix: &str, height: u64, blk_opt: &Option<Block>) {
@@ -1143,6 +1185,16 @@ impl CoreRunnerHandle {
             log::info!("consensus: hybrid mode enabled with DAG ordering");
         }
 
+        // T76.5: Create the de-dup LRU cache for filtering already-committed tx hashes.
+        // This is created once before the loop and shared across all iterations.
+        #[cfg(feature = "dag-consensus")]
+        let hybrid_dedup_cache = Arc::new(crate::dag_consensus_runner::HybridDedupCache::new());
+        #[cfg(feature = "dag-consensus")]
+        {
+            let cache_size = hybrid_dedup_cache.capacity();
+            log::info!("consensus: hybrid de-dup LRU cache initialized (capacity={})", cache_size);
+        }
+
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
 			// expose T36.6 bridge metrics on /metrics immediately
@@ -1176,6 +1228,13 @@ impl CoreRunnerHandle {
                 let mut hybrid_batch_opt: Option<consensus_dag::OrderedBatch> = None;
                 #[cfg(feature = "dag-consensus")]
                 let mut resolved_tx_bytes: std::collections::HashMap<[u8; 32], bytes::Bytes> = std::collections::HashMap::new();
+                // T76.5: Track de-dup and nonce prefilter statistics per batch
+                #[cfg(feature = "dag-consensus")]
+                let mut hybrid_filtered_seen: usize = 0;
+                #[cfg(feature = "dag-consensus")]
+                let mut hybrid_candidate_count: usize = 0;
+                #[cfg(feature = "dag-consensus")]
+                let mut hybrid_bad_nonce_prefilter: usize = 0;
                 #[cfg(feature = "dag-consensus")]
                 if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
                     // Try to get hybrid DAG handle
@@ -1299,6 +1358,10 @@ impl CoreRunnerHandle {
                 // T70.0: Track executor time
                 #[cfg(feature = "metrics")]
                 let exec_start = std::time::Instant::now();
+                
+                // T76.5: Track hybrid batch stats for structured logging
+                #[cfg(feature = "dag-consensus")]
+                let mut hybrid_stats_opt: Option<HybridBatchStats> = None;
 
                 // T54 Step 9: Use the executor instead of run_one_slot
                 let outcome: Result<SlotOutcome, eezo_ledger::ConsensusError> = {
@@ -1317,48 +1380,47 @@ impl CoreRunnerHandle {
                     };
                     
                     // 1–2. Collect transactions for this block from the chosen source.
-                    // T76.3: If hybrid batch is available with tx data, process it directly.
+                    // T76.5: If hybrid batch is available, process with de-dup and nonce precheck.
                     // Otherwise, fall back to DAG source or mempool as before.
                     #[cfg(feature = "dag-consensus")]
                     let txs = if hybrid_batch_used {
                         if let Some(ref batch) = hybrid_batch_opt {
-                            // T76.3: Process hybrid batch with direct bytes decoding
+                            // T76.5: Process hybrid batch with de-dup filtering and nonce pre-check
                             let block_max_bytes = guard.cfg.block_byte_budget;
-                            let (hybrid_txs, used, missing, decode_err, size_bytes) = 
-                                Self::collect_txs_from_hybrid_batch_with_resolved(
+                            
+                            // T76.5: Use the new function with de-dup and nonce precheck
+                            let (hybrid_txs, stats) = 
+                                Self::collect_txs_from_hybrid_batch_with_dedup_and_nonce_check(
                                     batch,
                                     &resolved_tx_bytes,
                                     block_max_bytes,
+                                    &hybrid_dedup_cache,
+                                    &guard.accounts,
                                 );
                             
-                            // T76.3: Get total hash count for metrics
-                            let n = match &batch.tx_hashes {
-                                Some(hashes) => hashes.len(),
-                                None => batch.tx_count(),
-                            };
-                            
-                            // T76.3: Update metrics with new metric names per T76.3 requirements
+                            // T76.5: Update metrics from stats
                             crate::metrics::dag_hybrid_batches_used_inc();
-                            crate::metrics::dag_hybrid_hashes_total_inc_by(n as u64);
-                            crate::metrics::dag_hybrid_hashes_resolved_inc_by(used as u64);
-                            crate::metrics::dag_hybrid_hashes_missing_inc_by(missing as u64);
-                            crate::metrics::dag_hybrid_decode_errors_inc_by(decode_err as u64);
-                            // Also update legacy metrics for backwards compatibility
-                            crate::metrics::dag_hybrid_bytes_used_inc_by(used as u64);
-                            crate::metrics::dag_hybrid_bytes_missing_inc_by(missing as u64);
-                            crate::metrics::dag_hybrid_decode_error_inc_by(decode_err as u64);
+                            crate::metrics::dag_hybrid_hashes_total_inc_by(stats.n as u64);
+                            crate::metrics::dag_hybrid_hashes_resolved_inc_by(stats.used as u64);
+                            crate::metrics::dag_hybrid_hashes_missing_inc_by(stats.missing as u64);
+                            crate::metrics::dag_hybrid_decode_errors_inc_by(stats.decode_err as u64);
+                            // Legacy metrics for backwards compatibility
+                            crate::metrics::dag_hybrid_bytes_used_inc_by(stats.used as u64);
+                            crate::metrics::dag_hybrid_bytes_missing_inc_by(stats.missing as u64);
+                            crate::metrics::dag_hybrid_decode_error_inc_by(stats.decode_err as u64);
                             
-                            // T76.3: Required concise logging (exact format per spec)
-                            log::info!(
-                                "hybrid: dag batch n={} used={} missing={} decode_err={} size_bytes={}",
-                                n, used, missing, decode_err, size_bytes
-                            );
+                            // T76.5: Store stats for structured logging after execution
+                            // (apply_ok and apply_fail will be added after execution)
+                            hybrid_filtered_seen = stats.filtered_seen;
+                            hybrid_candidate_count = stats.candidate;
+                            hybrid_bad_nonce_prefilter = stats.bad_nonce_pref;
+                            hybrid_stats_opt = Some(stats);
                             
                             if !hybrid_txs.is_empty() {
                                 hybrid_txs
                             } else {
-                                // All txs failed to decode/lookup - fall back to mempool
-                                log::warn!("hybrid: all batch txs failed, falling back to mempool");
+                                // All txs failed to decode/lookup/nonce - fall back to mempool
+                                log::warn!("hybrid: all batch txs filtered/failed, falling back to mempool");
                                 crate::metrics::dag_hybrid_fallback_inc();
                                 Self::collect_from_mempool(&mut guard, block_max_tx)
                             }
@@ -1422,12 +1484,19 @@ impl CoreRunnerHandle {
                         crate::metrics::dag_hybrid_apply_fail_invalid_sender_inc_by(reasons.invalid_sender as u64);
                         crate::metrics::dag_hybrid_apply_fail_other_inc_by(reasons.other as u64);
                         
-                        // T76.5: Structured log line with per-reason failure breakdown
-                        // This complements the earlier "hybrid: dag batch n=..." log
-                        log::info!(
-                            "hybrid: batch apply apply_ok={} apply_fail={} bad_nonce={} insufficient_funds={} invalid_sender={} other={}",
-                            apply_ok, apply_fail, reasons.bad_nonce, reasons.insufficient_funds, reasons.invalid_sender, reasons.other
-                        );
+                        // T76.5: Emit single structured log line per batch with all diagnostics
+                        // Format: hybrid: n={n} filtered_seen={seen} candidate={cand} used={used} bad_nonce_pref={bn} missing={miss} decode_err={dec} apply_ok={ok} apply_fail={fail} size_bytes={sz}
+                        if let Some(ref stats) = hybrid_stats_opt {
+                            log::info!("{}", stats.to_log_string(apply_ok, apply_fail));
+                        }
+                        
+                        // T76.5: Also log per-reason failure breakdown for detailed debugging
+                        if apply_fail > 0 {
+                            log::debug!(
+                                "hybrid: apply failure breakdown bad_nonce={} insufficient_funds={} invalid_sender={} other={}",
+                                reasons.bad_nonce, reasons.insufficient_funds, reasons.invalid_sender, reasons.other
+                            );
+                        }
                     }
 
                     // T70.0: Record executor time
@@ -1573,6 +1642,18 @@ impl CoreRunnerHandle {
                                 // Build the summary once, reuse for both shadow and hybrid
                                 let block_hash = blk.header.hash();
                                 let tx_hashes: Vec<[u8; 32]> = blk.txs.iter().map(|tx| tx.hash()).collect();
+                                
+                                // T76.5: Record committed tx hashes in the de-dup cache.
+                                // This prevents re-processing of the same txs in future batches.
+                                // Uses canonical SignedTx.hash() as required by the spec.
+                                if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) && !tx_hashes.is_empty() {
+                                    hybrid_dedup_cache.record_committed_batch(&tx_hashes, height);
+                                    log::debug!(
+                                        "dag-hybrid: recorded {} committed tx hashes in de-dup cache at height={}",
+                                        tx_hashes.len(), height
+                                    );
+                                }
+                                
                                 // T76.3: Include tx bytes for zero-copy consumption.
                                 // TODO: Serialize txs to bytes for hybrid path.
                                 // For now, tx_bytes is None - hybrid path will use mempool fallback.
@@ -2208,6 +2289,164 @@ impl CoreRunnerHandle {
         }
 
         (txs, bytes_used, bytes_missing, decode_errors, total_size_bytes)
+    }
+
+    /// T76.5: Process an OrderedBatch with de-dup filtering and nonce pre-check.
+    ///
+    /// This is the full pipeline for hybrid batch consumption:
+    /// 1. Apply de-dup filter to remove already-committed tx hashes
+    /// 2. Decode transactions from bytes
+    /// 3. Apply nonce pre-check to remove stale-nonce transactions
+    ///
+    /// Returns a tuple of:
+    /// - `txs`: Successfully decoded and validated transactions
+    /// - Statistics: (n, filtered_seen, candidate, used, bad_nonce_pref, missing, decode_err, size_bytes)
+    #[cfg(feature = "dag-consensus")]
+    fn collect_txs_from_hybrid_batch_with_dedup_and_nonce_check(
+        batch: &consensus_dag::OrderedBatch,
+        resolved_bytes: &std::collections::HashMap<[u8; 32], bytes::Bytes>,
+        block_max_bytes: usize,
+        dedup_cache: &crate::dag_consensus_runner::HybridDedupCache,
+        accounts: &eezo_ledger::Accounts,
+    ) -> (Vec<SignedTx>, HybridBatchStats) {
+        // T76.5: Get original batch size
+        let n = match &batch.tx_hashes {
+            Some(hashes) => hashes.len(),
+            None => batch.tx_count(),
+        };
+
+        // T76.5: Step 1 - Apply de-dup filter
+        let (candidate_hashes, filtered_seen) = if let Some(hashes) = &batch.tx_hashes {
+            dedup_cache.filter_batch(hashes)
+        } else {
+            // No hashes to filter - collect all entries
+            (Vec::new(), 0)
+        };
+
+        // T76.5: Update metrics for de-dup filtering
+        crate::metrics::dag_hybrid_seen_before_inc_by(filtered_seen as u64);
+        let candidate = candidate_hashes.len();
+        crate::metrics::dag_hybrid_candidate_inc_by(candidate as u64);
+
+        // If all hashes were filtered out, return early
+        if candidate == 0 && filtered_seen > 0 {
+            log::debug!(
+                "hybrid: all {} hashes filtered by de-dup, no candidates to process",
+                filtered_seen
+            );
+            return (Vec::new(), HybridBatchStats {
+                n,
+                filtered_seen,
+                candidate: 0,
+                used: 0,
+                bad_nonce_pref: 0,
+                missing: 0,
+                decode_err: 0,
+                size_bytes: 0,
+            });
+        }
+
+        // T76.5: Step 2 - Decode transactions from filtered candidates
+        // Build a temporary batch with only the candidate hashes
+        let mut txs: Vec<SignedTx> = Vec::new();
+        let mut bytes_used: usize = 0;
+        let mut bytes_missing: usize = 0;
+        let mut decode_errors: usize = 0;
+        let mut total_size_bytes: usize = 0;
+        let mut current_bytes: usize = 0;
+
+        for hash in &candidate_hashes {
+            // Check if we've exceeded block max_bytes cap
+            if current_bytes >= block_max_bytes {
+                log::debug!(
+                    "hybrid: block max_bytes cap reached ({} >= {}), leaving remainder",
+                    current_bytes, block_max_bytes
+                );
+                break;
+            }
+
+            // Try to get bytes from batch or resolved
+            let idx_opt = batch.tx_hashes.as_ref()
+                .and_then(|h| h.iter().position(|hh| hh == hash));
+            let batch_bytes = idx_opt.and_then(|idx| {
+                batch.tx_bytes.as_ref()
+                    .and_then(|v| v.get(idx))
+                    .and_then(|opt| opt.as_ref())
+            });
+            
+            if let Some(bytes) = batch_bytes.or_else(|| resolved_bytes.get(hash)) {
+                let tx_size = bytes.len();
+                
+                if current_bytes + tx_size > block_max_bytes {
+                    log::debug!(
+                        "hybrid: tx would exceed block_max_bytes ({} + {} > {}), stopping",
+                        current_bytes, tx_size, block_max_bytes
+                    );
+                    break;
+                }
+
+                match crate::dag_runner::parse_signed_tx_from_envelope(bytes) {
+                    Some(stx) => {
+                        txs.push(stx);
+                        bytes_used += 1;
+                        current_bytes += tx_size;
+                        total_size_bytes += tx_size;
+                    }
+                    None => {
+                        decode_errors += 1;
+                        log::warn!(
+                            "hybrid: decode error for tx hash=0x{}",
+                            hex::encode(&hash[..4])
+                        );
+                    }
+                }
+            } else {
+                bytes_missing += 1;
+                log::debug!(
+                    "hybrid: missing bytes for tx hash=0x{}",
+                    hex::encode(&hash[..4])
+                );
+            }
+        }
+
+        // T76.5: Step 3 - Apply nonce pre-check
+        let (valid_indices, bad_nonce_count) = 
+            crate::dag_consensus_runner::nonce_precheck(&txs, accounts);
+        
+        // T76.5: Update metrics for nonce prefilter
+        crate::metrics::dag_hybrid_bad_nonce_prefilter_inc_by(bad_nonce_count as u64);
+
+        // Filter txs to only include valid indices, avoiding clones by using indices
+        // to directly move elements from the original vector.
+        let final_txs: Vec<SignedTx> = if valid_indices.len() == txs.len() {
+            // All txs are valid - no filtering needed, move the entire vector
+            txs
+        } else {
+            // Some txs were filtered - need to select only valid ones
+            // Create a mask of which indices to keep
+            let mut keep_mask = vec![false; txs.len()];
+            for &idx in &valid_indices {
+                keep_mask[idx] = true;
+            }
+            // Drain and filter in one pass
+            txs.into_iter()
+                .enumerate()
+                .filter_map(|(i, tx)| if keep_mask[i] { Some(tx) } else { None })
+                .collect()
+        };
+
+        let stats = HybridBatchStats {
+            n,
+            filtered_seen,
+            candidate,
+            used: bytes_used,
+            bad_nonce_pref: bad_nonce_count,
+            missing: bytes_missing,
+            decode_err: decode_errors,
+            size_bytes: total_size_bytes,
+        };
+
+        (final_txs, stats)
     }
 
     /// T63.1: Get a snapshot of the current accounts and supply for dry-run execution.

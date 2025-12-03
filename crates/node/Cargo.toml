@@ -56,6 +56,9 @@ smallvec = "1.13"
 # T73.1: DashMap for STM executor's multi-version hashmap (optional, stm-exec feature)
 dashmap = { version = "6.1", optional = true }
 
+# T76.5: LRU cache for hybrid de-dup filter
+lru = "0.12"
+
 # Metrics / logging
 prometheus = "0.13"
 lazy_static = "1.5"
