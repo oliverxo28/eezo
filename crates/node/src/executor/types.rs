@@ -8,8 +8,74 @@
 //! Consensus runner will call `Executor::execute_block(...)`.
 
 use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use eezo_ledger::{Block, SignedTx};
+
+// =======================================================================
+// T76.5 — Per-reason apply failure tracking
+// =======================================================================
+
+/// T76.5: Tracks per-reason apply failure counts for hybrid batch diagnostics.
+/// Uses atomic counters for thread-safe parallel execution.
+#[derive(Debug, Default)]
+pub struct ApplyFailureReasons {
+    /// BadNonce errors (expected vs got nonce mismatch)
+    pub bad_nonce: AtomicUsize,
+    /// InsufficientFunds errors (balance too low for amount + fee)
+    pub insufficient_funds: AtomicUsize,
+    /// InvalidSender errors (sender derivation failed)
+    pub invalid_sender: AtomicUsize,
+    /// Any other errors not categorized above
+    pub other: AtomicUsize,
+}
+
+impl ApplyFailureReasons {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Increment the appropriate counter based on error type
+    pub fn record_error(&self, err: &eezo_ledger::tx::TxStateError) {
+        match err {
+            eezo_ledger::tx::TxStateError::BadNonce { .. } => {
+                self.bad_nonce.fetch_add(1, Ordering::Relaxed);
+            }
+            eezo_ledger::tx::TxStateError::InsufficientFunds { .. } => {
+                self.insufficient_funds.fetch_add(1, Ordering::Relaxed);
+            }
+            eezo_ledger::tx::TxStateError::InvalidSender => {
+                self.invalid_sender.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    
+    /// Get the current counts as a snapshot
+    pub fn snapshot(&self) -> ApplyFailureCounts {
+        ApplyFailureCounts {
+            bad_nonce: self.bad_nonce.load(Ordering::Relaxed),
+            insufficient_funds: self.insufficient_funds.load(Ordering::Relaxed),
+            invalid_sender: self.invalid_sender.load(Ordering::Relaxed),
+            other: self.other.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// T76.5: Non-atomic snapshot of failure counts for reporting
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ApplyFailureCounts {
+    pub bad_nonce: usize,
+    pub insufficient_funds: usize,
+    pub invalid_sender: usize,
+    pub other: usize,
+}
+
+impl ApplyFailureCounts {
+    /// Total failure count
+    pub fn total(&self) -> usize {
+        self.bad_nonce + self.insufficient_funds + self.invalid_sender + self.other
+    }
+}
 
 // =======================================================================
 // T54 — PARALLEL EXECUTOR CORE TYPES
@@ -64,6 +130,10 @@ pub struct ExecOutcome {
     /// In legacy mode (partial_failure_ok=false), this is 0 since any failure causes
     /// the entire block to fail (and tx_count becomes 0).
     pub apply_fail: usize,
+    
+    /// T76.5: Per-reason breakdown of apply failures.
+    /// Only populated when partial_failure_ok=true.
+    pub failure_reasons: ApplyFailureCounts,
 }
 
 impl ExecOutcome {
@@ -71,7 +141,14 @@ impl ExecOutcome {
     /// This constructor assumes apply_ok = tx_count and apply_fail = 0, which is correct
     /// for legacy mode where any tx failure causes the entire block to fail.
     pub fn new(result: Result<Block, String>, elapsed: Duration, tx_count: usize) -> Self {
-        Self { result, elapsed, tx_count, apply_ok: tx_count, apply_fail: 0 }
+        Self { 
+            result, 
+            elapsed, 
+            tx_count, 
+            apply_ok: tx_count, 
+            apply_fail: 0,
+            failure_reasons: ApplyFailureCounts::default(),
+        }
     }
 
     /// T76.4: Create outcome with partial failure statistics.
@@ -82,7 +159,33 @@ impl ExecOutcome {
         apply_ok: usize,
         apply_fail: usize,
     ) -> Self {
-        Self { result, elapsed, tx_count, apply_ok, apply_fail }
+        Self { 
+            result, 
+            elapsed, 
+            tx_count, 
+            apply_ok, 
+            apply_fail,
+            failure_reasons: ApplyFailureCounts::default(),
+        }
+    }
+    
+    /// T76.5: Create outcome with full failure reason breakdown.
+    pub fn with_failure_reasons(
+        result: Result<Block, String>,
+        elapsed: Duration,
+        tx_count: usize,
+        apply_ok: usize,
+        apply_fail: usize,
+        failure_reasons: ApplyFailureCounts,
+    ) -> Self {
+        Self { 
+            result, 
+            elapsed, 
+            tx_count, 
+            apply_ok, 
+            apply_fail,
+            failure_reasons,
+        }
     }
 }
 

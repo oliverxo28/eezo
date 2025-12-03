@@ -2387,11 +2387,112 @@ pub fn dag_hybrid_apply_fail_inc_by(count: u64) {
     }
 }
 
+// -----------------------------------------------------------------------------
+// T76.5 — Per-reason apply failure metrics
+// -----------------------------------------------------------------------------
+
+/// Counter: BadNonce failures from hybrid DAG batches.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_APPLY_FAIL_BAD_NONCE: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_apply_fail_bad_nonce_total",
+        "Transactions that failed due to bad nonce in hybrid DAG batches"
+    )
+    .unwrap()
+});
+
+/// Counter: InsufficientFunds failures from hybrid DAG batches.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_APPLY_FAIL_INSUFFICIENT_FUNDS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_apply_fail_insufficient_funds_total",
+        "Transactions that failed due to insufficient funds in hybrid DAG batches"
+    )
+    .unwrap()
+});
+
+/// Counter: InvalidSender failures from hybrid DAG batches.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_APPLY_FAIL_INVALID_SENDER: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_apply_fail_invalid_sender_total",
+        "Transactions that failed due to invalid sender in hybrid DAG batches"
+    )
+    .unwrap()
+});
+
+/// Counter: Other failures from hybrid DAG batches.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_APPLY_FAIL_OTHER: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_apply_fail_other_total",
+        "Transactions that failed due to other reasons in hybrid DAG batches"
+    )
+    .unwrap()
+});
+
+/// Helper: Increment bad_nonce failure counter.
+#[inline]
+pub fn dag_hybrid_apply_fail_bad_nonce_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_APPLY_FAIL_BAD_NONCE.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment insufficient_funds failure counter.
+#[inline]
+pub fn dag_hybrid_apply_fail_insufficient_funds_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_APPLY_FAIL_INSUFFICIENT_FUNDS.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment invalid_sender failure counter.
+#[inline]
+pub fn dag_hybrid_apply_fail_invalid_sender_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_APPLY_FAIL_INVALID_SENDER.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment other failure counter.
+#[inline]
+pub fn dag_hybrid_apply_fail_other_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_APPLY_FAIL_OTHER.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
 /// Eagerly register T76.4 DAG hybrid apply metrics so they appear on /metrics at boot.
 #[cfg(feature = "metrics")]
 pub fn register_dag_hybrid_apply_metrics() {
     let _ = &*EEZO_DAG_HYBRID_APPLY_OK_TOTAL;
     let _ = &*EEZO_DAG_HYBRID_APPLY_FAIL_TOTAL;
+    // T76.5: Also register per-reason failure metrics
+    let _ = &*EEZO_DAG_HYBRID_APPLY_FAIL_BAD_NONCE;
+    let _ = &*EEZO_DAG_HYBRID_APPLY_FAIL_INSUFFICIENT_FUNDS;
+    let _ = &*EEZO_DAG_HYBRID_APPLY_FAIL_INVALID_SENDER;
+    let _ = &*EEZO_DAG_HYBRID_APPLY_FAIL_OTHER;
 }
 
 /// No-op version when metrics feature is disabled.

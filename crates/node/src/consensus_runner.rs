@@ -1405,21 +1405,28 @@ impl CoreRunnerHandle {
                     // 4. Execute block using the executor
                     let exec_outcome = exec.execute_block(&mut guard, exec_input);
                     
-                    // T76.4: Log and emit metrics for hybrid batch apply diagnostics
+                    // T76.4/T76.5: Log and emit metrics for hybrid batch apply diagnostics
                     #[cfg(feature = "dag-consensus")]
                     if hybrid_batch_used {
                         let apply_ok = exec_outcome.apply_ok;
                         let apply_fail = exec_outcome.apply_fail;
+                        let reasons = &exec_outcome.failure_reasons;
                         
                         // T76.4: Emit apply_ok and apply_fail metrics
                         crate::metrics::dag_hybrid_apply_ok_inc_by(apply_ok as u64);
                         crate::metrics::dag_hybrid_apply_fail_inc_by(apply_fail as u64);
                         
-                        // T76.4: Structured log line for batch apply diagnostics
+                        // T76.5: Emit per-reason failure metrics
+                        crate::metrics::dag_hybrid_apply_fail_bad_nonce_inc_by(reasons.bad_nonce as u64);
+                        crate::metrics::dag_hybrid_apply_fail_insufficient_funds_inc_by(reasons.insufficient_funds as u64);
+                        crate::metrics::dag_hybrid_apply_fail_invalid_sender_inc_by(reasons.invalid_sender as u64);
+                        crate::metrics::dag_hybrid_apply_fail_other_inc_by(reasons.other as u64);
+                        
+                        // T76.5: Structured log line with per-reason failure breakdown
                         // This complements the earlier "hybrid: dag batch n=..." log
                         log::info!(
-                            "hybrid: batch apply apply_ok={} apply_fail={}",
-                            apply_ok, apply_fail
+                            "hybrid: batch apply apply_ok={} apply_fail={} bad_nonce={} insufficient_funds={} invalid_sender={} other={}",
+                            apply_ok, apply_fail, reasons.bad_nonce, reasons.insufficient_funds, reasons.invalid_sender, reasons.other
                         );
                     }
 

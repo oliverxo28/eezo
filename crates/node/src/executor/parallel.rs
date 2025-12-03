@@ -20,6 +20,7 @@ use smallvec::SmallVec;
 use eezo_ledger::{SignedTx, SingleNode};
 use eezo_ledger::Block;
 use crate::executor::{ExecInput, ExecOutcome, Executor};
+use crate::executor::types::ApplyFailureReasons;
 use eezo_ledger::tx::{Access, AccessTarget};
 
 // optional metrics
@@ -471,6 +472,9 @@ impl Executor for ParallelExecutor {
         let apply_ok_count = AtomicUsize::new(0);
         let apply_fail_count = AtomicUsize::new(0);
         
+        // T76.5: Per-reason failure tracking
+        let failure_reasons = ApplyFailureReasons::new();
+        
         for wave in waves {
             let wave_start = Instant::now();
 
@@ -484,6 +488,8 @@ impl Executor for ParallelExecutor {
                         }
                         Err(e) => {
                             apply_fail_count.fetch_add(1, Ordering::Relaxed);
+                            // T76.5: Record the specific failure reason
+                            failure_reasons.record_error(&e);
                             // In partial failure mode, we log the error but don't abort
                             log::debug!("parallel executor: tx apply skipped (partial mode): {:?}", e);
                         }
@@ -603,9 +609,16 @@ impl Executor for ParallelExecutor {
             (finalize_elapsed.as_secs_f64() / elapsed.as_secs_f64()) * 100.0
         );
 
-        // T76.4: Return with partial failure stats when in partial mode
+        // T76.4/T76.5: Return with partial failure stats and per-reason breakdown when in partial mode
         if input.partial_failure_ok {
-            ExecOutcome::with_partial_stats(block, elapsed, tx_count, final_apply_ok, final_apply_fail)
+            ExecOutcome::with_failure_reasons(
+                block, 
+                elapsed, 
+                tx_count, 
+                final_apply_ok, 
+                final_apply_fail,
+                failure_reasons.snapshot(),
+            )
         } else {
             ExecOutcome::new(block, elapsed, tx_count)
         }
