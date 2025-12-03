@@ -2125,6 +2125,50 @@ pub fn register_dag_ordered_metrics() {
 // T76.3 — DAG hybrid bytes consumption metrics
 // -----------------------------------------------------------------------------
 
+/// Counter: Total tx hashes received from DAG batches (before resolution).
+/// This is the total count of tx hashes in all DAG batches passed to the hybrid consumer.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_HASHES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_hashes_total",
+        "Total tx hashes received from DAG batches (before resolution)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total tx hashes that were successfully resolved (bytes available + decoded successfully).
+/// Aliased as "hashes_resolved" per T76.3 requirements.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_HASHES_RESOLVED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_hashes_resolved_total",
+        "Total tx hashes successfully resolved from DAG batch (bytes available and decoded)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total tx hashes where bytes were missing from DAG batch.
+/// Aliased as "hashes_missing" per T76.3 requirements.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_HASHES_MISSING_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_hashes_missing_total",
+        "Total tx hashes where bytes were missing from DAG batch"
+    )
+    .unwrap()
+});
+
+/// Counter: Total transactions where decoding the tx bytes failed.
+/// Aliased as "decode_errors" per T76.3 requirements.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_DECODE_ERRORS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_decode_errors_total",
+        "Total transactions where decoding the tx bytes from DAG batch failed"
+    )
+    .unwrap()
+});
+
 /// Counter: Total transactions where bytes were directly available from DAG batch.
 #[cfg(feature = "metrics")]
 pub static EEZO_DAG_HYBRID_BYTES_USED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
@@ -2221,9 +2265,65 @@ pub fn dag_hybrid_decode_error_inc_by(count: u64) {
     }
 }
 
+/// Helper: Increment total hashes counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_hashes_total_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_HASHES_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment resolved hashes counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_hashes_resolved_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_HASHES_RESOLVED_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment missing hashes counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_hashes_missing_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_HASHES_MISSING_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment decode errors counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_decode_errors_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_DECODE_ERRORS_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
 /// Eagerly register T76.3 DAG hybrid bytes metrics so they appear on /metrics at boot.
 #[cfg(feature = "metrics")]
 pub fn register_dag_hybrid_bytes_metrics() {
+    let _ = &*EEZO_DAG_HYBRID_HASHES_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_HASHES_RESOLVED_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_HASHES_MISSING_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_DECODE_ERRORS_TOTAL;
     let _ = &*EEZO_DAG_HYBRID_BYTES_USED_TOTAL;
     let _ = &*EEZO_DAG_HYBRID_BYTES_MISSING_TOTAL;
     let _ = &*EEZO_DAG_HYBRID_DECODE_ERROR_TOTAL;

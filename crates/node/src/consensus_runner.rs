@@ -709,6 +709,7 @@ impl CoreRunnerHandle {
                                         height,
                                         block_hash,
                                         tx_hashes,
+                                        tx_bytes: None, // T76.3: Will be populated when available
                                         round: None,
                                         timestamp_ms: Some(blk.header.timestamp_ms),
                                     };
@@ -1305,16 +1306,26 @@ impl CoreRunnerHandle {
                             let (hybrid_txs, used, missing, decode_err, size_bytes) = 
                                 Self::collect_txs_from_hybrid_batch(batch, &mut guard, block_max_bytes);
                             
-                            // Update metrics
+                            // T76.3: Get total hash count for metrics
+                            let n = match &batch.tx_hashes {
+                                Some(hashes) => hashes.len(),
+                                None => batch.tx_count(),
+                            };
+                            
+                            // T76.3: Update metrics with new metric names per T76.3 requirements
                             crate::metrics::dag_hybrid_batches_used_inc();
+                            crate::metrics::dag_hybrid_hashes_total_inc_by(n as u64);
+                            crate::metrics::dag_hybrid_hashes_resolved_inc_by(used as u64);
+                            crate::metrics::dag_hybrid_hashes_missing_inc_by(missing as u64);
+                            crate::metrics::dag_hybrid_decode_errors_inc_by(decode_err as u64);
+                            // Also update legacy metrics for backwards compatibility
                             crate::metrics::dag_hybrid_bytes_used_inc_by(used as u64);
                             crate::metrics::dag_hybrid_bytes_missing_inc_by(missing as u64);
                             crate::metrics::dag_hybrid_decode_error_inc_by(decode_err as u64);
                             
-                            // T76.3: Required logging
-                            let n = batch.tx_count();
+                            // T76.3: Required concise logging (exact format per spec)
                             log::info!(
-                                "hybrid: dag batch n={} used={} bytes_missing={} decode_err={} size_bytes={}",
+                                "hybrid: dag batch n={} used={} missing={} decode_err={} size_bytes={}",
                                 n, used, missing, decode_err, size_bytes
                             );
                             
