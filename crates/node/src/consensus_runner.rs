@@ -1461,32 +1461,44 @@ impl CoreRunnerHandle {
                         let _ = compute_block_body_hash_with_gpu(&blk_opt, height);
 
                         // T75.0: Send committed block to shadow DAG (if enabled)
+                        // T76.2: Also feed hybrid DAG handle for ordered batch consumption.
                         // This must not block or affect the main consensus path.
                         #[cfg(feature = "dag-consensus")]
                         {
                             if let Some(ref blk) = blk_opt {
+                                // Build the summary once, reuse for both shadow and hybrid
+                                let block_hash = blk.header.hash();
+                                let tx_hashes: Vec<[u8; 32]> = blk.txs.iter().map(|tx| tx.hash()).collect();
+                                let summary = ShadowBlockSummary {
+                                    height,
+                                    block_hash,
+                                    tx_hashes,
+                                    round: None,
+                                    timestamp_ms: Some(blk.header.timestamp_ms),
+                                };
+
                                 // Try to get the shadow DAG sender
                                 let sender_opt: Option<tokio::sync::mpsc::Sender<ShadowBlockSummary>> = 
                                     shadow_dag_c.lock().await.clone();
                                 if let Some(sender) = sender_opt {
-                                    // Build the summary
-                                    let block_hash = blk.header.hash();
-                                    let tx_hashes: Vec<[u8; 32]> = blk.txs.iter().map(|tx| tx.hash()).collect();
-                                    let summary = ShadowBlockSummary {
-                                        height,
-                                        block_hash,
-                                        tx_hashes,
-                                        round: None,
-                                        timestamp_ms: Some(blk.header.timestamp_ms),
-                                    };
-
                                     // Send non-blocking; log warning if channel is full/closed
-                                    if let Err(e) = sender.try_send(summary) {
+                                    if let Err(e) = sender.try_send(summary.clone()) {
                                         log::warn!(
                                             "dag-consensus: shadow send failed at height={}: {}",
                                             height, e
                                         );
                                     }
+                                }
+
+                                // T76.2: Also feed the hybrid DAG handle (if attached).
+                                // This allows the DAG to order batches for the next block.
+                                let hybrid_opt: Option<Arc<HybridDagHandle>> = hybrid_dag_c.lock().await.clone();
+                                if let Some(hybrid) = hybrid_opt {
+                                    hybrid.submit_committed_block_async(&summary).await;
+                                    log::debug!(
+                                        "dag-hybrid: fed committed block at height={} with {} txs",
+                                        height, summary.tx_hashes.len()
+                                    );
                                 }
                             }
                         }

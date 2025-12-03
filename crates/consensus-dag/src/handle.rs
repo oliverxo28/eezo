@@ -271,6 +271,13 @@ impl DagConsensusHandle {
         self.ordered_queue.write().pop_front()
     }
 
+    /// Peek at the number of ordered batches available without consuming them.
+    ///
+    /// T76.2: Used for visibility metrics - returns the current queue length.
+    pub fn peek_ordered_queue_len(&self) -> usize {
+        self.ordered_queue.read().len()
+    }
+
     /// Get statistics about the DAG consensus state.
     pub fn stats(&self) -> DagStats {
         let mut stats = self.stats.read().clone();
@@ -533,6 +540,34 @@ mod tests {
 
         // No payloads submitted, queue should be empty
         assert!(handle.try_next_ordered_batch().is_none());
+    }
+
+    /// T76.2: Test peek_ordered_queue_len does not consume batches.
+    #[test]
+    fn test_handle_peek_queue_len_non_consuming() {
+        let config = DagConsensusConfig::default();
+        let handle = DagConsensusHandle::new(config);
+
+        // Initially empty
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+
+        // Submit a payload that triggers ordering
+        let author = AuthorId([1u8; 32]);
+        let payload = DagPayload::new(vec![1, 2, 3], author);
+        handle.submit_payload(payload).unwrap();
+
+        // Should have 1 batch ready now (threshold=1 by default)
+        assert_eq!(handle.peek_ordered_queue_len(), 1);
+
+        // Peek again - should still be 1 (non-consuming)
+        assert_eq!(handle.peek_ordered_queue_len(), 1);
+
+        // Now consume it
+        let batch = handle.try_next_ordered_batch();
+        assert!(batch.is_some());
+
+        // After consuming, peek should show 0
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
     }
 
     /// Test multi-round ordering.
