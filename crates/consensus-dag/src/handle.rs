@@ -55,6 +55,9 @@ impl DagPayload {
 ///
 /// Wraps one or more `OrderedBundle` values that have been finalized
 /// and are ready to be passed to the executor.
+///
+/// T76.3: Now optionally carries tx_hashes and tx_bytes for zero-copy,
+/// no-miss consumption by the hybrid proposer.
 #[derive(Clone, Debug)]
 pub struct OrderedBatch {
     /// The round that was finalized
@@ -62,6 +65,16 @@ pub struct OrderedBatch {
 
     /// Ordered bundles in this batch (usually one per round)
     pub bundles: Vec<OrderedBundle>,
+
+    /// T76.3: Optional ordered list of tx hashes.
+    /// When present, allows direct tx identity without looking up the bundle vertices.
+    pub tx_hashes: Option<Vec<[u8; 32]>>,
+
+    /// T76.3: Optional raw tx bytes corresponding to each hash.
+    /// When present, enables zero-copy tx consumption without mempool lookup.
+    /// Vec<Option<Bytes>> where index corresponds to tx_hashes index.
+    /// None entries indicate missing bytes (fallback to mempool needed).
+    pub tx_bytes: Option<Vec<Option<bytes::Bytes>>>,
 }
 
 impl OrderedBatch {
@@ -71,6 +84,23 @@ impl OrderedBatch {
         Self {
             round,
             bundles: vec![bundle],
+            tx_hashes: None,
+            tx_bytes: None,
+        }
+    }
+
+    /// T76.3: Create a new ordered batch with tx hashes and optional bytes.
+    pub fn with_tx_data(
+        round: u64,
+        bundles: Vec<OrderedBundle>,
+        tx_hashes: Vec<[u8; 32]>,
+        tx_bytes: Option<Vec<Option<bytes::Bytes>>>,
+    ) -> Self {
+        Self {
+            round,
+            bundles,
+            tx_hashes: Some(tx_hashes),
+            tx_bytes,
         }
     }
 
@@ -87,6 +117,62 @@ impl OrderedBatch {
     /// Check if the batch is empty.
     pub fn is_empty(&self) -> bool {
         self.bundles.is_empty() || self.bundles.iter().all(|b| b.is_empty())
+    }
+
+    /// T76.3: Iterator over (hash, Option<bytes>) pairs for zero-copy consumption.
+    /// Yields tuples of (tx_hash, Option<&Bytes>) for each transaction.
+    /// Falls back to empty iterator if no tx_hashes are present.
+    pub fn iter_tx_entries(&self) -> impl Iterator<Item = ([u8; 32], Option<&bytes::Bytes>)> {
+        let tx_hashes = self.tx_hashes.as_ref();
+        let tx_bytes = self.tx_bytes.as_ref();
+        
+        tx_hashes
+            .map(|hashes| {
+                hashes.iter().enumerate().map(move |(i, hash)| {
+                    let bytes_opt = tx_bytes.and_then(|v| v.get(i)).and_then(|b| b.as_ref());
+                    (*hash, bytes_opt)
+                }).collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+            .into_iter()
+    }
+
+    /// T76.3: Check if all transactions have bytes available.
+    pub fn has_all_bytes(&self) -> bool {
+        match (&self.tx_hashes, &self.tx_bytes) {
+            (Some(hashes), Some(bytes)) => {
+                bytes.len() == hashes.len() && bytes.iter().all(|b| b.is_some())
+            }
+            _ => false,
+        }
+    }
+
+    /// T76.3: Count how many transactions have bytes available.
+    pub fn bytes_available_count(&self) -> usize {
+        match &self.tx_bytes {
+            None => 0,
+            Some(bytes) => bytes.iter().filter(|b| b.is_some()).count(),
+        }
+    }
+
+    /// T76.3: Count how many transactions are missing bytes.
+    pub fn bytes_missing_count(&self) -> usize {
+        match (&self.tx_hashes, &self.tx_bytes) {
+            (Some(hashes), Some(bytes)) => {
+                let available = bytes.iter().filter(|b| b.is_some()).count();
+                hashes.len().saturating_sub(available)
+            }
+            (Some(hashes), None) => hashes.len(),
+            _ => 0,
+        }
+    }
+
+    /// T76.3: Get the total size in bytes of all available tx_bytes.
+    pub fn total_bytes_size(&self) -> usize {
+        match &self.tx_bytes {
+            None => 0,
+            Some(bytes) => bytes.iter().filter_map(|b| b.as_ref()).map(|b| b.len()).sum(),
+        }
     }
 }
 
