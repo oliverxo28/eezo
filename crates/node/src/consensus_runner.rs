@@ -1944,6 +1944,30 @@ impl CoreRunnerHandle {
         log::info!("consensus: core_runner: shadow DAG sender attached");
     }
 
+    /// T76.1: attach or clear the hybrid DAG handle for consuming ordered batches.
+    ///
+    /// This is called from main.rs after the hybrid DAG runner is spawned.
+    /// When attached, the block build loop will try to consume ordered batches
+    /// from this handle in hybrid mode (EEZO_CONSENSUS_MODE=dag-hybrid).
+    #[cfg(feature = "dag-consensus")]
+    pub async fn set_hybrid_dag_handle(
+        self: &Arc<Self>,
+        handle: Option<Arc<crate::dag_consensus_runner::HybridDagHandle>>,
+    ) {
+        {
+            let mut guard = self.hybrid_dag_handle.lock().await;
+            *guard = handle.clone();
+        }
+        match handle {
+            Some(_) => {
+                log::info!("consensus: core_runner: hybrid DAG handle attached");
+            }
+            None => {
+                log::info!("consensus: core_runner: hybrid DAG handle absent");
+            }
+        }
+    }
+
     /// Request stop and wait for the loop to finish.
     pub async fn stop(self: &Arc<Self>) {
         // Use Relaxed ordering
