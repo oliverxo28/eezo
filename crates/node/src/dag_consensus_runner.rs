@@ -1070,4 +1070,77 @@ mod tests {
         let empty: Vec<[u8; 32]> = vec![];
         assert!(DagConsensusTracker::compare_tx_hashes(&empty, Some(&empty)));
     }
+
+    // =========================================================================
+    // T76.1: HybridDagHandle tests
+    // =========================================================================
+    
+    #[test]
+    fn test_hybrid_dag_handle_new() {
+        let handle = HybridDagHandle::new();
+        // Initially should have no ordered batches
+        assert!(handle.try_next_ordered_batch().is_none());
+        // Initial round is 1 (not 0) according to DagConsensusHandle
+        let round = handle.current_round();
+        assert!(round >= 1); // Round starts at 1
+    }
+    
+    #[test]
+    fn test_hybrid_dag_handle_stats() {
+        let handle = HybridDagHandle::new();
+        let stats = handle.stats();
+        // Fresh handle should have no vertices
+        assert_eq!(stats.vertices_stored, 0);
+        assert_eq!(stats.batches_ordered, 0);
+    }
+    
+    #[test]
+    fn test_hybrid_dag_handle_tracker() {
+        let handle = HybridDagHandle::new();
+        let tracker = handle.tracker();
+        // Should be able to access the tracker
+        let tracker_guard = tracker.blocking_read();
+        let status = tracker_guard.current_status();
+        // Fresh tracker should be in sync (no blocks yet)
+        assert!(status.in_sync);
+        assert_eq!(status.lagging_by, 0);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_hybrid_batches_used_metric_increments() {
+        // Test that calling dag_hybrid_batches_used_inc() increments the counter
+        use crate::metrics::{dag_hybrid_batches_used_inc, EEZO_DAG_HYBRID_BATCHES_USED_TOTAL};
+        
+        let before = EEZO_DAG_HYBRID_BATCHES_USED_TOTAL.get();
+        dag_hybrid_batches_used_inc();
+        let after = EEZO_DAG_HYBRID_BATCHES_USED_TOTAL.get();
+        
+        assert_eq!(after, before + 1);
+    }
+    
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_hybrid_fallback_metric_increments() {
+        // Test that calling dag_hybrid_fallback_inc() increments the counter
+        use crate::metrics::{dag_hybrid_fallback_inc, EEZO_DAG_HYBRID_FALLBACK_TOTAL};
+        
+        let before = EEZO_DAG_HYBRID_FALLBACK_TOTAL.get();
+        dag_hybrid_fallback_inc();
+        let after = EEZO_DAG_HYBRID_FALLBACK_TOTAL.get();
+        
+        assert_eq!(after, before + 1);
+    }
+    
+    #[test]
+    fn test_hybrid_dag_handle_try_next_ordered_batch_returns_none_when_empty() {
+        // When no batches have been submitted, try_next_ordered_batch should return None
+        let handle = HybridDagHandle::new();
+        
+        // Multiple calls should all return None
+        assert!(handle.try_next_ordered_batch().is_none());
+        assert!(handle.try_next_ordered_batch().is_none());
+        
+        // This tests the "fallback (reason=no_batch)" path
+    }
 }
