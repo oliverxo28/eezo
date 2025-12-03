@@ -988,13 +988,13 @@ impl HybridDedupCache {
     /// Batches with round <= node_start_round are considered stale and should be dropped.
     /// This prevents processing pre-start DAG batches that contain already-committed txs.
     pub fn set_node_start_round(&self, round: u64) {
-        self.node_start_round.store(round, std::sync::atomic::Ordering::Relaxed);
+        self.node_start_round.store(round, std::sync::atomic::Ordering::Release);
         log::info!("dag-hybrid: node_start_round set to {}", round);
     }
 
     /// T76.6: Get the node start round.
     pub fn node_start_round(&self) -> u64 {
-        self.node_start_round.load(std::sync::atomic::Ordering::Relaxed)
+        self.node_start_round.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// T76.6: Check if a batch is stale (round <= node_start_round).

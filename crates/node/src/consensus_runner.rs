@@ -1262,11 +1262,12 @@ impl CoreRunnerHandle {
                                     // T76.6: Check if batch is stale (round <= node_start_round)
                                     if hybrid_dedup_cache.is_stale_batch(batch.round) {
                                         log::info!(
-                                            "hybrid: dropping stale batch (reason=pre_start_round, round={}, node_start_round={})",
+                                            "hybrid: dropping stale batch (reason=pre-start-round, round={}, node_start_round={})",
                                             batch.round, hybrid_dedup_cache.node_start_round()
                                         );
                                         crate::metrics::dag_hybrid_stale_batches_dropped_inc();
-                                        // Continue to next slot without fallback - stale batch is expected
+                                        // Stale batch is dropped - hybrid_batch_used stays false,
+                                        // so normal tx collection (DAG source or mempool) will proceed
                                     } else {
                                         log::debug!(
                                             "hybrid: dag batch available (n_txs={}, round={}, has_hashes={})",
@@ -1438,7 +1439,11 @@ impl CoreRunnerHandle {
                             hybrid_filtered_seen = stats.filtered_seen;
                             hybrid_candidate_count = stats.candidate;
                             hybrid_bad_nonce_prefilter = stats.bad_nonce_pref;
-                            hybrid_stats_opt = Some(stats.clone());
+                            hybrid_stats_opt = Some(stats);
+                            
+                            // Clone stats from hybrid_stats_opt for use in logging below
+                            // (hybrid_stats_opt is Some at this point)
+                            let stats = hybrid_stats_opt.as_ref().unwrap();
                             
                             if !hybrid_txs.is_empty() {
                                 hybrid_txs
@@ -1454,7 +1459,7 @@ impl CoreRunnerHandle {
                                 if stats.decode_err > 0 {
                                     // Genuine error: decode failures present
                                     log::warn!(
-                                        "hybrid: batch failed with decode errors (reason=decode_errors, n={} decode_err={})",
+                                        "hybrid: batch failed with decode errors (reason=decode-errors, n={} decode_err={})",
                                         stats.n, stats.decode_err
                                     );
                                     crate::metrics::dag_hybrid_fallback_inc();
@@ -1462,14 +1467,14 @@ impl CoreRunnerHandle {
                                 } else if stats.filtered_seen == stats.n && stats.n > 0 {
                                     // Pure de-dup: all txs were already committed
                                     log::info!(
-                                        "hybrid: batch filtered (reason=dedup_all, n={} filtered_seen={})",
+                                        "hybrid: batch filtered (reason=dedup-all, n={} filtered_seen={})",
                                         stats.n, stats.filtered_seen
                                     );
                                     crate::metrics::dag_hybrid_all_filtered_inc();
                                     // Check if mempool is empty - if so, skip fallback
                                     let mempool_len = guard.mempool.len();
                                     if mempool_len == 0 {
-                                        log::info!("hybrid: no_candidates_mempool_empty, continuing without fallback");
+                                        log::info!("hybrid: no-candidates-mempool-empty, continuing without fallback");
                                         Vec::new() // Return empty - block will be empty
                                     } else {
                                         crate::metrics::dag_hybrid_fallback_inc();
@@ -1480,13 +1485,13 @@ impl CoreRunnerHandle {
                                     let mempool_len = guard.mempool.len();
                                     if mempool_len == 0 {
                                         log::info!(
-                                            "hybrid: no candidates (reason=no_candidates_mempool_empty, n={} filtered={} bad_nonce={})",
+                                            "hybrid: no candidates (reason=no-candidates-mempool-empty, n={} filtered={} bad_nonce={})",
                                             stats.n, stats.filtered_seen, stats.bad_nonce_pref
                                         );
                                         Vec::new() // Return empty - block will be empty
                                     } else {
                                         log::info!(
-                                            "hybrid: no candidates (reason=filtered_out, n={} filtered={} bad_nonce={}), fallback to mempool",
+                                            "hybrid: no candidates (reason=filtered-out, n={} filtered={} bad_nonce={}), fallback to mempool",
                                             stats.n, stats.filtered_seen, stats.bad_nonce_pref
                                         );
                                         crate::metrics::dag_hybrid_fallback_inc();
