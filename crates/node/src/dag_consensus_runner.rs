@@ -722,22 +722,15 @@ impl HybridDagHandle {
             }
         }
 
-        // Try to order and consume batches
-        while let Some(batch) = self.handle.try_next_ordered_batch() {
-            let tx_count = batch.bundles.iter().map(|b| b.tx_count).sum::<usize>();
-            log::debug!(
-                "dag-hybrid: batch ordered (round={}, tx_count={})",
-                batch.round,
-                tx_count
-            );
-
-            // Record in tracker with canonical tx hashes
-            {
-                let mut tracker = self.tracker.write().await;
-                let dag_tx_hashes = tracker.get_canonical_tx_hashes(batch.round)
-                    .unwrap_or_default();
-                let _is_mismatch = tracker.record_dag_ordered(batch.round, dag_tx_hashes);
-            }
+        // T76.2: Record in tracker that we submitted this block.
+        // We do NOT drain ordered batches here - CoreRunner is the only consumer.
+        // Just update the tracker with the canonical tx hashes for sync status.
+        {
+            let mut tracker = self.tracker.write().await;
+            // Use the canonical tx hashes we just submitted
+            let dag_tx_hashes = summary.tx_hashes.clone();
+            let round = self.handle.current_round();
+            let _is_mismatch = tracker.record_dag_ordered(round, dag_tx_hashes);
         }
 
         // Advance round after each block

@@ -838,29 +838,18 @@ struct DagOrderedHeadView {
 
 #[cfg(feature = "dag-consensus")]
 async fn dag_ordered_head_handler(State(state): State<AppState>) -> Response {
-    // Check if we have a hybrid DAG handle attached to the core runner
-    if let Some(core) = state.core_runner.as_ref() {
-        // Try to access the hybrid DAG handle
-        let hybrid_opt = {
-            // We need to peek at the hybrid_dag field in CoreRunnerHandle
-            // Since it's behind a Mutex, we need an async lock
-            // But CoreRunnerHandle doesn't expose this directly...
-            // For now, use the shadow tracker if available
-            None::<Arc<crate::dag_consensus_runner::HybridDagHandle>>
-        };
-        
-        if let Some(hybrid) = hybrid_opt {
-            let queue_len = hybrid.peek_ordered_queue_len();
-            let round = hybrid.current_round();
-            return (
-                StatusCode::OK,
-                Json(DagOrderedHeadView {
-                    ready_batches: queue_len,
-                    round,
-                    queue_len,
-                }),
-            ).into_response();
-        }
+    // T76.2: Check if we have a hybrid DAG handle in AppState
+    if let Some(hybrid) = state.hybrid_dag.as_ref() {
+        let queue_len = hybrid.peek_ordered_queue_len();
+        let round = hybrid.current_round();
+        return (
+            StatusCode::OK,
+            Json(DagOrderedHeadView {
+                ready_batches: queue_len,
+                round,
+                queue_len,
+            }),
+        ).into_response();
     }
     
     // Fall back to shadow tracker if available (read-only visibility)
@@ -1379,6 +1368,10 @@ struct AppState {
     // Used by GET /dag/consensus_status endpoint to query sync status.
     #[cfg(feature = "dag-consensus")]
     shadow_dag_tracker: Option<Arc<tokio::sync::RwLock<crate::dag_consensus_runner::DagConsensusTracker>>>,
+    // T76.2: Optional hybrid DAG handle for consuming ordered batches.
+    // Used by GET /dag/ordered_head endpoint to show queue visibility.
+    #[cfg(feature = "dag-consensus")]
+    hybrid_dag: Option<Arc<crate::dag_consensus_runner::HybridDagHandle>>,
 }
 
 struct RecentBlocks {
@@ -3682,29 +3675,41 @@ async fn main() -> anyhow::Result<()> {
 
     // T76.2: Create and attach HybridDagHandle when hybrid mode with ordering is enabled.
     // This allows CoreRunner to consume ordered batches from the DAG.
-    #[cfg(all(feature = "dag-consensus", feature = "pq44-runtime"))]
-    {
-        let consensus_mode = env_consensus_mode();
-        let ordering_enabled = env_dag_ordering_enabled();
-        
-        if matches!(consensus_mode, ConsensusMode::DagHybrid) && ordering_enabled {
-            log::info!("dag-hybrid: creating HybridDagHandle for ordered batch consumption");
+    #[cfg(feature = "dag-consensus")]
+    let hybrid_dag_for_state: Option<Arc<crate::dag_consensus_runner::HybridDagHandle>> = {
+        #[cfg(feature = "pq44-runtime")]
+        {
+            let consensus_mode = env_consensus_mode();
+            let ordering_enabled = env_dag_ordering_enabled();
             
-            // Create the hybrid DAG handle
-            let hybrid_dag = Arc::new(crate::dag_consensus_runner::HybridDagHandle::new());
-            
-            // Attach it to the core runner so it can consume ordered batches
-            if let Some(core) = core_runner.clone() {
-                core.set_hybrid_dag(Some(hybrid_dag.clone())).await;
-                log::info!("dag-hybrid: HybridDagHandle attached to CoreRunner");
+            if matches!(consensus_mode, ConsensusMode::DagHybrid) && ordering_enabled {
+                log::info!("dag-hybrid: creating HybridDagHandle for ordered batch consumption");
+                
+                // Create the hybrid DAG handle
+                let hybrid_dag = Arc::new(crate::dag_consensus_runner::HybridDagHandle::new());
+                
+                // Attach it to the core runner so it can consume ordered batches
+                if let Some(core) = core_runner.clone() {
+                    core.set_hybrid_dag(Some(hybrid_dag.clone())).await;
+                    log::info!("dag-hybrid: HybridDagHandle attached to CoreRunner");
+                }
+                
+                Some(hybrid_dag)
+            } else if matches!(consensus_mode, ConsensusMode::DagHybrid) {
+                log::info!(
+                    "dag-hybrid: mode enabled but EEZO_DAG_ORDERING_ENABLED=false; \
+                     using mempool as tx source"
+                );
+                None
+            } else {
+                None
             }
-        } else if matches!(consensus_mode, ConsensusMode::DagHybrid) {
-            log::info!(
-                "dag-hybrid: mode enabled but EEZO_DAG_ORDERING_ENABLED=false; \
-                 using mempool as tx source"
-            );
         }
-    }
+        #[cfg(not(feature = "pq44-runtime"))]
+        {
+            None
+        }
+    };
 
     // When dag-consensus feature is not compiled, we don't have a sender
     #[cfg(not(feature = "dag-consensus"))]
@@ -3773,6 +3778,9 @@ async fn main() -> anyhow::Result<()> {
         // T75.1: Shadow DAG tracker (only when dag-consensus feature is enabled)
         #[cfg(feature = "dag-consensus")]
         shadow_dag_tracker,
+        // T76.2: Hybrid DAG handle (only when dag-consensus feature is enabled)
+        #[cfg(feature = "dag-consensus")]
+        hybrid_dag: hybrid_dag_for_state,
     };
     println!(
         "✅ AppState initialized: ready_flag={}, version={}, git_sha={:?}",
