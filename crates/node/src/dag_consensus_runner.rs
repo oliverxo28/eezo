@@ -28,6 +28,9 @@ use consensus_dag::types::AuthorId;
 /// Summary of a committed block, sent from the main consensus runner to the
 /// shadow DAG runner. Contains the minimal information needed to create a DAG
 /// payload for shadow ordering.
+///
+/// T76.3: Now optionally carries raw tx bytes alongside hashes for zero-copy,
+/// no-miss consumption by the hybrid proposer.
 #[derive(Clone, Debug)]
 pub struct ShadowBlockSummary {
     /// The committed block height
@@ -36,6 +39,11 @@ pub struct ShadowBlockSummary {
     pub block_hash: [u8; 32],
     /// Transaction hashes from the block body
     pub tx_hashes: Vec<[u8; 32]>,
+    /// T76.3: Optional raw tx bytes corresponding to each hash.
+    /// When present, enables zero-copy tx consumption without mempool lookup.
+    /// Vec<Option<bytes::Bytes>> where index corresponds to tx_hashes index.
+    /// None entries indicate missing bytes (fallback to mempool needed).
+    pub tx_bytes: Option<Vec<Option<bytes::Bytes>>>,
     /// Optional: round number (if relevant)
     pub round: Option<u64>,
     /// Optional: timestamp in milliseconds
@@ -49,6 +57,7 @@ impl ShadowBlockSummary {
             height,
             block_hash,
             tx_hashes,
+            tx_bytes: None,
             round: None,
             timestamp_ms: None,
         }
@@ -64,6 +73,40 @@ impl ShadowBlockSummary {
     pub fn with_timestamp_ms(mut self, ts: u64) -> Self {
         self.timestamp_ms = Some(ts);
         self
+    }
+
+    /// T76.3: Builder: set tx bytes
+    pub fn with_tx_bytes(mut self, tx_bytes: Vec<Option<bytes::Bytes>>) -> Self {
+        self.tx_bytes = Some(tx_bytes);
+        self
+    }
+
+    /// T76.3: Iterator over (hash, Option<bytes>) pairs for zero-copy consumption.
+    /// Yields tuples of (tx_hash, Option<Bytes>) for each transaction.
+    pub fn iter_tx_entries(&self) -> impl Iterator<Item = ([u8; 32], Option<&bytes::Bytes>)> {
+        let tx_bytes_ref = self.tx_bytes.as_ref();
+        self.tx_hashes.iter().enumerate().map(move |(i, hash)| {
+            let bytes_opt = tx_bytes_ref.and_then(|v| v.get(i)).and_then(|b| b.as_ref());
+            (*hash, bytes_opt)
+        })
+    }
+
+    /// T76.3: Check if all transactions have bytes available.
+    pub fn has_all_bytes(&self) -> bool {
+        match &self.tx_bytes {
+            None => false,
+            Some(bytes) => {
+                bytes.len() == self.tx_hashes.len() && bytes.iter().all(|b| b.is_some())
+            }
+        }
+    }
+
+    /// T76.3: Count how many transactions have bytes available.
+    pub fn bytes_available_count(&self) -> usize {
+        match &self.tx_bytes {
+            None => 0,
+            Some(bytes) => bytes.iter().filter(|b| b.is_some()).count(),
+        }
     }
 }
 
@@ -1188,6 +1231,7 @@ mod tests {
             height: 1,
             block_hash: [1u8; 32],
             tx_hashes: vec![[2u8; 32]],
+            tx_bytes: None, // T76.3: No bytes attached
             round: None,
             timestamp_ms: None,
         };
@@ -1208,6 +1252,77 @@ mod tests {
             // After consuming, queue should decrease
             assert!(handle.peek_ordered_queue_len() < initial_queue_len);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // T76.3: Tests for ShadowBlockSummary with tx_bytes
+    // -------------------------------------------------------------------------
+
+    /// T76.3: Test ShadowBlockSummary with full tx_bytes.
+    #[test]
+    fn test_shadow_block_summary_with_full_bytes() {
+        use bytes::Bytes;
+
+        let tx_hashes = vec![[1u8; 32], [2u8; 32]];
+        let tx_bytes = vec![
+            Some(Bytes::from_static(b"tx1_data")),
+            Some(Bytes::from_static(b"tx2_data")),
+        ];
+
+        let summary = ShadowBlockSummary::new(100, [0xAB; 32], tx_hashes.clone())
+            .with_tx_bytes(tx_bytes.clone());
+
+        assert!(summary.has_all_bytes());
+        assert_eq!(summary.bytes_available_count(), 2);
+
+        // Verify iterator
+        let entries: Vec<_> = summary.iter_tx_entries().collect();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].1.is_some());
+        assert!(entries[1].1.is_some());
+    }
+
+    /// T76.3: Test ShadowBlockSummary with mixed tx_bytes (some missing).
+    #[test]
+    fn test_shadow_block_summary_with_mixed_bytes() {
+        use bytes::Bytes;
+
+        let tx_hashes = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let tx_bytes = vec![
+            Some(Bytes::from_static(b"tx1_data")),
+            None, // Missing
+            Some(Bytes::from_static(b"tx3_data")),
+        ];
+
+        let summary = ShadowBlockSummary::new(100, [0xAB; 32], tx_hashes)
+            .with_tx_bytes(tx_bytes);
+
+        assert!(!summary.has_all_bytes());
+        assert_eq!(summary.bytes_available_count(), 2);
+
+        // Verify iterator shows correct pattern
+        let entries: Vec<_> = summary.iter_tx_entries().collect();
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].1.is_some());  // Has bytes
+        assert!(entries[1].1.is_none());  // Missing
+        assert!(entries[2].1.is_some());  // Has bytes
+    }
+
+    /// T76.3: Test ShadowBlockSummary without tx_bytes (backwards compatible).
+    #[test]
+    fn test_shadow_block_summary_without_bytes() {
+        let tx_hashes = vec![[1u8; 32], [2u8; 32]];
+        let summary = ShadowBlockSummary::new(100, [0xAB; 32], tx_hashes);
+
+        // No tx_bytes means no bytes available
+        assert!(!summary.has_all_bytes());
+        assert_eq!(summary.bytes_available_count(), 0);
+
+        // Iterator should yield (hash, None) for each entry
+        let entries: Vec<_> = summary.iter_tx_entries().collect();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].1.is_none());
+        assert!(entries[1].1.is_none());
     }
 
     /// T76.2: Test that dag_ordered_ready_set() updates the gauge without consuming.

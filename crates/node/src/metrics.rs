@@ -2071,6 +2071,8 @@ pub fn dag_hybrid_fallback_inc() {
 pub fn register_dag_hybrid_metrics() {
     let _ = &*EEZO_DAG_HYBRID_BATCHES_USED_TOTAL;
     let _ = &*EEZO_DAG_HYBRID_FALLBACK_TOTAL;
+    // T76.3: Also register the bytes-level metrics
+    register_dag_hybrid_bytes_metrics();
 }
 
 /// No-op version when metrics feature is disabled.
@@ -2116,5 +2118,119 @@ pub fn register_dag_ordered_metrics() {
 /// No-op version when metrics feature is disabled.
 #[cfg(not(feature = "metrics"))]
 pub fn register_dag_ordered_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
+// T76.3 — DAG hybrid bytes consumption metrics
+// -----------------------------------------------------------------------------
+
+/// Counter: Total transactions where bytes were directly available from DAG batch.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_BYTES_USED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_bytes_used_total",
+        "Total transactions where bytes were directly available from DAG batch"
+    )
+    .unwrap()
+});
+
+/// Counter: Total transactions where bytes were missing from DAG batch (required mempool lookup).
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_BYTES_MISSING_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_bytes_missing_total",
+        "Total transactions where bytes were missing from DAG batch (required mempool lookup)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total transactions where decoding the tx bytes failed.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_DECODE_ERROR_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_decode_error_total",
+        "Total transactions where decoding the tx bytes from DAG batch failed"
+    )
+    .unwrap()
+});
+
+/// Helper: Increment bytes used counter.
+#[inline]
+pub fn dag_hybrid_bytes_used_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_BYTES_USED_TOTAL.inc();
+    }
+}
+
+/// Helper: Increment bytes used counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_bytes_used_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_BYTES_USED_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment bytes missing counter.
+#[inline]
+pub fn dag_hybrid_bytes_missing_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_BYTES_MISSING_TOTAL.inc();
+    }
+}
+
+/// Helper: Increment bytes missing counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_bytes_missing_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_BYTES_MISSING_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment decode error counter.
+#[inline]
+pub fn dag_hybrid_decode_error_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_DECODE_ERROR_TOTAL.inc();
+    }
+}
+
+/// Helper: Increment decode error counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_decode_error_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_DECODE_ERROR_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Eagerly register T76.3 DAG hybrid bytes metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_dag_hybrid_bytes_metrics() {
+    let _ = &*EEZO_DAG_HYBRID_BYTES_USED_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_BYTES_MISSING_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_DECODE_ERROR_TOTAL;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_dag_hybrid_bytes_metrics() {
     // No metrics to register when the feature is off.
 }

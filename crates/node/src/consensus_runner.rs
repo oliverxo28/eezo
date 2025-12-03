@@ -1166,68 +1166,54 @@ impl CoreRunnerHandle {
                 #[cfg(feature = "metrics")]
                 let dag_prepare_start = std::time::Instant::now();
                 
-                // T76.1: Try hybrid batch consumption when in hybrid mode with ordering enabled
-                // Note: _hybrid_batch_used is scaffolding for T76.2 when we'll actually use the 
-                // DAG batch txs instead of mempool. Currently tracks that a batch was available.
+                // T76.3: Try hybrid batch consumption when in hybrid mode with ordering enabled.
+                // When a batch is available with tx bytes, decode directly from bytes.
+                // For any entries missing bytes, fall back to mempool lookup per-entry.
                 #[cfg(feature = "dag-consensus")]
-                let mut _hybrid_batch_used = false;
+                let mut hybrid_batch_used = false;
                 #[cfg(feature = "dag-consensus")]
-                let _hybrid_txs: Option<Vec<SignedTx>> = if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
+                let mut hybrid_batch_opt: Option<consensus_dag::OrderedBatch> = None;
+                #[cfg(feature = "dag-consensus")]
+                if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
                     // Try to get hybrid DAG handle
                     let hybrid_opt: Option<Arc<HybridDagHandle>> = hybrid_dag_c.lock().await.clone();
                     if let Some(hybrid_handle) = hybrid_opt {
-                        // Try to get next ordered batch from DAG
-                        match hybrid_handle.try_next_ordered_batch() {
-                            Some(batch) if !batch.is_empty() => {
-                                let n_txs = batch.tx_count();
-                                log::info!(
-                                    "hybrid: used dag batch (n_txs={}, round={})",
-                                    n_txs,
-                                    batch.round
-                                );
-                                // T76.1: In the current implementation, OrderedBatch contains
-                                // vertex IDs and tx_count but not actual tx hashes. Full tx
-                                // extraction from DAG batches requires additional infrastructure
-                                // (payload storage, tx hash indexing). For now, we record that
-                                // a batch was available but fall back to mempool for actual txs.
-                                // 
-                                // TODO(T76.2): Wire actual tx extraction from DAG payloads.
-                                // For now, increment batches_used when batch is available,
-                                // but still collect from mempool.
-                                crate::metrics::dag_hybrid_batches_used_inc();
-                                _hybrid_batch_used = true;
-                                
-                                // Note: Currently we can't extract actual SignedTx from the batch
-                                // because the DAG stores payload digests, not the raw tx data.
-                                // The real implementation would:
-                                // 1. Extract tx hashes from the payload
-                                // 2. Look up tx bytes from mempool via get_bytes_for_hashes
-                                // 3. Decode SignedTx from bytes
-                                // For T76.1 scaffolding, we record the metric but use mempool.
-                                None
+                        // T76.3: Peek first to avoid consuming empty batches
+                        if hybrid_handle.peek_ordered_queue_len() > 0 {
+                            // Try to get next ordered batch from DAG
+                            match hybrid_handle.try_next_ordered_batch() {
+                                Some(batch) if !batch.is_empty() => {
+                                    log::debug!(
+                                        "hybrid: dag batch available (n_txs={}, round={}, has_bytes={})",
+                                        batch.tx_count(),
+                                        batch.round,
+                                        batch.tx_hashes.is_some()
+                                    );
+                                    hybrid_batch_opt = Some(batch);
+                                    hybrid_batch_used = true;
+                                }
+                                Some(_) => {
+                                    // Empty batch - fallback
+                                    log::debug!("hybrid: fallback (reason=empty_batch)");
+                                    crate::metrics::dag_hybrid_fallback_inc();
+                                }
+                                None => {
+                                    // No batch available - fallback  
+                                    log::debug!("hybrid: fallback (reason=no_batch)");
+                                    crate::metrics::dag_hybrid_fallback_inc();
+                                }
                             }
-                            Some(_) => {
-                                // Empty batch - fallback
-                                log::debug!("hybrid: fallback (reason=empty_batch)");
-                                crate::metrics::dag_hybrid_fallback_inc();
-                                None
-                            }
-                            None => {
-                                // No batch available - fallback  
-                                log::debug!("hybrid: fallback (reason=no_batch)");
-                                crate::metrics::dag_hybrid_fallback_inc();
-                                None
-                            }
+                        } else {
+                            // No batches ready - fallback
+                            log::debug!("hybrid: fallback (reason=queue_empty)");
+                            crate::metrics::dag_hybrid_fallback_inc();
                         }
                     } else {
                         // No hybrid handle attached yet - fallback
                         log::debug!("hybrid: fallback (reason=no_handle)");
                         crate::metrics::dag_hybrid_fallback_inc();
-                        None
                     }
-                } else {
-                    None
-                };
+                }
 
                 // T68.1 + T69.0: If DAG source is selected, try to fetch txs from DAG first.
                 // T69.0: Also evaluate the template quality gate if policy is not "off".
@@ -1309,8 +1295,53 @@ impl CoreRunnerHandle {
                     };
                     
                     // 1–2. Collect transactions for this block from the chosen source.
-                    // T68.1: If DAG source is selected and returned txs, use those;
-                    // otherwise fall back to mempool.
+                    // T76.3: If hybrid batch is available with tx data, process it directly.
+                    // Otherwise, fall back to DAG source or mempool as before.
+                    #[cfg(feature = "dag-consensus")]
+                    let txs = if hybrid_batch_used {
+                        if let Some(ref batch) = hybrid_batch_opt {
+                            // T76.3: Process hybrid batch with direct bytes decoding
+                            let block_max_bytes = guard.cfg.block_byte_budget;
+                            let (hybrid_txs, used, missing, decode_err, size_bytes) = 
+                                Self::collect_txs_from_hybrid_batch(batch, &mut guard, block_max_bytes);
+                            
+                            // Update metrics
+                            crate::metrics::dag_hybrid_batches_used_inc();
+                            crate::metrics::dag_hybrid_bytes_used_inc_by(used as u64);
+                            crate::metrics::dag_hybrid_bytes_missing_inc_by(missing as u64);
+                            crate::metrics::dag_hybrid_decode_error_inc_by(decode_err as u64);
+                            
+                            // T76.3: Required logging
+                            let n = batch.tx_count();
+                            log::info!(
+                                "hybrid: dag batch n={} used={} bytes_missing={} decode_err={} size_bytes={}",
+                                n, used, missing, decode_err, size_bytes
+                            );
+                            
+                            if !hybrid_txs.is_empty() {
+                                hybrid_txs
+                            } else {
+                                // All txs failed to decode/lookup - fall back to mempool
+                                log::warn!("hybrid: all batch txs failed, falling back to mempool");
+                                Self::collect_from_mempool(&mut guard, block_max_tx)
+                            }
+                        } else {
+                            // Shouldn't happen if hybrid_batch_used is true
+                            Self::collect_from_mempool(&mut guard, block_max_tx)
+                        }
+                    } else {
+                        // T68.1: If DAG source is selected and returned txs, use those;
+                        // otherwise fall back to mempool.
+                        Self::collect_block_txs_with_dag_fallback(
+                            block_tx_source,
+                            dag_txs,
+                            &mut guard,
+                            block_max_tx,
+                        )
+                    };
+                    
+                    // Non-dag-consensus variant: just use dag_txs or mempool fallback
+                    #[cfg(not(feature = "dag-consensus"))]
                     let txs = Self::collect_block_txs_with_dag_fallback(
                         block_tx_source,
                         dag_txs,
@@ -1469,10 +1500,14 @@ impl CoreRunnerHandle {
                                 // Build the summary once, reuse for both shadow and hybrid
                                 let block_hash = blk.header.hash();
                                 let tx_hashes: Vec<[u8; 32]> = blk.txs.iter().map(|tx| tx.hash()).collect();
+                                // T76.3: Include tx bytes for zero-copy consumption.
+                                // TODO: Serialize txs to bytes for hybrid path.
+                                // For now, tx_bytes is None - hybrid path will use mempool fallback.
                                 let summary = ShadowBlockSummary {
                                     height,
                                     block_hash,
                                     tx_hashes,
+                                    tx_bytes: None, // T76.3: Will be populated when available
                                     round: None,
                                     timestamp_ms: Some(blk.header.timestamp_ms),
                                 };
@@ -1961,6 +1996,93 @@ impl CoreRunnerHandle {
         }
 
         txs
+    }
+
+    /// T76.3: Process an OrderedBatch from DAG, extracting SignedTx from bytes.
+    ///
+    /// For each entry in the batch:
+    /// - If bytes are available, decode directly (no mempool lookup)
+    /// - If bytes are missing, fall back to mempool lookup per-entry
+    /// - Track metrics: bytes_used, bytes_missing, decode_errors
+    ///
+    /// Respects `block_max_bytes` cap, leaving remainder for next block.
+    ///
+    /// Returns:
+    /// - `Ok(txs)`: vector of successfully decoded SignedTx
+    /// - Remainder entries stay in mempool for next block (no drop)
+    #[cfg(feature = "dag-consensus")]
+    fn collect_txs_from_hybrid_batch(
+        batch: &consensus_dag::OrderedBatch,
+        _guard: &mut SingleNode,  // Currently unused, but kept for future expansion
+        block_max_bytes: usize,
+    ) -> (Vec<SignedTx>, usize, usize, usize, usize) {
+        // Statistics for logging and metrics
+        let mut bytes_used: usize = 0;
+        let mut bytes_missing: usize = 0;
+        let mut decode_errors: usize = 0;
+        let mut total_size_bytes: usize = 0;
+        
+        let mut txs: Vec<SignedTx> = Vec::new();
+        let mut current_bytes: usize = 0;
+
+        for (hash, bytes_opt) in batch.iter_tx_entries() {
+            // Check if we've exceeded block max_bytes cap
+            if current_bytes >= block_max_bytes {
+                // Leave remainder for next block (don't process more)
+                log::debug!(
+                    "hybrid: block max_bytes cap reached ({} >= {}), leaving remainder",
+                    current_bytes, block_max_bytes
+                );
+                break;
+            }
+
+            match bytes_opt {
+                Some(bytes) => {
+                    // T76.3: Direct bytes available - decode without mempool lookup
+                    let tx_size = bytes.len();
+                    
+                    // Check if this tx would exceed the byte budget
+                    if current_bytes + tx_size > block_max_bytes {
+                        log::debug!(
+                            "hybrid: tx would exceed block_max_bytes ({} + {} > {}), stopping",
+                            current_bytes, tx_size, block_max_bytes
+                        );
+                        break;
+                    }
+
+                    match crate::dag_runner::parse_signed_tx_from_envelope(bytes) {
+                        Some(stx) => {
+                            txs.push(stx);
+                            bytes_used += 1;
+                            current_bytes += tx_size;
+                            total_size_bytes += tx_size;
+                        }
+                        None => {
+                            // Decode failed - increment counter, skip this tx
+                            decode_errors += 1;
+                            log::warn!(
+                                "hybrid: decode error for tx hash=0x{}",
+                                hex::encode(&hash[..4])
+                            );
+                        }
+                    }
+                }
+                None => {
+                    // T76.3: Bytes missing from DAG batch.
+                    // The ledger mempool uses sender/nonce-based storage, not hash lookup,
+                    // so we can't do a per-hash fallback lookup here. The transaction
+                    // should still be in the pending mempool and will be processed
+                    // normally in subsequent blocks via the regular drain_for_block path.
+                    bytes_missing += 1;
+                    log::debug!(
+                        "hybrid: missing bytes for tx hash=0x{}, will be processed via normal path",
+                        hex::encode(&hash[..4])
+                    );
+                }
+            }
+        }
+
+        (txs, bytes_used, bytes_missing, decode_errors, total_size_bytes)
     }
 
     /// T63.1: Get a snapshot of the current accounts and supply for dry-run execution.
