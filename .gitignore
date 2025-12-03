@@ -44,4 +44,4 @@ crates/node/t29_9-*/
 crates/node/src/backup/
 
 # Temp directories
-/tmp/
+/tmp/t29_9-srv*
