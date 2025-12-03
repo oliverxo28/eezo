@@ -1647,6 +1647,7 @@ dependencies = [
  "hyper 0.14.32",
  "lazy_static",
  "log",
+ "lru",
  "num_cpus",
  "once_cell",
  "parking_lot",

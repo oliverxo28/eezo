@@ -828,6 +828,223 @@ impl Default for HybridDagHandle {
 }
 
 // ---------------------------------------------------------------------------
+// T76.5: HybridDedupCache — LRU cache for recently committed tx hashes
+// ---------------------------------------------------------------------------
+
+/// Default size of the de-dup LRU cache (100k entries as per T76.5 spec).
+const DEFAULT_DEDUP_LRU_SIZE: usize = 100_000;
+
+/// Parse de-dup LRU size from environment variable `EEZO_HYBRID_DEDUP_LRU`.
+/// Returns the configured size, or the default (100k) if unset/invalid.
+fn parse_dedup_lru_size() -> usize {
+    std::env::var("EEZO_HYBRID_DEDUP_LRU")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_DEDUP_LRU_SIZE)
+}
+
+/// T76.5: LRU cache for recently committed canonical tx hashes.
+/// 
+/// Used by the hybrid proposer to filter out transactions that have already
+/// been committed, avoiding "bad_nonce" storms from duplicate submissions.
+/// 
+/// Key properties:
+/// - Uses canonical `SignedTx.hash()`, not raw envelope hash
+/// - Bounded size (default 100k, configurable via `EEZO_HYBRID_DEDUP_LRU`)
+/// - Thread-safe (uses parking_lot RwLock)
+/// - GC synchronized with commit height
+pub struct HybridDedupCache {
+    /// LRU cache: maps tx hash -> commit height
+    /// Using LinkedHashMap for O(1) access with LRU eviction ordering
+    cache: parking_lot::RwLock<lru::LruCache<[u8; 32], u64>>,
+    /// Maximum size of the cache
+    max_size: usize,
+    /// Last height at which GC was performed
+    last_gc_height: std::sync::atomic::AtomicU64,
+}
+
+impl HybridDedupCache {
+    /// Create a new de-dup cache with the default size.
+    pub fn new() -> Self {
+        Self::with_capacity(parse_dedup_lru_size())
+    }
+
+    /// Create a new de-dup cache with the specified capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let cap = std::num::NonZeroUsize::new(capacity.max(1))
+            .unwrap_or(std::num::NonZeroUsize::new(1).unwrap());
+        Self {
+            cache: parking_lot::RwLock::new(lru::LruCache::new(cap)),
+            max_size: capacity,
+            last_gc_height: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Record that a transaction hash was committed at the given height.
+    /// 
+    /// This is called after block commit to populate the de-dup cache.
+    /// Uses canonical `SignedTx.hash()` as the key.
+    pub fn record_committed(&self, tx_hash: [u8; 32], height: u64) {
+        let mut cache = self.cache.write();
+        cache.put(tx_hash, height);
+        
+        // Update metrics
+        #[cfg(feature = "metrics")]
+        crate::metrics::dag_hybrid_dedup_lru_size_set(cache.len() as u64);
+    }
+
+    /// Record multiple committed tx hashes at once.
+    /// More efficient than calling record_committed repeatedly.
+    pub fn record_committed_batch(&self, tx_hashes: &[[u8; 32]], height: u64) {
+        if tx_hashes.is_empty() {
+            return;
+        }
+        
+        let mut cache = self.cache.write();
+        for hash in tx_hashes {
+            cache.put(*hash, height);
+        }
+        
+        // Update metrics
+        #[cfg(feature = "metrics")]
+        crate::metrics::dag_hybrid_dedup_lru_size_set(cache.len() as u64);
+    }
+
+    /// Check if a transaction hash was recently committed.
+    /// Returns `true` if the hash is in the de-dup cache.
+    pub fn contains(&self, tx_hash: &[u8; 32]) -> bool {
+        self.cache.read().contains(tx_hash)
+    }
+
+    /// Filter a list of tx hashes, returning only those not in the de-dup cache.
+    /// 
+    /// Returns `(filtered_hashes, seen_count)`:
+    /// - `filtered_hashes`: hashes that are NOT in the cache (candidates)
+    /// - `seen_count`: number of hashes that WERE in the cache (filtered out)
+    /// 
+    /// This is the main entry point for de-dup filtering before batch execution.
+    pub fn filter_batch(&self, tx_hashes: &[[u8; 32]]) -> (Vec<[u8; 32]>, usize) {
+        let cache = self.cache.read();
+        
+        let mut filtered = Vec::with_capacity(tx_hashes.len());
+        let mut seen_count = 0;
+        
+        for hash in tx_hashes {
+            if cache.contains(hash) {
+                seen_count += 1;
+            } else {
+                filtered.push(*hash);
+            }
+        }
+        
+        (filtered, seen_count)
+    }
+
+    /// Get the current size of the cache.
+    pub fn len(&self) -> usize {
+        self.cache.read().len()
+    }
+
+    /// Check if the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.cache.read().is_empty()
+    }
+
+    /// Get the maximum capacity of the cache.
+    pub fn capacity(&self) -> usize {
+        self.max_size
+    }
+
+    /// Perform GC synchronized with commit height.
+    /// 
+    /// Entries older than `gc_depth` rounds behind the current height are eligible
+    /// for eviction (handled automatically by LRU eviction policy).
+    /// 
+    /// This method is called periodically to ensure consistent GC behavior.
+    pub fn gc(&self, current_height: u64, _gc_depth: u64) {
+        // LRU cache handles eviction automatically when capacity is reached.
+        // This method is provided for explicit GC coordination if needed.
+        // For now, just record the GC height for debugging.
+        self.last_gc_height.store(current_height, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Clear all entries from the cache.
+    pub fn clear(&self) {
+        let mut cache = self.cache.write();
+        cache.clear();
+        
+        #[cfg(feature = "metrics")]
+        crate::metrics::dag_hybrid_dedup_lru_size_set(0);
+    }
+}
+
+impl Default for HybridDedupCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T76.5: Nonce pre-check for hybrid batch filtering
+// ---------------------------------------------------------------------------
+
+/// T76.5: Perform nonce pre-check on candidate transactions.
+/// 
+/// This is a best-effort, read-only peek at sender nonces to filter out
+/// transactions with stale nonces (tx.nonce < account.nonce) before execution.
+/// 
+/// Properties:
+/// - Constant-time: bounded number of lookups
+/// - Non-blocking: uses read-only access to accounts
+/// - Best-effort: may not catch all stale nonces (e.g., concurrent updates)
+/// 
+/// Returns:
+/// - `valid_indices`: indices of transactions that passed nonce check
+/// - `bad_nonce_count`: number of transactions with stale nonces
+/// 
+/// Note: This function takes indices to avoid cloning transactions.
+pub fn nonce_precheck(
+    txs: &[eezo_ledger::SignedTx],
+    accounts: &eezo_ledger::Accounts,
+) -> (Vec<usize>, usize) {
+    use eezo_ledger::sender_from_pubkey_first20;
+    
+    let mut valid_indices = Vec::with_capacity(txs.len());
+    let mut bad_nonce_count = 0;
+    
+    for (i, tx) in txs.iter().enumerate() {
+        // Derive sender from pubkey (first 20 bytes)
+        // If derivation fails, assume valid (will fail at execution)
+        match sender_from_pubkey_first20(tx) {
+            Some(sender) => {
+                // Read-only peek at account nonce
+                let account = accounts.get(&sender);
+                let account_nonce = account.nonce;
+                
+                // Check if tx nonce is stale
+                if tx.core.nonce < account_nonce {
+                    bad_nonce_count += 1;
+                    log::debug!(
+                        "nonce_precheck: tx hash=0x{} has stale nonce {} < account nonce {}",
+                        hex::encode(&tx.hash()[..4]),
+                        tx.core.nonce,
+                        account_nonce
+                    );
+                } else {
+                    valid_indices.push(i);
+                }
+            }
+            None => {
+                // Sender derivation failed - pass through (will fail at execution)
+                valid_indices.push(i);
+            }
+        }
+    }
+    
+    (valid_indices, bad_nonce_count)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1388,5 +1605,257 @@ mod tests {
         // Assert both drop to 1
         assert_eq!(new_queue_len, 1, "Expected 1 batch remaining after consuming 1");
         assert_eq!(EEZO_DAG_ORDERED_READY.get(), 1, "Expected gauge to read 1 after consuming");
+    }
+
+    // =========================================================================
+    // T76.5: Tests for HybridDedupCache
+    // =========================================================================
+
+    #[test]
+    fn test_dedup_cache_basic() {
+        let cache = HybridDedupCache::with_capacity(100);
+        
+        let hash1 = [1u8; 32];
+        let hash2 = [2u8; 32];
+        let hash3 = [3u8; 32];
+        
+        // Initially empty
+        assert!(cache.is_empty());
+        assert!(!cache.contains(&hash1));
+        
+        // Record committed tx
+        cache.record_committed(hash1, 1);
+        
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains(&hash1));
+        assert!(!cache.contains(&hash2));
+    }
+
+    #[test]
+    fn test_dedup_cache_batch_record() {
+        let cache = HybridDedupCache::with_capacity(100);
+        
+        let hashes = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        
+        cache.record_committed_batch(&hashes, 10);
+        
+        assert_eq!(cache.len(), 3);
+        for hash in &hashes {
+            assert!(cache.contains(hash));
+        }
+    }
+
+    #[test]
+    fn test_dedup_cache_filter_batch() {
+        let cache = HybridDedupCache::with_capacity(100);
+        
+        // Record some hashes as committed
+        let committed = vec![[1u8; 32], [2u8; 32]];
+        cache.record_committed_batch(&committed, 1);
+        
+        // Filter a batch that contains some committed and some new hashes
+        let batch = vec![[1u8; 32], [3u8; 32], [2u8; 32], [4u8; 32]];
+        let (filtered, seen_count) = cache.filter_batch(&batch);
+        
+        // Hash 1 and 2 were seen (in cache), 3 and 4 are new
+        assert_eq!(seen_count, 2);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.contains(&[3u8; 32]));
+        assert!(filtered.contains(&[4u8; 32]));
+    }
+
+    #[test]
+    fn test_dedup_cache_filter_all_seen() {
+        let cache = HybridDedupCache::with_capacity(100);
+        
+        let hashes = vec![[1u8; 32], [2u8; 32]];
+        cache.record_committed_batch(&hashes, 1);
+        
+        // Filter the same batch - all should be filtered
+        let (filtered, seen_count) = cache.filter_batch(&hashes);
+        
+        assert_eq!(seen_count, 2);
+        assert_eq!(filtered.len(), 0);
+    }
+
+    #[test]
+    fn test_dedup_cache_filter_none_seen() {
+        let cache = HybridDedupCache::with_capacity(100);
+        
+        // Cache has some hashes
+        cache.record_committed([1u8; 32], 1);
+        
+        // Filter batch with different hashes - none should be filtered
+        let batch = vec![[5u8; 32], [6u8; 32]];
+        let (filtered, seen_count) = cache.filter_batch(&batch);
+        
+        assert_eq!(seen_count, 0);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_dedup_cache_lru_eviction() {
+        // Small cache to test eviction
+        let cache = HybridDedupCache::with_capacity(3);
+        
+        cache.record_committed([1u8; 32], 1);
+        cache.record_committed([2u8; 32], 2);
+        cache.record_committed([3u8; 32], 3);
+        
+        assert_eq!(cache.len(), 3);
+        assert!(cache.contains(&[1u8; 32]));
+        
+        // Adding one more should evict the LRU (oldest)
+        cache.record_committed([4u8; 32], 4);
+        
+        assert_eq!(cache.len(), 3);
+        // Hash 1 should be evicted (LRU)
+        assert!(!cache.contains(&[1u8; 32]));
+        assert!(cache.contains(&[2u8; 32]));
+        assert!(cache.contains(&[3u8; 32]));
+        assert!(cache.contains(&[4u8; 32]));
+    }
+
+    #[test]
+    fn test_dedup_cache_clear() {
+        let cache = HybridDedupCache::with_capacity(100);
+        
+        cache.record_committed_batch(&[[1u8; 32], [2u8; 32], [3u8; 32]], 1);
+        assert_eq!(cache.len(), 3);
+        
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    // =========================================================================
+    // T76.5: Tests for nonce_precheck
+    // =========================================================================
+
+    #[test]
+    fn test_nonce_precheck_all_valid() {
+        use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
+        
+        // Create accounts with known nonces
+        let mut accounts = Accounts::default();
+        let sender_bytes: [u8; 20] = [0x42; 20];
+        let sender = Address(sender_bytes);
+        
+        // Set account nonce to 5
+        let acct = Account { balance: 1000, nonce: 5 };
+        accounts.put(sender, acct);
+        
+        // Create txs with valid nonces (>= 5)
+        let txs = vec![
+            SignedTx {
+                core: TxCore { to: Address([0xBB; 20]), amount: 100, fee: 1, nonce: 5 },
+                pubkey: sender_bytes.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: Address([0xBB; 20]), amount: 100, fee: 1, nonce: 6 },
+                pubkey: sender_bytes.to_vec(),
+                sig: vec![],
+            },
+        ];
+        
+        let (valid_indices, bad_nonce_count) = nonce_precheck(&txs, &accounts);
+        
+        assert_eq!(bad_nonce_count, 0);
+        assert_eq!(valid_indices.len(), 2);
+        assert_eq!(valid_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_nonce_precheck_stale_nonce() {
+        use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
+        
+        let mut accounts = Accounts::default();
+        let sender_bytes: [u8; 20] = [0x42; 20];
+        let sender = Address(sender_bytes);
+        
+        // Set account nonce to 10
+        let acct = Account { balance: 1000, nonce: 10 };
+        accounts.put(sender, acct);
+        
+        // Create txs with mixed nonces - some stale (< 10), some valid (>= 10)
+        let txs = vec![
+            SignedTx {
+                core: TxCore { to: Address([0xBB; 20]), amount: 100, fee: 1, nonce: 5 }, // stale
+                pubkey: sender_bytes.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: Address([0xBB; 20]), amount: 100, fee: 1, nonce: 10 }, // valid
+                pubkey: sender_bytes.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: Address([0xBB; 20]), amount: 100, fee: 1, nonce: 8 }, // stale
+                pubkey: sender_bytes.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: Address([0xBB; 20]), amount: 100, fee: 1, nonce: 11 }, // valid
+                pubkey: sender_bytes.to_vec(),
+                sig: vec![],
+            },
+        ];
+        
+        let (valid_indices, bad_nonce_count) = nonce_precheck(&txs, &accounts);
+        
+        assert_eq!(bad_nonce_count, 2); // nonces 5 and 8 are stale
+        assert_eq!(valid_indices.len(), 2);
+        assert_eq!(valid_indices, vec![1, 3]); // indices of nonces 10 and 11
+    }
+
+    #[test]
+    fn test_nonce_precheck_all_stale() {
+        use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
+        
+        let mut accounts = Accounts::default();
+        let sender_bytes: [u8; 20] = [0x42; 20];
+        let sender = Address(sender_bytes);
+        
+        // Set account nonce to 100
+        let acct = Account { balance: 1000, nonce: 100 };
+        accounts.put(sender, acct);
+        
+        // Create txs with all stale nonces
+        let txs = vec![
+            SignedTx {
+                core: TxCore { to: Address([0xBB; 20]), amount: 100, fee: 1, nonce: 0 },
+                pubkey: sender_bytes.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: Address([0xBB; 20]), amount: 100, fee: 1, nonce: 50 },
+                pubkey: sender_bytes.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: Address([0xBB; 20]), amount: 100, fee: 1, nonce: 99 },
+                pubkey: sender_bytes.to_vec(),
+                sig: vec![],
+            },
+        ];
+        
+        let (valid_indices, bad_nonce_count) = nonce_precheck(&txs, &accounts);
+        
+        assert_eq!(bad_nonce_count, 3);
+        assert!(valid_indices.is_empty());
+    }
+
+    #[test]
+    fn test_nonce_precheck_empty_txs() {
+        use eezo_ledger::Accounts;
+        
+        let accounts = Accounts::default();
+        let txs: Vec<eezo_ledger::SignedTx> = vec![];
+        
+        let (valid_indices, bad_nonce_count) = nonce_precheck(&txs, &accounts);
+        
+        assert_eq!(bad_nonce_count, 0);
+        assert!(valid_indices.is_empty());
     }
 }
