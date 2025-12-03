@@ -132,6 +132,12 @@ pub struct StmConfig {
     pub max_retries: usize,
     /// Wave timeout in milliseconds (safety bound).
     pub wave_timeout_ms: u64,
+    /// T76.7: Number of execution lanes for parallel processing.
+    /// Configured via EEZO_EXEC_LANES env var (default 16, allow 32/48/64).
+    pub exec_lanes: usize,
+    /// T76.7: Optional cap on transactions per wave.
+    /// Configured via EEZO_EXEC_WAVE_CAP env var (default: no cap, i.e., 0 means unlimited).
+    pub wave_cap: usize,
 }
 
 impl Default for StmConfig {
@@ -140,6 +146,8 @@ impl Default for StmConfig {
             threads: num_cpus::get(),
             max_retries: 5,
             wave_timeout_ms: 1000,
+            exec_lanes: 16,
+            wave_cap: 0, // 0 means unlimited
         }
     }
 }
@@ -157,6 +165,8 @@ impl StmConfig {
     ///
     /// - `EEZO_STM_MAX_RETRIES`: Max retry attempts (default: 5)
     /// - `EEZO_STM_WAVE_TIMEOUT_MS`: Wave timeout in ms (default: 1000)
+    /// - `EEZO_EXEC_LANES`: Number of execution lanes (default: 16, allow 32/48/64)
+    /// - `EEZO_EXEC_WAVE_CAP`: Optional cap on txs per wave (default: 0 = unlimited)
     pub fn from_env(threads: usize) -> Self {
         let max_retries = std::env::var("EEZO_STM_MAX_RETRIES")
             .ok()
@@ -168,10 +178,34 @@ impl StmConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1000);
 
+        // T76.7: Parse exec_lanes from environment (default 16, allow 32/48/64)
+        let exec_lanes = std::env::var("EEZO_EXEC_LANES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|v| {
+                // Validate allowed values: 16, 32, 48, 64
+                match v {
+                    16 | 32 | 48 | 64 => v,
+                    _ => {
+                        log::warn!("EEZO_EXEC_LANES={} is not a valid value (allowed: 16/32/48/64), using default 16", v);
+                        16
+                    }
+                }
+            })
+            .unwrap_or(16);
+
+        // T76.7: Parse wave_cap from environment (default 0 = unlimited)
+        let wave_cap = std::env::var("EEZO_EXEC_WAVE_CAP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
         Self {
             threads,
             max_retries,
             wave_timeout_ms,
+            exec_lanes,
+            wave_cap,
         }
     }
 }
@@ -205,10 +239,24 @@ impl StmExecutor {
     }
 
     /// Create a new STM executor loading config from environment.
+    /// T76.7: Also logs and sets gauges for exec_lanes and wave_cap.
     pub fn from_env(threads: usize) -> Self {
-        Self {
-            config: StmConfig::from_env(threads),
+        let config = StmConfig::from_env(threads);
+        
+        // T76.7: Log the configured values
+        log::info!(
+            "stm-executor: initialized with threads={} exec_lanes={} wave_cap={} (0=unlimited)",
+            config.threads, config.exec_lanes, config.wave_cap
+        );
+        
+        // T76.7: Set gauge metrics
+        #[cfg(feature = "metrics")]
+        {
+            crate::metrics::exec_lanes_set(config.exec_lanes);
+            crate::metrics::exec_wave_cap_set(config.wave_cap);
         }
+        
+        Self { config }
     }
 
     /// Get the number of threads configured.
@@ -729,6 +777,9 @@ mod tests {
         assert!(config.threads > 0);
         assert_eq!(config.max_retries, 5);
         assert_eq!(config.wave_timeout_ms, 1000);
+        // T76.7: Check new fields
+        assert_eq!(config.exec_lanes, 16);
+        assert_eq!(config.wave_cap, 0); // 0 = unlimited
     }
 
     #[test]
@@ -737,11 +788,69 @@ mod tests {
             threads: 8,
             max_retries: 10,
             wave_timeout_ms: 500,
+            exec_lanes: 32,
+            wave_cap: 100,
         };
         let exec = StmExecutor::with_config(config);
         assert_eq!(exec.threads(), 8);
         assert_eq!(exec.config().max_retries, 10);
         assert_eq!(exec.config().wave_timeout_ms, 500);
+        // T76.7: Check new fields
+        assert_eq!(exec.config().exec_lanes, 32);
+        assert_eq!(exec.config().wave_cap, 100);
+    }
+
+    // T76.7: Test exec_lanes and wave_cap configuration from environment
+    #[test]
+    fn test_stm_config_from_env_defaults() {
+        // Clear env vars to test defaults
+        std::env::remove_var("EEZO_EXEC_LANES");
+        std::env::remove_var("EEZO_EXEC_WAVE_CAP");
+        
+        let config = StmConfig::from_env(4);
+        
+        assert_eq!(config.threads, 4);
+        assert_eq!(config.exec_lanes, 16); // default
+        assert_eq!(config.wave_cap, 0); // default, unlimited
+    }
+
+    #[test]
+    fn test_stm_config_from_env_valid_lanes() {
+        // Set valid exec_lanes values
+        std::env::set_var("EEZO_EXEC_LANES", "32");
+        std::env::set_var("EEZO_EXEC_WAVE_CAP", "50");
+        
+        let config = StmConfig::from_env(4);
+        
+        assert_eq!(config.exec_lanes, 32);
+        assert_eq!(config.wave_cap, 50);
+        
+        // Clean up
+        std::env::remove_var("EEZO_EXEC_LANES");
+        std::env::remove_var("EEZO_EXEC_WAVE_CAP");
+    }
+
+    #[test]
+    fn test_stm_config_from_env_invalid_lanes_defaults() {
+        // Set invalid exec_lanes value (should default to 16)
+        std::env::set_var("EEZO_EXEC_LANES", "100"); // Invalid, not in 16/32/48/64
+        
+        let config = StmConfig::from_env(4);
+        
+        assert_eq!(config.exec_lanes, 16); // Should default to 16
+        
+        // Clean up
+        std::env::remove_var("EEZO_EXEC_LANES");
+    }
+
+    #[test]
+    fn test_stm_config_with_threads() {
+        let config = StmConfig::with_threads(8);
+        
+        assert_eq!(config.threads, 8);
+        // T76.7: Ensure defaults are applied
+        assert_eq!(config.exec_lanes, 16);
+        assert_eq!(config.wave_cap, 0);
     }
 
     #[test]

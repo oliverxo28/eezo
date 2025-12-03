@@ -51,14 +51,19 @@ pub struct HybridBatchStats {
     pub decode_err: usize,
     /// Total size in bytes of decoded transactions
     pub size_bytes: usize,
+    /// T76.7: Number of batches aggregated for this block
+    pub agg_batches: usize,
+    /// T76.7: Total candidate count before dedup/nonce filtering (across all aggregated batches)
+    pub agg_candidates: usize,
 }
 
 #[cfg(feature = "dag-consensus")]
 impl HybridBatchStats {
     /// Format the stats as the required structured log line per T76.5 spec.
+    /// T76.7: Now includes agg_batches and agg_candidates.
     pub fn to_log_string(&self, apply_ok: usize, apply_fail: usize) -> String {
         format!(
-            "hybrid: n={} filtered_seen={} candidate={} used={} bad_nonce_pref={} missing={} decode_err={} apply_ok={} apply_fail={} size_bytes={}",
+            "hybrid: n={} filtered_seen={} candidate={} used={} bad_nonce_pref={} missing={} decode_err={} apply_ok={} apply_fail={} size_bytes={} agg_batches={} agg_candidates={}",
             self.n,
             self.filtered_seen,
             self.candidate,
@@ -68,7 +73,9 @@ impl HybridBatchStats {
             self.decode_err,
             apply_ok,
             apply_fail,
-            self.size_bytes
+            self.size_bytes,
+            self.agg_batches,
+            self.agg_candidates
         )
     }
 }
@@ -1236,12 +1243,13 @@ impl CoreRunnerHandle {
                 // T76.3: Try hybrid batch consumption when in hybrid mode with ordering enabled.
                 // When a batch is available with tx bytes, decode directly from bytes.
                 // For any entries missing bytes, fall back to mempool lookup per-entry.
+                // T76.7: Now uses multi-batch aggregation with configurable time budget.
                 #[cfg(feature = "dag-consensus")]
                 let mut hybrid_batch_used = false;
                 #[cfg(feature = "dag-consensus")]
-                let mut hybrid_batch_opt: Option<consensus_dag::OrderedBatch> = None;
+                let mut hybrid_aggregated_txs: Vec<SignedTx> = Vec::new();
                 #[cfg(feature = "dag-consensus")]
-                let mut resolved_tx_bytes: std::collections::HashMap<[u8; 32], bytes::Bytes> = std::collections::HashMap::new();
+                let mut hybrid_aggregated_stats: Option<HybridBatchStats> = None;
                 // T76.5: Track de-dup and nonce prefilter statistics per batch
                 #[cfg(feature = "dag-consensus")]
                 let mut hybrid_filtered_seen: usize = 0;
@@ -1251,63 +1259,67 @@ impl CoreRunnerHandle {
                 let mut hybrid_bad_nonce_prefilter: usize = 0;
                 #[cfg(feature = "dag-consensus")]
                 if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
+                    // T76.7: Parse aggregation time budget from environment (default 3ms, configurable 2-5ms)
+                    let agg_time_budget_ms: u64 = std::env::var("EEZO_HYBRID_AGG_TIME_BUDGET_MS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .map(|v: u64| v.clamp(2, 10)) // Clamp to reasonable range
+                        .unwrap_or(3);
+                    
                     // Try to get hybrid DAG handle
                     let hybrid_opt: Option<Arc<HybridDagHandle>> = hybrid_dag_c.lock().await.clone();
                     if let Some(hybrid_handle) = hybrid_opt {
-                        // T76.3: Peek first to avoid consuming empty batches
+                        // T76.7: Check if any batches are available
                         if hybrid_handle.peek_ordered_queue_len() > 0 {
-                            // Try to get next ordered batch from DAG
-                            match hybrid_handle.try_next_ordered_batch() {
-                                Some(batch) if !batch.is_empty() => {
-                                    // T76.6: Check if batch is stale (round <= node_start_round)
-                                    if hybrid_dedup_cache.is_stale_batch(batch.round) {
-                                        log::info!(
-                                            "hybrid: dropping stale batch (reason=pre-start-round, round={}, node_start_round={})",
-                                            batch.round, hybrid_dedup_cache.node_start_round()
-                                        );
-                                        crate::metrics::dag_hybrid_stale_batches_dropped_inc();
-                                        // Stale batch is dropped - hybrid_batch_used stays false,
-                                        // so normal tx collection (DAG source or mempool) will proceed
-                                    } else {
-                                        log::debug!(
-                                            "hybrid: dag batch available (n_txs={}, round={}, has_hashes={})",
-                                            batch.tx_count(),
-                                            batch.round,
-                                            batch.tx_hashes.is_some()
-                                        );
-                                        
-                                        // T76.3: If tx_hashes is present but tx_bytes is None,
-                                        // try to resolve bytes from the shared DAG mempool.
-                                        if let (Some(hashes), None) = (&batch.tx_hashes, &batch.tx_bytes) {
-                                            // Get DAG runner handle for mempool access
-                                            let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
-                                            if let Some(dag_handle) = dag_opt {
-                                                // Look up bytes for all tx hashes
-                                                let found = dag_handle.get_bytes_for_hashes(hashes).await;
-                                                for (hash, bytes_arc) in found {
-                                                    resolved_tx_bytes.insert(hash, bytes::Bytes::from((*bytes_arc).clone()));
-                                                }
-                                                log::debug!(
-                                                    "hybrid: resolved {} of {} tx bytes from shared mempool",
-                                                    resolved_tx_bytes.len(), hashes.len()
-                                                );
-                                            }
-                                        }
-                                        
-                                        hybrid_batch_opt = Some(batch);
-                                        hybrid_batch_used = true;
-                                    }
+                            // Get DAG runner handle for mempool access (needed by aggregation function)
+                            let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
+                            
+                            // Read block_byte_budget for aggregation
+                            let block_byte_budget = {
+                                let guard = node_c.lock().await;
+                                guard.cfg.block_byte_budget
+                            };
+                            
+                            // Get account snapshot for nonce checking
+                            let accounts = {
+                                let guard = node_c.lock().await;
+                                guard.accounts.clone()
+                            };
+                            
+                            // T76.7: Use multi-batch aggregation
+                            let (agg_txs, agg_stats) = Self::collect_txs_from_aggregated_batches(
+                                &hybrid_handle,
+                                dag_opt,
+                                block_byte_budget,
+                                &hybrid_dedup_cache,
+                                &accounts,
+                                agg_time_budget_ms,
+                            ).await;
+                            
+                            if agg_stats.agg_batches > 0 {
+                                hybrid_filtered_seen = agg_stats.filtered_seen;
+                                hybrid_candidate_count = agg_stats.candidate;
+                                hybrid_bad_nonce_prefilter = agg_stats.bad_nonce_pref;
+                                
+                                if !agg_txs.is_empty() {
+                                    hybrid_aggregated_txs = agg_txs;
+                                    hybrid_aggregated_stats = Some(agg_stats);
+                                    hybrid_batch_used = true;
+                                    crate::metrics::dag_hybrid_batches_used_inc();
+                                    log::debug!(
+                                        "hybrid-agg: successfully aggregated {} batches with {} txs",
+                                        hybrid_aggregated_stats.as_ref().map(|s| s.agg_batches).unwrap_or(0),
+                                        hybrid_aggregated_txs.len()
+                                    );
+                                } else {
+                                    // Batches consumed but no valid txs - store stats for logging
+                                    hybrid_aggregated_stats = Some(agg_stats);
+                                    log::debug!("hybrid-agg: batches consumed but no valid txs after filtering");
                                 }
-                                Some(_) => {
-                                    // Empty batch - fallback
-                                    log::debug!("hybrid: fallback (reason=empty_batch)");
-                                    crate::metrics::dag_hybrid_fallback_inc();
-                                }
-                                None => {
-                                    // No batch available - fallback  
-                                    log::debug!("hybrid: fallback (reason=no_batch)");
-                                    crate::metrics::dag_hybrid_fallback_inc();
-                                }
+                            } else {
+                                // No batches consumed - fallback
+                                log::debug!("hybrid: fallback (reason=no_batches_aggregated)");
+                                crate::metrics::dag_hybrid_fallback_inc();
                             }
                         } else {
                             // No batches ready - fallback
@@ -1405,103 +1417,78 @@ impl CoreRunnerHandle {
                     };
                     
                     // 1–2. Collect transactions for this block from the chosen source.
-                    // T76.5: If hybrid batch is available, process with de-dup and nonce precheck.
+                    // T76.7: If hybrid batch aggregation succeeded, use the pre-aggregated transactions.
                     // Otherwise, fall back to DAG source or mempool as before.
                     #[cfg(feature = "dag-consensus")]
                     let txs = if hybrid_batch_used {
-                        if let Some(ref batch) = hybrid_batch_opt {
-                            // T76.5: Process hybrid batch with de-dup filtering and nonce pre-check
-                            let block_max_bytes = guard.cfg.block_byte_budget;
+                        // T76.7: Use the pre-aggregated transactions from multi-batch aggregation
+                        if !hybrid_aggregated_txs.is_empty() {
+                            // Store stats for structured logging after execution
+                            hybrid_stats_opt = hybrid_aggregated_stats.clone();
                             
-                            // T76.5: Use the new function with de-dup and nonce precheck
-                            let (hybrid_txs, stats) = 
-                                Self::collect_txs_from_hybrid_batch_with_dedup_and_nonce_check(
-                                    batch,
-                                    &resolved_tx_bytes,
-                                    block_max_bytes,
-                                    &hybrid_dedup_cache,
-                                    &guard.accounts,
-                                );
+                            // T76.7: Update metrics from aggregated stats
+                            if let Some(ref stats) = hybrid_stats_opt {
+                                crate::metrics::dag_hybrid_hashes_total_inc_by(stats.n as u64);
+                                crate::metrics::dag_hybrid_hashes_resolved_inc_by(stats.used as u64);
+                                crate::metrics::dag_hybrid_hashes_missing_inc_by(stats.missing as u64);
+                                crate::metrics::dag_hybrid_decode_errors_inc_by(stats.decode_err as u64);
+                                // Legacy metrics for backwards compatibility
+                                crate::metrics::dag_hybrid_bytes_used_inc_by(stats.used as u64);
+                                crate::metrics::dag_hybrid_bytes_missing_inc_by(stats.missing as u64);
+                                crate::metrics::dag_hybrid_decode_error_inc_by(stats.decode_err as u64);
+                            }
                             
-                            // T76.5: Update metrics from stats
-                            crate::metrics::dag_hybrid_batches_used_inc();
-                            crate::metrics::dag_hybrid_hashes_total_inc_by(stats.n as u64);
-                            crate::metrics::dag_hybrid_hashes_resolved_inc_by(stats.used as u64);
-                            crate::metrics::dag_hybrid_hashes_missing_inc_by(stats.missing as u64);
-                            crate::metrics::dag_hybrid_decode_errors_inc_by(stats.decode_err as u64);
-                            // Legacy metrics for backwards compatibility
-                            crate::metrics::dag_hybrid_bytes_used_inc_by(stats.used as u64);
-                            crate::metrics::dag_hybrid_bytes_missing_inc_by(stats.missing as u64);
-                            crate::metrics::dag_hybrid_decode_error_inc_by(stats.decode_err as u64);
+                            hybrid_aggregated_txs
+                        } else {
+                            // Batches were consumed but no valid txs - fallback logic
+                            hybrid_stats_opt = hybrid_aggregated_stats.clone();
                             
-                            // T76.5: Store stats for structured logging after execution
-                            // (apply_ok and apply_fail will be added after execution)
-                            hybrid_filtered_seen = stats.filtered_seen;
-                            hybrid_candidate_count = stats.candidate;
-                            hybrid_bad_nonce_prefilter = stats.bad_nonce_pref;
-                            hybrid_stats_opt = Some(stats);
-                            
-                            // Clone stats from hybrid_stats_opt for use in logging below
-                            // (hybrid_stats_opt is Some at this point)
-                            let stats = hybrid_stats_opt.as_ref().unwrap();
-                            
-                            if !hybrid_txs.is_empty() {
-                                hybrid_txs
-                            } else {
+                            if let Some(ref stats) = hybrid_stats_opt {
                                 // T76.6: Determine the reason for empty candidates and log appropriately
-                                // - dedup_all: all txs filtered by de-dup (pure de-dup, no new txs)
-                                // - decode_errors: some decode failures (genuine error, WARN)
-                                // - no_candidates_mempool_empty: no candidates AND mempool empty (INFO, skip fallback)
-                                
-                                // Update the empty_candidates metric
                                 crate::metrics::dag_hybrid_empty_candidates_inc();
                                 
                                 if stats.decode_err > 0 {
-                                    // Genuine error: decode failures present
                                     log::warn!(
-                                        "hybrid: batch failed with decode errors (reason=decode-errors, n={} decode_err={})",
+                                        "hybrid-agg: aggregation failed with decode errors (reason=decode-errors, n={} decode_err={})",
                                         stats.n, stats.decode_err
                                     );
                                     crate::metrics::dag_hybrid_fallback_inc();
                                     Self::collect_from_mempool(&mut guard, block_max_tx)
                                 } else if stats.filtered_seen == stats.n && stats.n > 0 {
-                                    // Pure de-dup: all txs were already committed
                                     log::info!(
-                                        "hybrid: batch filtered (reason=dedup-all, n={} filtered_seen={})",
+                                        "hybrid-agg: all batches filtered (reason=dedup-all, n={} filtered_seen={})",
                                         stats.n, stats.filtered_seen
                                     );
                                     crate::metrics::dag_hybrid_all_filtered_inc();
-                                    // Check if mempool is empty - if so, skip fallback
                                     let mempool_len = guard.mempool.len();
                                     if mempool_len == 0 {
-                                        log::info!("hybrid: no-candidates-mempool-empty, continuing without fallback");
-                                        Vec::new() // Return empty - block will be empty
+                                        log::info!("hybrid-agg: no-candidates-mempool-empty, continuing without fallback");
+                                        Vec::new()
                                     } else {
                                         crate::metrics::dag_hybrid_fallback_inc();
                                         Self::collect_from_mempool(&mut guard, block_max_tx)
                                     }
                                 } else {
-                                    // Other reason: candidate == 0 after dedup/nonce prefilter
                                     let mempool_len = guard.mempool.len();
                                     if mempool_len == 0 {
                                         log::info!(
-                                            "hybrid: no candidates (reason=no-candidates-mempool-empty, n={} filtered={} bad_nonce={})",
+                                            "hybrid-agg: no candidates (reason=no-candidates-mempool-empty, n={} filtered={} bad_nonce={})",
                                             stats.n, stats.filtered_seen, stats.bad_nonce_pref
                                         );
-                                        Vec::new() // Return empty - block will be empty
+                                        Vec::new()
                                     } else {
                                         log::info!(
-                                            "hybrid: no candidates (reason=filtered-out, n={} filtered={} bad_nonce={}), fallback to mempool",
+                                            "hybrid-agg: no candidates (reason=filtered-out, n={} filtered={} bad_nonce={}), fallback to mempool",
                                             stats.n, stats.filtered_seen, stats.bad_nonce_pref
                                         );
                                         crate::metrics::dag_hybrid_fallback_inc();
                                         Self::collect_from_mempool(&mut guard, block_max_tx)
                                     }
                                 }
+                            } else {
+                                // No stats available - shouldn't happen but fallback anyway
+                                Self::collect_from_mempool(&mut guard, block_max_tx)
                             }
-                        } else {
-                            // Shouldn't happen if hybrid_batch_used is true
-                            Self::collect_from_mempool(&mut guard, block_max_tx)
                         }
                     } else {
                         // T68.1: If DAG source is selected and returned txs, use those;
@@ -2418,6 +2405,8 @@ impl CoreRunnerHandle {
                 missing: 0,
                 decode_err: 0,
                 size_bytes: 0,
+                agg_batches: 1, // Single batch
+                agg_candidates: 0, // No candidates after dedup
             });
         }
 
@@ -2519,8 +2508,281 @@ impl CoreRunnerHandle {
             missing: bytes_missing,
             decode_err: decode_errors,
             size_bytes: total_size_bytes,
+            agg_batches: 1, // Single batch - will be updated for multi-batch aggregation
+            agg_candidates: candidate, // For single batch, agg_candidates == candidate
         };
 
+        (final_txs, stats)
+    }
+
+    /// T76.7: Aggregate multiple OrderedBatches with de-dup filtering and nonce pre-check.
+    ///
+    /// This implements multi-batch aggregation per the T76.7 spec:
+    /// - Consume ≥1 ready DAG batches for a single block
+    /// - Stop aggregating when max_bytes exceeded, no more ready batches, or time budget elapsed
+    /// - Run de-dup + nonce prefilter across the union of all candidates
+    /// - Preserve T76.4 partial-failure execution semantics
+    ///
+    /// Returns a tuple of:
+    /// - `txs`: Successfully decoded and validated transactions
+    /// - `stats`: HybridBatchStats with agg_batches and agg_candidates set
+    #[cfg(feature = "dag-consensus")]
+    async fn collect_txs_from_aggregated_batches(
+        hybrid_handle: &Arc<crate::dag_consensus_runner::HybridDagHandle>,
+        dag_handle: Option<Arc<DagRunnerHandle>>,
+        block_max_bytes: usize,
+        dedup_cache: &crate::dag_consensus_runner::HybridDedupCache,
+        accounts: &eezo_ledger::Accounts,
+        agg_time_budget_ms: u64,
+    ) -> (Vec<SignedTx>, HybridBatchStats) {
+        use std::time::Instant;
+        
+        let agg_start = Instant::now();
+        let time_budget = std::time::Duration::from_millis(agg_time_budget_ms);
+        
+        // Aggregated values
+        let mut all_hashes: Vec<[u8; 32]> = Vec::new();
+        let mut all_resolved_bytes: std::collections::HashMap<[u8; 32], bytes::Bytes> = std::collections::HashMap::new();
+        let mut total_n: usize = 0;
+        let mut batches_consumed: usize = 0;
+        let mut current_bytes: usize = 0;
+        let mut stale_batches_dropped: usize = 0;
+        
+        // Aggregation loop: consume batches until limits are reached
+        loop {
+            // Check time budget
+            if agg_start.elapsed() >= time_budget {
+                log::debug!(
+                    "hybrid-agg: time budget elapsed ({:?} >= {:?}), stopping aggregation",
+                    agg_start.elapsed(), time_budget
+                );
+                break;
+            }
+            
+            // Check if more batches are available
+            if hybrid_handle.peek_ordered_queue_len() == 0 {
+                log::debug!("hybrid-agg: no more batches available, stopping aggregation");
+                break;
+            }
+            
+            // Try to get next batch
+            match hybrid_handle.try_next_ordered_batch() {
+                Some(batch) if !batch.is_empty() => {
+                    // Check if batch is stale
+                    if dedup_cache.is_stale_batch(batch.round) {
+                        log::info!(
+                            "hybrid-agg: dropping stale batch (reason=pre-start-round, round={}, node_start_round={})",
+                            batch.round, dedup_cache.node_start_round()
+                        );
+                        crate::metrics::dag_hybrid_stale_batches_dropped_inc();
+                        stale_batches_dropped += 1;
+                        continue; // Try next batch
+                    }
+                    
+                    // Get tx hashes from this batch
+                    if let Some(hashes) = &batch.tx_hashes {
+                        // Estimate bytes for this batch (rough estimate)
+                        let estimated_batch_bytes = batch.total_bytes_size();
+                        
+                        // Check if adding this batch would exceed max_bytes
+                        if current_bytes > 0 && current_bytes + estimated_batch_bytes > block_max_bytes {
+                            log::debug!(
+                                "hybrid-agg: batch would exceed max_bytes ({} + {} > {}), stopping",
+                                current_bytes, estimated_batch_bytes, block_max_bytes
+                            );
+                            break;
+                        }
+                        
+                        // Resolve bytes for this batch if needed
+                        if let (Some(batch_hashes), None) = (&batch.tx_hashes, &batch.tx_bytes) {
+                            if let Some(ref dag_h) = dag_handle {
+                                let found = dag_h.get_bytes_for_hashes(batch_hashes).await;
+                                for (hash, bytes_arc) in found {
+                                    all_resolved_bytes.insert(hash, bytes::Bytes::from((*bytes_arc).clone()));
+                                }
+                            }
+                        }
+                        
+                        // Add hashes from batch to aggregate
+                        for hash in hashes {
+                            all_hashes.push(*hash);
+                        }
+                        
+                        // Copy bytes from batch if present
+                        if let Some(tx_bytes) = &batch.tx_bytes {
+                            for (i, bytes_opt) in tx_bytes.iter().enumerate() {
+                                if let Some(bytes) = bytes_opt {
+                                    if i < hashes.len() {
+                                        all_resolved_bytes.insert(hashes[i], bytes.clone());
+                                    }
+                                }
+                            }
+                        }
+                        
+                        total_n += hashes.len();
+                        current_bytes += estimated_batch_bytes;
+                        batches_consumed += 1;
+                        
+                        log::debug!(
+                            "hybrid-agg: consumed batch {} (round={}, txs={}, total_agg={})",
+                            batches_consumed, batch.round, hashes.len(), total_n
+                        );
+                    }
+                }
+                Some(_) => {
+                    // Empty batch - skip and continue
+                    log::debug!("hybrid-agg: skipping empty batch");
+                    continue;
+                }
+                None => {
+                    // No batch available - stop
+                    log::debug!("hybrid-agg: no batch available, stopping");
+                    break;
+                }
+            }
+        }
+        
+        // If no batches were consumed, return empty result
+        if batches_consumed == 0 {
+            log::debug!("hybrid-agg: no batches consumed, returning empty (stale_dropped={})", stale_batches_dropped);
+            return (Vec::new(), HybridBatchStats {
+                n: 0,
+                filtered_seen: 0,
+                candidate: 0,
+                used: 0,
+                bad_nonce_pref: 0,
+                missing: 0,
+                decode_err: 0,
+                size_bytes: 0,
+                agg_batches: batches_consumed,
+                agg_candidates: 0,
+            });
+        }
+        
+        // Apply de-dup filter to the aggregated hashes (union de-dup)
+        let (candidate_hashes, filtered_seen) = dedup_cache.filter_batch(&all_hashes);
+        let candidate = candidate_hashes.len();
+        
+        // Update metrics for de-dup filtering
+        crate::metrics::dag_hybrid_seen_before_inc_by(filtered_seen as u64);
+        crate::metrics::dag_hybrid_candidate_inc_by(candidate as u64);
+        
+        // If all hashes were filtered out, return early
+        if candidate == 0 && filtered_seen > 0 {
+            log::debug!(
+                "hybrid-agg: all {} hashes filtered by de-dup across {} batches, no candidates",
+                filtered_seen, batches_consumed
+            );
+            return (Vec::new(), HybridBatchStats {
+                n: total_n,
+                filtered_seen,
+                candidate: 0,
+                used: 0,
+                bad_nonce_pref: 0,
+                missing: 0,
+                decode_err: 0,
+                size_bytes: 0,
+                agg_batches: batches_consumed,
+                agg_candidates: candidate,
+            });
+        }
+        
+        // Decode transactions from filtered candidates
+        let mut txs: Vec<SignedTx> = Vec::new();
+        let mut bytes_used: usize = 0;
+        let mut bytes_missing: usize = 0;
+        let mut decode_errors: usize = 0;
+        let mut total_size_bytes: usize = 0;
+        let mut current_tx_bytes: usize = 0;
+        
+        for hash in &candidate_hashes {
+            // Check if we've exceeded block max_bytes cap
+            if current_tx_bytes >= block_max_bytes {
+                log::debug!(
+                    "hybrid-agg: block max_bytes cap reached ({} >= {}), leaving remainder",
+                    current_tx_bytes, block_max_bytes
+                );
+                break;
+            }
+            
+            if let Some(bytes) = all_resolved_bytes.get(hash) {
+                let tx_size = bytes.len();
+                
+                if current_tx_bytes + tx_size > block_max_bytes {
+                    log::debug!(
+                        "hybrid-agg: tx would exceed block_max_bytes ({} + {} > {}), stopping",
+                        current_tx_bytes, tx_size, block_max_bytes
+                    );
+                    break;
+                }
+                
+                match crate::dag_runner::parse_signed_tx_from_envelope(bytes) {
+                    Some(stx) => {
+                        txs.push(stx);
+                        bytes_used += 1;
+                        current_tx_bytes += tx_size;
+                        total_size_bytes += tx_size;
+                    }
+                    None => {
+                        decode_errors += 1;
+                        log::warn!(
+                            "hybrid-agg: decode error for tx hash=0x{}",
+                            hex::encode(&hash[..4])
+                        );
+                    }
+                }
+            } else {
+                bytes_missing += 1;
+                log::debug!(
+                    "hybrid-agg: missing bytes for tx hash=0x{}",
+                    hex::encode(&hash[..4])
+                );
+            }
+        }
+        
+        // Apply nonce pre-check
+        let (valid_indices, bad_nonce_count) = 
+            crate::dag_consensus_runner::nonce_precheck(&txs, accounts);
+        
+        // Update metrics for nonce prefilter
+        crate::metrics::dag_hybrid_bad_nonce_prefilter_inc_by(bad_nonce_count as u64);
+        
+        // Filter txs to only include valid indices
+        let final_txs: Vec<SignedTx> = if valid_indices.len() == txs.len() {
+            txs
+        } else {
+            let mut keep_mask = vec![false; txs.len()];
+            for &idx in &valid_indices {
+                keep_mask[idx] = true;
+            }
+            txs.into_iter()
+                .enumerate()
+                .filter_map(|(i, tx)| if keep_mask[i] { Some(tx) } else { None })
+                .collect()
+        };
+        
+        log::info!(
+            "hybrid-agg: aggregated {} batches, total_n={}, filtered_seen={}, candidates={}, used={}",
+            batches_consumed, total_n, filtered_seen, candidate, bytes_used
+        );
+        
+        // Emit aggregation metrics
+        crate::metrics::observe_hybrid_agg_batches_per_block(batches_consumed as u64);
+        crate::metrics::observe_hybrid_agg_tx_candidates(candidate as u64);
+        
+        let stats = HybridBatchStats {
+            n: total_n,
+            filtered_seen,
+            candidate,
+            used: bytes_used,
+            bad_nonce_pref: bad_nonce_count,
+            missing: bytes_missing,
+            decode_err: decode_errors,
+            size_bytes: total_size_bytes,
+            agg_batches: batches_consumed,
+            agg_candidates: candidate,
+        };
+        
         (final_txs, stats)
     }
 

@@ -1932,11 +1932,143 @@ pub fn register_t73_stm_metrics() {
     let _ = &*EEZO_STM_WAVES_PER_BLOCK;
     let _ = &*EEZO_STM_CONFLICTS_PER_BLOCK;
     let _ = &*EEZO_STM_RETRIES_PER_BLOCK;
+    // T76.7: Also register exec lanes/wave cap gauges
+    register_t76_stm_tuning_metrics();
 }
 
 /// No-op version when metrics feature is disabled.
 #[cfg(not(feature = "metrics"))]
 pub fn register_t73_stm_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
+// T76.7 — STM executor tuning gauges
+// -----------------------------------------------------------------------------
+
+/// Gauge: Number of execution lanes configured for STM executor.
+/// Set from EEZO_EXEC_LANES env var (default 16, allow 32/48/64).
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_LANES: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_exec_lanes",
+        "Number of execution lanes configured for STM executor"
+    )
+    .unwrap()
+});
+
+/// Gauge: Optional cap on transactions per wave in STM executor.
+/// Set from EEZO_EXEC_WAVE_CAP env var (0 = unlimited).
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_WAVE_CAP: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_exec_wave_cap",
+        "Optional cap on transactions per wave in STM executor (0=unlimited)"
+    )
+    .unwrap()
+});
+
+/// Helper: Set the exec_lanes gauge.
+#[inline]
+pub fn exec_lanes_set(lanes: usize) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_LANES.set(lanes as i64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = lanes;
+    }
+}
+
+/// Helper: Set the wave_cap gauge.
+#[inline]
+pub fn exec_wave_cap_set(cap: usize) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_WAVE_CAP.set(cap as i64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = cap;
+    }
+}
+
+/// Eagerly register T76.7 STM tuning metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t76_stm_tuning_metrics() {
+    let _ = &*EEZO_EXEC_LANES;
+    let _ = &*EEZO_EXEC_WAVE_CAP;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t76_stm_tuning_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
+// T76.7 — Hybrid aggregation metrics
+// -----------------------------------------------------------------------------
+
+/// Histogram: Number of DAG batches aggregated per block in hybrid mode.
+#[cfg(feature = "metrics")]
+pub static EEZO_HYBRID_AGG_BATCHES_PER_BLOCK: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_hybrid_agg_batches_per_block",
+        "Number of DAG batches aggregated per block in hybrid mode",
+        vec![1.0, 2.0, 3.0, 5.0, 8.0, 10.0, 15.0, 20.0, 30.0, 50.0]
+    )
+    .unwrap()
+});
+
+/// Histogram: Total tx candidates aggregated per block in hybrid mode.
+#[cfg(feature = "metrics")]
+pub static EEZO_HYBRID_AGG_TX_CANDIDATES: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_hybrid_agg_tx_candidates",
+        "Total tx candidates aggregated per block in hybrid mode",
+        vec![1.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0]
+    )
+    .unwrap()
+});
+
+/// Helper: Observe number of batches aggregated per block.
+#[inline]
+pub fn observe_hybrid_agg_batches_per_block(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_HYBRID_AGG_BATCHES_PER_BLOCK.observe(count as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Observe total tx candidates aggregated per block.
+#[inline]
+pub fn observe_hybrid_agg_tx_candidates(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_HYBRID_AGG_TX_CANDIDATES.observe(count as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Eagerly register T76.7 hybrid aggregation metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t76_hybrid_agg_metrics() {
+    let _ = &*EEZO_HYBRID_AGG_BATCHES_PER_BLOCK;
+    let _ = &*EEZO_HYBRID_AGG_TX_CANDIDATES;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t76_hybrid_agg_metrics() {
     // No metrics to register when the feature is off.
 }
 // -----------------------------------------------------------------------------
@@ -2079,6 +2211,8 @@ pub fn register_dag_hybrid_metrics() {
     register_dag_hybrid_dedup_metrics();
     // T76.6: Also register the startup/stale batch metrics
     register_dag_hybrid_startup_metrics();
+    // T76.7: Also register the aggregation metrics
+    register_t76_hybrid_agg_metrics();
 }
 
 /// No-op version when metrics feature is disabled.
