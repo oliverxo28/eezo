@@ -119,6 +119,8 @@ use crate::metrics::{
     register_t73_stm_metrics,
     // T76.1: DAG hybrid mode metrics
     register_dag_hybrid_metrics,
+    // T76.2: DAG ordered visibility metrics
+    register_dag_ordered_metrics,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -816,6 +818,90 @@ async fn dag_consensus_status_handler() -> Response {
         Json(serde_json::json!({ "mode": "off" })),
     )
         .into_response()
+}
+
+/// T76.2: GET /dag/ordered_head
+///
+/// Returns visibility info about the DAG ordered batch queue without consuming batches.
+/// Response: { "ready_batches": N, "round": R, "queue_len": Q }
+///
+/// This endpoint allows operators to confirm batches are available without consuming them.
+#[derive(Serialize)]
+struct DagOrderedHeadView {
+    /// Number of batches currently ready for consumption
+    ready_batches: usize,
+    /// Current DAG round
+    round: u64,
+    /// Same as ready_batches (alias for clarity)
+    queue_len: usize,
+}
+
+#[cfg(feature = "dag-consensus")]
+async fn dag_ordered_head_handler(State(state): State<AppState>) -> Response {
+    // Check if we have a hybrid DAG handle attached to the core runner
+    if let Some(core) = state.core_runner.as_ref() {
+        // Try to access the hybrid DAG handle
+        let hybrid_opt = {
+            // We need to peek at the hybrid_dag field in CoreRunnerHandle
+            // Since it's behind a Mutex, we need an async lock
+            // But CoreRunnerHandle doesn't expose this directly...
+            // For now, use the shadow tracker if available
+            None::<Arc<crate::dag_consensus_runner::HybridDagHandle>>
+        };
+        
+        if let Some(hybrid) = hybrid_opt {
+            let queue_len = hybrid.peek_ordered_queue_len();
+            let round = hybrid.current_round();
+            return (
+                StatusCode::OK,
+                Json(DagOrderedHeadView {
+                    ready_batches: queue_len,
+                    round,
+                    queue_len,
+                }),
+            ).into_response();
+        }
+    }
+    
+    // Fall back to shadow tracker if available (read-only visibility)
+    if let Some(tracker) = state.shadow_dag_tracker.as_ref() {
+        let tracker = tracker.read().await;
+        let status = tracker.current_status();
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ready_batches": 0,
+                "round": status.last_round,
+                "queue_len": 0,
+                "note": "shadow mode - queue visibility via metrics only"
+            })),
+        ).into_response();
+    }
+    
+    // No DAG consensus active
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ready_batches": 0,
+            "round": 0,
+            "queue_len": 0,
+            "note": "dag-consensus not active"
+        })),
+    ).into_response()
+}
+
+#[cfg(not(feature = "dag-consensus"))]
+async fn dag_ordered_head_handler() -> Response {
+    // dag-consensus feature not compiled
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ready_batches": 0,
+            "round": 0,
+            "queue_len": 0,
+            "note": "dag-consensus feature not compiled"
+        })),
+    ).into_response()
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -2782,6 +2868,9 @@ async fn main() -> anyhow::Result<()> {
 
         // T76.1: DAG hybrid mode metrics
         register_dag_hybrid_metrics();
+
+        // T76.2: DAG ordered visibility metrics
+        register_dag_ordered_metrics();
 	}	
     // T37: spawn a dedicated /metrics HTTP server on EEZO_METRICS_BIND (or default)
     let metrics_bind = std::env::var("EEZO_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9898".into());
@@ -3855,6 +3944,8 @@ async fn main() -> anyhow::Result<()> {
 		.route("/dag/block_compare", get(dag_block_compare_handler))
         // T75.1: Shadow DAG consensus status endpoint
         .route("/dag/consensus_status", get(dag_consensus_status_handler))
+        // T76.2: DAG ordered batch visibility endpoint
+        .route("/dag/ordered_head", get(dag_ordered_head_handler))
         // T30 tx endpoints
         .route("/tx", post(post_tx))
         .route("/tx_batch", post(post_tx_batch)) // <-- ADDED

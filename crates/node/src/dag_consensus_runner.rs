@@ -357,6 +357,10 @@ impl DagConsensusShadowRunner {
     ///
     /// This method consumes the runner and loops until the channel is closed
     /// (typically on node shutdown).
+    ///
+    /// T76.2: In shadow mode, we submit payloads but do NOT drain the ordered queue.
+    /// The ordered queue is left intact so that CoreRunner (in hybrid mode) can consume it.
+    /// Shadow runner only updates metrics based on queue length (peek, not consume).
     pub async fn run(mut self) {
         // Log startup with actual config values
         log::info!(
@@ -383,6 +387,13 @@ impl DagConsensusShadowRunner {
             // Convert the block summary into a DAG payload
             let payload = self.summary_to_payload(&summary);
 
+            // Log before submit (T76.2 nice-to-have log)
+            log::info!(
+                "shadow-dag: submitted payload (round={}, txs={})",
+                self.handle.current_round(),
+                summary.tx_hashes.len()
+            );
+
             // Submit to the DAG handle
             match self.handle.submit_payload(payload) {
                 Ok(vertex_id) => {
@@ -402,39 +413,42 @@ impl DagConsensusShadowRunner {
                 }
             }
 
-            // Poll for ordered batches and log them
-            while let Some(batch) = self.handle.try_next_ordered_batch() {
-                let tx_count = batch.bundles.iter().map(|b| b.tx_count).sum::<usize>();
-                
+            // T76.2: Peek at ordered queue length for metrics (DO NOT DRAIN).
+            // In shadow mode, we only observe the queue size, we don't consume batches.
+            // Consumption is done by CoreRunner in hybrid mode.
+            let queue_len = self.handle.peek_ordered_queue_len();
+            
+            // Update the "ready" gauge with current queue length
+            #[cfg(feature = "metrics")]
+            crate::metrics::dag_ordered_ready_set(queue_len as u64);
+            
+            if queue_len > 0 {
                 log::debug!(
-                    "dag-consensus: shadow batch ordered (round={}, blocks={}, total_vertices={}, tx_count={})",
-                    batch.round,
-                    batch.bundles.len(),
-                    batch.vertex_count(),
-                    tx_count
+                    "dag-consensus: shadow mode, {} batch(es) ready in queue (not consuming)",
+                    queue_len
                 );
+            }
 
-                // T75.2: Record DAG ordered batch in tracker with tx hashes
-                // In shadow mode, we use the canonical tx hashes as what the DAG
-                // would have ordered (since we feed the same data to the DAG)
-                {
-                    let mut tracker = self.tracker.write().await;
-                    // Get canonical tx hashes for this round (which in shadow mode == height)
-                    let dag_tx_hashes = tracker.get_canonical_tx_hashes(batch.round)
-                        .unwrap_or_default();
+            // T75.2: Record DAG ordered batch in tracker with tx hashes
+            // Since we're not consuming, we record based on submitting the block summary.
+            // The round == height correspondence in shadow mode is maintained by advance_round().
+            {
+                let mut tracker = self.tracker.write().await;
+                // Use the canonical tx hashes we just submitted
+                let dag_tx_hashes = summary.tx_hashes.clone();
+                let round = self.handle.current_round();
+                
+                let is_mismatch = tracker.record_dag_ordered(round, dag_tx_hashes);
+                
+                // T75.2: Increment mismatch counter if detected
+                if is_mismatch {
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::dag_shadow_hash_mismatch_inc();
                     
-                    let is_mismatch = tracker.record_dag_ordered(batch.round, dag_tx_hashes);
-                    
-                    // T75.2: Increment mismatch counter if detected
-                    if is_mismatch {
-                        #[cfg(feature = "metrics")]
-                        crate::metrics::dag_shadow_hash_mismatch_inc();
-                        
-                        log::warn!(
-                            "dag-consensus: hash mismatch detected at height/round={}",
-                            batch.round
-                        );
-                    }
+                    log::warn!(
+                        "dag-consensus: hash mismatch detected at height/round={}",
+                        round
+                    );
                 }
             }
 
@@ -743,6 +757,13 @@ impl HybridDagHandle {
     /// Get the tracker for status queries.
     pub fn tracker(&self) -> Arc<RwLock<DagConsensusTracker>> {
         Arc::clone(&self.tracker)
+    }
+
+    /// T76.2: Peek at the number of ordered batches available without consuming them.
+    ///
+    /// Used for visibility metrics to show how many batches are ready.
+    pub fn peek_ordered_queue_len(&self) -> usize {
+        self.handle.peek_ordered_queue_len()
     }
 
     /// Convert a ShadowBlockSummary into a DagPayload.
