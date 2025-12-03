@@ -1465,6 +1465,14 @@ impl DagRunnerHandle {
         Some(txs)
     }
 
+    /// T76.3: Look up tx bytes from the shared mempool by their hashes.
+    ///
+    /// This is used by the hybrid consumer to resolve tx bytes for DAG batches.
+    /// Returns a map of hash -> bytes for successfully looked up transactions.
+    pub async fn get_bytes_for_hashes(&self, hashes: &[[u8; 32]]) -> Vec<([u8; 32], Arc<Vec<u8>>)> {
+        self.mempool.get_bytes_for_hashes(hashes).await
+    }
+
     /// T69.0: Evaluate the current DAG template against the given policy.
     ///
     /// This runs a dry-run of the DAG candidate and evaluates whether it meets
