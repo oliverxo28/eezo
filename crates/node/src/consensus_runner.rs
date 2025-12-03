@@ -2076,14 +2076,16 @@ impl CoreRunnerHandle {
                     break;
                 }
 
-                // First try batch's tx_bytes, then resolved_bytes from shared mempool
-                let bytes_opt = batch.tx_bytes.as_ref()
-                    .and_then(|v| v.iter().position(|_| true)) // placeholder
-                    .and_then(|_| None)
-                    .or_else(|| resolved_bytes.get(hash));
+                // T76.3: Try batch's tx_bytes first (if present and at this index),
+                // otherwise fall back to resolved_bytes from shared mempool
+                let hashes = batch.tx_hashes.as_ref().unwrap(); // safe: we're in the if let Some block
+                let idx = hashes.iter().position(|h| h == hash).unwrap_or(usize::MAX);
+                let batch_bytes = batch.tx_bytes.as_ref()
+                    .and_then(|v| v.get(idx))
+                    .and_then(|opt| opt.as_ref());
                 
-                // Check resolved_bytes directly for this hash
-                if let Some(bytes) = resolved_bytes.get(hash) {
+                // Use batch bytes if available, otherwise use resolved bytes
+                if let Some(bytes) = batch_bytes.or_else(|| resolved_bytes.get(hash)) {
                     let tx_size = bytes.len();
                     
                     // Check if this tx would exceed the byte budget
@@ -2131,7 +2133,7 @@ impl CoreRunnerHandle {
                 }
 
                 // Try batch bytes first, then resolved
-                let bytes = bytes_opt.or_else(|| resolved_bytes.get(&hash).map(|b| b));
+                let bytes = bytes_opt.or_else(|| resolved_bytes.get(&hash));
                 
                 if let Some(bytes_ref) = bytes {
                     let tx_size = bytes_ref.len();
