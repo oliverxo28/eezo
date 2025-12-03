@@ -861,6 +861,10 @@ pub struct HybridDedupCache {
     max_size: usize,
     /// Last height at which GC was performed
     last_gc_height: std::sync::atomic::AtomicU64,
+    /// T76.6: Node start round — the committed round at startup.
+    /// Batches with round <= node_start_round are considered stale and dropped.
+    /// Initialized to 0 and set once via set_node_start_round().
+    node_start_round: std::sync::atomic::AtomicU64,
 }
 
 impl HybridDedupCache {
@@ -878,6 +882,7 @@ impl HybridDedupCache {
             cache: parking_lot::RwLock::new(lru::LruCache::new(cap)),
             max_size: capacity,
             last_gc_height: std::sync::atomic::AtomicU64::new(0),
+            node_start_round: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -976,6 +981,30 @@ impl HybridDedupCache {
         
         #[cfg(feature = "metrics")]
         crate::metrics::dag_hybrid_dedup_lru_size_set(0);
+    }
+
+    /// T76.6: Set the node start round (called once at startup).
+    /// 
+    /// Batches with round <= node_start_round are considered stale and should be dropped.
+    /// This prevents processing pre-start DAG batches that contain already-committed txs.
+    pub fn set_node_start_round(&self, round: u64) {
+        self.node_start_round.store(round, std::sync::atomic::Ordering::Release);
+        log::info!("dag-hybrid: node_start_round set to {}", round);
+    }
+
+    /// T76.6: Get the node start round.
+    pub fn node_start_round(&self) -> u64 {
+        self.node_start_round.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// T76.6: Check if a batch is stale (round <= node_start_round).
+    /// 
+    /// Returns `true` if the batch should be dropped as stale.
+    pub fn is_stale_batch(&self, batch_round: u64) -> bool {
+        let start_round = self.node_start_round();
+        // A batch is stale if its round is <= the start round (except when start_round is 0,
+        // which means startup watermark hasn't been set yet)
+        start_round > 0 && batch_round <= start_round
     }
 }
 
@@ -1868,5 +1897,104 @@ mod tests {
         
         assert_eq!(bad_nonce_count, 0);
         assert!(valid_indices.is_empty());
+    }
+
+    // =========================================================================
+    // T76.6: Tests for startup watermark and stale batch handling
+    // =========================================================================
+
+    #[test]
+    fn test_dedup_cache_node_start_round_default() {
+        let cache = HybridDedupCache::with_capacity(100);
+        
+        // Default node_start_round should be 0
+        assert_eq!(cache.node_start_round(), 0);
+        
+        // With node_start_round = 0, no batches are considered stale
+        assert!(!cache.is_stale_batch(0));
+        assert!(!cache.is_stale_batch(1));
+        assert!(!cache.is_stale_batch(100));
+    }
+
+    #[test]
+    fn test_dedup_cache_set_node_start_round() {
+        let cache = HybridDedupCache::with_capacity(100);
+        
+        // Set node_start_round to 10
+        cache.set_node_start_round(10);
+        assert_eq!(cache.node_start_round(), 10);
+        
+        // Batches with round <= 10 are stale
+        assert!(cache.is_stale_batch(1));
+        assert!(cache.is_stale_batch(5));
+        assert!(cache.is_stale_batch(10));
+        
+        // Batches with round > 10 are not stale
+        assert!(!cache.is_stale_batch(11));
+        assert!(!cache.is_stale_batch(100));
+    }
+
+    #[test]
+    fn test_dedup_cache_stale_batch_zero_round() {
+        let cache = HybridDedupCache::with_capacity(100);
+        
+        // Set node_start_round to 5
+        cache.set_node_start_round(5);
+        
+        // Batch with round 0 is stale
+        assert!(cache.is_stale_batch(0));
+    }
+
+    #[test]
+    fn test_dedup_cache_stale_batch_boundary() {
+        let cache = HybridDedupCache::with_capacity(100);
+        
+        // Set node_start_round to exactly the round value
+        cache.set_node_start_round(100);
+        
+        // Boundary case: round == node_start_round should be stale
+        assert!(cache.is_stale_batch(100));
+        
+        // First non-stale batch
+        assert!(!cache.is_stale_batch(101));
+    }
+
+    /// T76.6: Test that stale batch detection increments the metric.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_stale_batch_metric_increment() {
+        use crate::metrics::{dag_hybrid_stale_batches_dropped_inc, EEZO_DAG_HYBRID_STALE_BATCHES_DROPPED_TOTAL};
+        
+        let before = EEZO_DAG_HYBRID_STALE_BATCHES_DROPPED_TOTAL.get();
+        dag_hybrid_stale_batches_dropped_inc();
+        let after = EEZO_DAG_HYBRID_STALE_BATCHES_DROPPED_TOTAL.get();
+        
+        assert_eq!(after, before + 1);
+    }
+
+    /// T76.6: Test that all-filtered metric increments.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_all_filtered_metric_increment() {
+        use crate::metrics::{dag_hybrid_all_filtered_inc, EEZO_DAG_HYBRID_ALL_FILTERED_TOTAL};
+        
+        let before = EEZO_DAG_HYBRID_ALL_FILTERED_TOTAL.get();
+        dag_hybrid_all_filtered_inc();
+        let after = EEZO_DAG_HYBRID_ALL_FILTERED_TOTAL.get();
+        
+        assert_eq!(after, before + 1);
+    }
+
+    /// T76.6: Test that empty_candidates metric increments.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_empty_candidates_metric_increment() {
+        use crate::metrics::{dag_hybrid_empty_candidates_inc, EEZO_DAG_HYBRID_EMPTY_CANDIDATES_TOTAL};
+        
+        let before = EEZO_DAG_HYBRID_EMPTY_CANDIDATES_TOTAL.get();
+        dag_hybrid_empty_candidates_inc();
+        let after = EEZO_DAG_HYBRID_EMPTY_CANDIDATES_TOTAL.get();
+        
+        assert_eq!(after, before + 1);
     }
 }
