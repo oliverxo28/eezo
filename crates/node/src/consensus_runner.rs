@@ -1389,10 +1389,39 @@ impl CoreRunnerHandle {
                     let next_height = guard.height + 1;
 
                     // 3. Create executor input
+                    // T76.4: Use partial failure tolerance for hybrid DAG batches to avoid
+                    // full-block aborts when some txs fail. This allows the valid subset
+                    // to be applied while dropping/deferring bad txs.
+                    #[cfg(feature = "dag-consensus")]
+                    let exec_input = if hybrid_batch_used {
+                        ExecInput::with_partial_failure(txs, next_height)
+                    } else {
+                        ExecInput::new(txs, next_height)
+                    };
+                    
+                    #[cfg(not(feature = "dag-consensus"))]
                     let exec_input = ExecInput::new(txs, next_height);
                     
                     // 4. Execute block using the executor
                     let exec_outcome = exec.execute_block(&mut guard, exec_input);
+                    
+                    // T76.4: Log and emit metrics for hybrid batch apply diagnostics
+                    #[cfg(feature = "dag-consensus")]
+                    if hybrid_batch_used {
+                        let apply_ok = exec_outcome.apply_ok;
+                        let apply_fail = exec_outcome.apply_fail;
+                        
+                        // T76.4: Emit apply_ok and apply_fail metrics
+                        crate::metrics::dag_hybrid_apply_ok_inc_by(apply_ok as u64);
+                        crate::metrics::dag_hybrid_apply_fail_inc_by(apply_fail as u64);
+                        
+                        // T76.4: Structured log line for batch apply diagnostics
+                        // This complements the earlier "hybrid: dag batch n=..." log
+                        log::info!(
+                            "hybrid: batch apply apply_ok={} apply_fail={}",
+                            apply_ok, apply_fail
+                        );
+                    }
 
                     // T70.0: Record executor time
                     #[cfg(feature = "metrics")]

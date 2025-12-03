@@ -13,6 +13,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 use smallvec::SmallVec;
 
@@ -461,24 +462,51 @@ impl Executor for ParallelExecutor {
 
         // 3) execute waves (T54.5: per-tx bucket-scoped lock)
         // T54.6 FIX: Use precomputed bucket from PreparedTx - no redundant computation
+        // T76.4: Track per-tx success/failure when partial_failure_ok is set
         let apply_start = Instant::now();
         let mut total_wave_time: f64 = 0.0;
         let mut max_wave_time: f64 = 0.0;
+        
+        // T76.4: Atomic counters for apply_ok and apply_fail (thread-safe updates)
+        let apply_ok_count = AtomicUsize::new(0);
+        let apply_fail_count = AtomicUsize::new(0);
+        
         for wave in waves {
             let wave_start = Instant::now();
 
-            // process this wave *in parallel* across buckets
-            wave.par_iter().for_each(|ptx| {
-                // If a global error was flagged, skip work early
-                if ctx.has_error() {
-                    return;
-                }
+            if input.partial_failure_ok {
+                // T76.4: Partial failure tolerance mode - skip failed txs, continue with rest
+                wave.par_iter().for_each(|ptx| {
+                    // Use the new try_apply_tx_partial that doesn't set global error flag
+                    match ctx.try_apply_tx_partial(ptx.tx, ptx.bucket) {
+                        Ok(()) => {
+                            apply_ok_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(_e) => {
+                            apply_fail_count.fetch_add(1, Ordering::Relaxed);
+                            // In partial failure mode, we log but don't abort
+                            log::debug!("parallel executor: tx apply skipped (partial mode)");
+                        }
+                    }
+                });
+            } else {
+                // Legacy mode: abort on first error
+                wave.par_iter().for_each(|ptx| {
+                    // If a global error was flagged, skip work early
+                    if ctx.has_error() {
+                        return;
+                    }
 
-                // Use precomputed bucket from PreparedTx (already computed in from_tx)
-                if let Err(e) = ctx.apply_tx_parallel_bucketed(ptx.tx, ptx.bucket) {
-                    ctx.flag_error(e);
+                    // Use precomputed bucket from PreparedTx (already computed in from_tx)
+                    if let Err(e) = ctx.apply_tx_parallel_bucketed(ptx.tx, ptx.bucket) {
+                        ctx.flag_error(e);
+                    }
+                });
+
+                if ctx.has_error() {
+                    break;
                 }
-            });
+            }
 
             let wave_elapsed = wave_start.elapsed().as_secs_f64();
             total_wave_time += wave_elapsed;
@@ -488,10 +516,6 @@ impl Executor for ParallelExecutor {
             {
                 EEZO_EXEC_PARALLEL_APPLY_SECONDS.observe(wave_elapsed);
             }
-
-            if ctx.has_error() {
-                break;
-            }
         }
         let apply_elapsed = apply_start.elapsed();
 
@@ -499,8 +523,17 @@ impl Executor for ParallelExecutor {
         let finalize_start = Instant::now();
         let elapsed = start.elapsed();
         
-        // c) Finalize the block (no change in semantics, but simplified call)
-        let maybe_block = if !ctx.has_error() {
+        // T76.4: Get final counts
+        let final_apply_ok = apply_ok_count.load(Ordering::Relaxed);
+        let final_apply_fail = apply_fail_count.load(Ordering::Relaxed);
+        
+        // c) Finalize the block
+        // T76.4: In partial failure mode, always finalize (even if some txs failed).
+        // In legacy mode, only finalize if no errors.
+        let maybe_block = if input.partial_failure_ok {
+            // Always succeed in partial mode - block may have fewer txs than input
+            Some(ctx.finish())
+        } else if !ctx.has_error() {
             Some(ctx.finish())
         } else {
             None
@@ -570,6 +603,11 @@ impl Executor for ParallelExecutor {
             (finalize_elapsed.as_secs_f64() / elapsed.as_secs_f64()) * 100.0
         );
 
-        ExecOutcome::new(block, elapsed, tx_count)
+        // T76.4: Return with partial failure stats when in partial mode
+        if input.partial_failure_ok {
+            ExecOutcome::with_partial_stats(block, elapsed, tx_count, final_apply_ok, final_apply_fail)
+        } else {
+            ExecOutcome::new(block, elapsed, tx_count)
+        }
     }
 }

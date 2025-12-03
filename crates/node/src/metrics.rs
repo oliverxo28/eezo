@@ -2073,6 +2073,8 @@ pub fn register_dag_hybrid_metrics() {
     let _ = &*EEZO_DAG_HYBRID_FALLBACK_TOTAL;
     // T76.3: Also register the bytes-level metrics
     register_dag_hybrid_bytes_metrics();
+    // T76.4: Also register the apply-level metrics
+    register_dag_hybrid_apply_metrics();
 }
 
 /// No-op version when metrics feature is disabled.
@@ -2332,5 +2334,68 @@ pub fn register_dag_hybrid_bytes_metrics() {
 /// No-op version when metrics feature is disabled.
 #[cfg(not(feature = "metrics"))]
 pub fn register_dag_hybrid_bytes_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
+// T76.4 — Hybrid batch apply metrics (apply_ok, apply_fail)
+// -----------------------------------------------------------------------------
+
+/// Counter: Total transactions successfully applied from hybrid DAG batches.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_APPLY_OK_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_apply_ok_total",
+        "Total transactions successfully applied from hybrid DAG batches"
+    )
+    .unwrap()
+});
+
+/// Counter: Total transactions that failed to apply from hybrid DAG batches.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_APPLY_FAIL_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_apply_fail_total",
+        "Total transactions that failed to apply from hybrid DAG batches"
+    )
+    .unwrap()
+});
+
+/// Helper: Increment apply_ok counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_apply_ok_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_APPLY_OK_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment apply_fail counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_apply_fail_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_APPLY_FAIL_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Eagerly register T76.4 DAG hybrid apply metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_dag_hybrid_apply_metrics() {
+    let _ = &*EEZO_DAG_HYBRID_APPLY_OK_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_APPLY_FAIL_TOTAL;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_dag_hybrid_apply_metrics() {
     // No metrics to register when the feature is off.
 }

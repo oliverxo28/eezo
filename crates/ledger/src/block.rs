@@ -890,6 +890,63 @@ impl BlockBuildContext {
         Ok(())
     }
 
+    /// T76.4: Apply a single transaction in partial-failure mode.
+    ///
+    /// Unlike `apply_tx_parallel_bucketed`, this method does NOT flag the global error
+    /// when a transaction fails. This allows the executor to continue processing
+    /// subsequent transactions even if some fail, building a valid block from
+    /// the successful subset.
+    ///
+    /// Returns:
+    /// - `Ok(())` if the transaction was applied successfully
+    /// - `Err(TxStateError)` if the transaction failed (state is unchanged)
+    ///
+    /// # Safety
+    /// Same safety requirements as `apply_tx_parallel_bucketed`.
+    pub fn try_apply_tx_partial(
+        &self,
+        stx: &SignedTx,
+        bucket: u16,
+    ) -> Result<(), TxStateError> {
+        // lock the *bucket shard* (only this shard serializes)
+        let _bucket_guard = self.locks[(bucket as usize) % self.locks.len()].lock().unwrap();
+
+        // compute sender (still required for apply/validate)
+        let sender = match crate::sender_from_pubkey_first20(stx) {
+            Some(a) => a,
+            None => {
+                return Err(TxStateError::InvalidSender);
+            }
+        };
+
+        // SAFETY: protected by shard lock; no overlapping buckets will mutate
+        // the same account entries concurrently.
+        let accounts = unsafe { &mut *self.accounts.get() };
+
+        // Validate (read-only; no supply needed)
+        if let Err(err) = crate::tx::validate_tx_stateful(accounts, sender, &stx.core) {
+            return Err(err);
+        }
+
+        // Apply (mutates accounts + supply). We keep supply under a small global lock.
+        let _supply_guard = self.supply_lock.lock().unwrap();
+        let supply = unsafe { &mut *self.supply.get() };
+
+        if let Err(err) = crate::tx::apply_tx(accounts, supply, sender, &stx.core) {
+            return Err(err);
+        }
+
+        // accumulate fee + collected list
+        {
+            let mut f = self.fee_total.lock().unwrap();
+            *f += stx.core.fee;
+            let mut v = self.collected.lock().unwrap();
+            v.push(stx.clone());
+        }
+
+        Ok(())
+    }
+
     // 1g) Make error/finish use the new interior fields (REPLACE three functions)
     pub fn flag_error(&self, err: TxStateError) {
         let mut e = self.error_flag.lock().unwrap();
