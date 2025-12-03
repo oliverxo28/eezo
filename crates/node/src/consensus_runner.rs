@@ -1881,7 +1881,7 @@ impl CoreRunnerHandle {
 
 #[cfg(test)]
 mod executor_mode_tests {
-    use super::ExecutorMode;
+    use super::{ExecutorMode, HybridModeConfig};
     use std::sync::Mutex;
     
     // Mutex to serialize env var access across tests
@@ -1937,5 +1937,87 @@ mod executor_mode_tests {
         // Test unset
         std::env::remove_var("EEZO_EXECUTOR_MODE");
         assert_eq!(ExecutorMode::from_env(), None);
+    }
+
+    // -------------------------------------------------------------------------
+    // T76.1: Tests for HybridModeConfig
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_hybrid_mode_config_standard_by_default() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        // Clear relevant env vars
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+        
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::Standard);
+    }
+
+    #[test]
+    fn test_hybrid_mode_config_standard_when_hotstuff() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
+        
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::Standard);
+        
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+    }
+
+    #[test]
+    fn test_hybrid_mode_config_standard_when_dag() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag");
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
+        
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::Standard);
+        
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+    }
+
+    #[test]
+    fn test_hybrid_mode_config_standard_when_hybrid_but_ordering_disabled() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag-hybrid");
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "false");
+        
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::Standard);
+        
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+    }
+
+    #[test]
+    fn test_hybrid_mode_config_enabled_when_hybrid_and_ordering_enabled() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        // Test with dag-hybrid and true
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag-hybrid");
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
+        
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::HybridEnabled);
+        
+        // Test with dag_hybrid (underscore) and 1
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag_hybrid");
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "1");
+        
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::HybridEnabled);
+        
+        // Test with yes
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "yes");
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::HybridEnabled);
+        
+        // Test with on
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "on");
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::HybridEnabled);
+        
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
     }
 }
