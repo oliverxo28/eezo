@@ -90,18 +90,32 @@ impl OrderedBatch {
     }
 
     /// T76.3: Create a new ordered batch with tx hashes and optional bytes.
+    /// 
+    /// If `tx_bytes` is provided, its length MUST equal `tx_hashes.len()`.
+    /// Returns `Err(DagError::InvalidPayload)` if lengths mismatch.
     pub fn with_tx_data(
         round: u64,
         bundles: Vec<OrderedBundle>,
         tx_hashes: Vec<[u8; 32]>,
         tx_bytes: Option<Vec<Option<bytes::Bytes>>>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, DagError> {
+        // T76.3a: Validate tx_bytes length matches tx_hashes if provided
+        if let Some(ref bytes) = tx_bytes {
+            if bytes.len() != tx_hashes.len() {
+                return Err(DagError::InvalidPayload(format!(
+                    "tx_bytes length ({}) does not match tx_hashes length ({})",
+                    bytes.len(),
+                    tx_hashes.len()
+                )));
+            }
+        }
+        
+        Ok(Self {
             round,
             bundles,
             tx_hashes: Some(tx_hashes),
             tx_bytes,
-        }
+        })
     }
 
     /// Total number of vertices across all bundles.
@@ -203,6 +217,9 @@ pub enum DagError {
     /// Invalid vertex structure
     InvalidVertex(String),
 
+    /// T76.3a: Invalid payload structure (e.g., tx_bytes length ≠ tx_hashes length)
+    InvalidPayload(String),
+
     /// Internal error
     Internal(String),
 }
@@ -214,6 +231,7 @@ impl std::fmt::Display for DagError {
                 write!(f, "payload too large: {} bytes (max: {})", size, max)
             }
             DagError::InvalidVertex(msg) => write!(f, "invalid vertex: {}", msg),
+            DagError::InvalidPayload(msg) => write!(f, "invalid payload: {}", msg),
             DagError::Internal(msg) => write!(f, "internal error: {}", msg),
         }
     }
@@ -735,6 +753,117 @@ mod tests {
     // T76.3: Tests for OrderedBatch with tx_bytes
     // -------------------------------------------------------------------------
 
+    /// T76.3a: Test hashes_only_ok - payload with only hashes produces `tx_bytes.is_none()`.
+    #[test]
+    fn test_hashes_only_ok() {
+        use crate::types::{OrderedBundle, Round};
+
+        let bundle = OrderedBundle::new(Round(1), vec![], 2);
+        
+        let tx_hashes = vec![
+            [1u8; 32],
+            [2u8; 32],
+        ];
+
+        // Create batch with hashes but no bytes (tx_bytes = None)
+        let batch = OrderedBatch::with_tx_data(1, vec![bundle], tx_hashes.clone(), None).unwrap();
+
+        // Verify tx_bytes is None
+        assert!(batch.tx_bytes.is_none());
+        assert!(batch.tx_hashes.is_some());
+        assert_eq!(batch.tx_hashes.as_ref().unwrap().len(), 2);
+        
+        // Verify no bytes available
+        assert!(!batch.has_all_bytes());
+        assert_eq!(batch.bytes_available_count(), 0);
+        assert_eq!(batch.bytes_missing_count(), 2);
+
+        // Verify iterator yields (hash, None) for each entry
+        let entries: Vec<_> = batch.iter_tx_entries().collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, [1u8; 32]);
+        assert!(entries[0].1.is_none());
+        assert_eq!(entries[1].0, [2u8; 32]);
+        assert!(entries[1].1.is_none());
+    }
+
+    /// T76.3a: Test hashes_plus_bytes_ok - payload with hashes+bytes produces matching lengths.
+    #[test]
+    fn test_hashes_plus_bytes_ok() {
+        use crate::types::{OrderedBundle, Round};
+        use bytes::Bytes;
+
+        let bundle = OrderedBundle::new(Round(1), vec![], 3);
+        
+        let tx_hashes = vec![
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+        ];
+        
+        let tx_bytes = vec![
+            Some(Bytes::from_static(b"tx1_bytes")),
+            Some(Bytes::from_static(b"tx2_bytes")),
+            Some(Bytes::from_static(b"tx3_bytes")),
+        ];
+
+        // Create batch with matching lengths - should succeed
+        let batch = OrderedBatch::with_tx_data(1, vec![bundle], tx_hashes.clone(), Some(tx_bytes)).unwrap();
+
+        // Verify lengths match
+        assert!(batch.tx_hashes.is_some());
+        assert!(batch.tx_bytes.is_some());
+        assert_eq!(batch.tx_hashes.as_ref().unwrap().len(), 3);
+        assert_eq!(batch.tx_bytes.as_ref().unwrap().len(), 3);
+
+        // Verify all bytes available
+        assert!(batch.has_all_bytes());
+        assert_eq!(batch.bytes_available_count(), 3);
+        assert_eq!(batch.bytes_missing_count(), 0);
+
+        // Verify iterator yields (hash, Some(bytes)) for each entry
+        let entries: Vec<_> = batch.iter_tx_entries().collect();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].0, [1u8; 32]);
+        assert!(entries[0].1.is_some());
+        assert_eq!(entries[1].0, [2u8; 32]);
+        assert!(entries[1].1.is_some());
+        assert_eq!(entries[2].0, [3u8; 32]);
+        assert!(entries[2].1.is_some());
+    }
+
+    /// T76.3a: Test mismatched_lengths_rejected - payload with bytes length ≠ hashes length fails with InvalidPayload.
+    #[test]
+    fn test_mismatched_lengths_rejected() {
+        use crate::types::{OrderedBundle, Round};
+        use bytes::Bytes;
+
+        let bundle = OrderedBundle::new(Round(1), vec![], 3);
+        
+        let tx_hashes = vec![
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+        ];
+        
+        // Only 2 bytes entries for 3 hashes - length mismatch!
+        let tx_bytes = vec![
+            Some(Bytes::from_static(b"tx1_bytes")),
+            Some(Bytes::from_static(b"tx2_bytes")),
+        ];
+
+        // Create batch with mismatched lengths - should fail
+        let result = OrderedBatch::with_tx_data(1, vec![bundle], tx_hashes, Some(tx_bytes));
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DagError::InvalidPayload(msg) => {
+                assert!(msg.contains("tx_bytes length (2) does not match tx_hashes length (3)"));
+            }
+            other => panic!("Expected InvalidPayload error, got: {:?}", other),
+        }
+    }
+
     /// T76.3: Test that OrderedBatch with full bytes reports all bytes available.
     #[test]
     fn test_ordered_batch_with_full_bytes() {
@@ -755,7 +884,7 @@ mod tests {
             Some(Bytes::from_static(b"tx3_bytes")),
         ];
 
-        let batch = OrderedBatch::with_tx_data(1, vec![bundle], tx_hashes.clone(), Some(tx_bytes));
+        let batch = OrderedBatch::with_tx_data(1, vec![bundle], tx_hashes.clone(), Some(tx_bytes)).unwrap();
 
         // Verify all bytes available
         assert!(batch.has_all_bytes());
@@ -794,7 +923,7 @@ mod tests {
             Some(Bytes::from_static(b"tx3_bytes")),
         ];
 
-        let batch = OrderedBatch::with_tx_data(1, vec![bundle], tx_hashes, Some(tx_bytes));
+        let batch = OrderedBatch::with_tx_data(1, vec![bundle], tx_hashes, Some(tx_bytes)).unwrap();
 
         // Verify mixed availability
         assert!(!batch.has_all_bytes());
@@ -822,7 +951,7 @@ mod tests {
         ];
 
         // No tx_bytes provided
-        let batch = OrderedBatch::with_tx_data(1, vec![bundle], tx_hashes.clone(), None);
+        let batch = OrderedBatch::with_tx_data(1, vec![bundle], tx_hashes.clone(), None).unwrap();
 
         // Verify no bytes available
         assert!(!batch.has_all_bytes());
@@ -870,7 +999,7 @@ mod tests {
             Some(Bytes::from_static(b"abcde")),      // 5 bytes
         ];
 
-        let batch = OrderedBatch::with_tx_data(1, vec![bundle], tx_hashes, Some(tx_bytes));
+        let batch = OrderedBatch::with_tx_data(1, vec![bundle], tx_hashes, Some(tx_bytes)).unwrap();
 
         // Total should be 15 bytes (10 + 5)
         assert_eq!(batch.total_bytes_size(), 15);
