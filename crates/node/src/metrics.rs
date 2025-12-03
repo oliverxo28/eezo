@@ -2078,3 +2078,43 @@ pub fn register_dag_hybrid_metrics() {
 pub fn register_dag_hybrid_metrics() {
     // No metrics to register when the feature is off.
 }
+
+// -----------------------------------------------------------------------------
+// T76.2 — DAG ordered batch visibility metrics
+// -----------------------------------------------------------------------------
+
+/// Gauge: Number of DAG ordered batches currently ready for consumption.
+/// This allows visibility into the DAG ordering queue without consuming batches.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_ORDERED_READY: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_ordered_ready",
+        "Number of DAG ordered batches currently ready for consumption"
+    )
+    .unwrap()
+});
+
+/// Helper: Set the ordered ready gauge value.
+#[inline]
+pub fn dag_ordered_ready_set(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_ORDERED_READY.set(count as i64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count; // silence unused warning
+    }
+}
+
+/// Eagerly register T76.2 DAG ordered visibility metrics.
+#[cfg(feature = "metrics")]
+pub fn register_dag_ordered_metrics() {
+    let _ = &*EEZO_DAG_ORDERED_READY;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_dag_ordered_metrics() {
+    // No metrics to register when the feature is off.
+}

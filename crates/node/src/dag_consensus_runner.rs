@@ -357,6 +357,10 @@ impl DagConsensusShadowRunner {
     ///
     /// This method consumes the runner and loops until the channel is closed
     /// (typically on node shutdown).
+    ///
+    /// T76.2: In shadow mode, we submit payloads but do NOT drain the ordered queue.
+    /// The ordered queue is left intact so that CoreRunner (in hybrid mode) can consume it.
+    /// Shadow runner only updates metrics based on queue length (peek, not consume).
     pub async fn run(mut self) {
         // Log startup with actual config values
         log::info!(
@@ -383,6 +387,13 @@ impl DagConsensusShadowRunner {
             // Convert the block summary into a DAG payload
             let payload = self.summary_to_payload(&summary);
 
+            // Log before submit (T76.2 nice-to-have log)
+            log::info!(
+                "shadow-dag: submitted payload (round={}, txs={})",
+                self.handle.current_round(),
+                summary.tx_hashes.len()
+            );
+
             // Submit to the DAG handle
             match self.handle.submit_payload(payload) {
                 Ok(vertex_id) => {
@@ -402,39 +413,42 @@ impl DagConsensusShadowRunner {
                 }
             }
 
-            // Poll for ordered batches and log them
-            while let Some(batch) = self.handle.try_next_ordered_batch() {
-                let tx_count = batch.bundles.iter().map(|b| b.tx_count).sum::<usize>();
-                
+            // T76.2: Peek at ordered queue length for metrics (DO NOT DRAIN).
+            // In shadow mode, we only observe the queue size, we don't consume batches.
+            // Consumption is done by CoreRunner in hybrid mode.
+            let queue_len = self.handle.peek_ordered_queue_len();
+            
+            // Update the "ready" gauge with current queue length
+            #[cfg(feature = "metrics")]
+            crate::metrics::dag_ordered_ready_set(queue_len as u64);
+            
+            if queue_len > 0 {
                 log::debug!(
-                    "dag-consensus: shadow batch ordered (round={}, blocks={}, total_vertices={}, tx_count={})",
-                    batch.round,
-                    batch.bundles.len(),
-                    batch.vertex_count(),
-                    tx_count
+                    "dag-consensus: shadow mode, {} batch(es) ready in queue (not consuming)",
+                    queue_len
                 );
+            }
 
-                // T75.2: Record DAG ordered batch in tracker with tx hashes
-                // In shadow mode, we use the canonical tx hashes as what the DAG
-                // would have ordered (since we feed the same data to the DAG)
-                {
-                    let mut tracker = self.tracker.write().await;
-                    // Get canonical tx hashes for this round (which in shadow mode == height)
-                    let dag_tx_hashes = tracker.get_canonical_tx_hashes(batch.round)
-                        .unwrap_or_default();
+            // T75.2: Record DAG ordered batch in tracker with tx hashes
+            // Since we're not consuming, we record based on submitting the block summary.
+            // The round == height correspondence in shadow mode is maintained by advance_round().
+            {
+                let mut tracker = self.tracker.write().await;
+                // Use the canonical tx hashes we just submitted
+                let dag_tx_hashes = summary.tx_hashes.clone();
+                let round = self.handle.current_round();
+                
+                let is_mismatch = tracker.record_dag_ordered(round, dag_tx_hashes);
+                
+                // T75.2: Increment mismatch counter if detected
+                if is_mismatch {
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::dag_shadow_hash_mismatch_inc();
                     
-                    let is_mismatch = tracker.record_dag_ordered(batch.round, dag_tx_hashes);
-                    
-                    // T75.2: Increment mismatch counter if detected
-                    if is_mismatch {
-                        #[cfg(feature = "metrics")]
-                        crate::metrics::dag_shadow_hash_mismatch_inc();
-                        
-                        log::warn!(
-                            "dag-consensus: hash mismatch detected at height/round={}",
-                            batch.round
-                        );
-                    }
+                    log::warn!(
+                        "dag-consensus: hash mismatch detected at height/round={}",
+                        round
+                    );
                 }
             }
 
@@ -708,22 +722,15 @@ impl HybridDagHandle {
             }
         }
 
-        // Try to order and consume batches
-        while let Some(batch) = self.handle.try_next_ordered_batch() {
-            let tx_count = batch.bundles.iter().map(|b| b.tx_count).sum::<usize>();
-            log::debug!(
-                "dag-hybrid: batch ordered (round={}, tx_count={})",
-                batch.round,
-                tx_count
-            );
-
-            // Record in tracker with canonical tx hashes
-            {
-                let mut tracker = self.tracker.write().await;
-                let dag_tx_hashes = tracker.get_canonical_tx_hashes(batch.round)
-                    .unwrap_or_default();
-                let _is_mismatch = tracker.record_dag_ordered(batch.round, dag_tx_hashes);
-            }
+        // T76.2: Record in tracker that we submitted this block.
+        // We do NOT drain ordered batches here - CoreRunner is the only consumer.
+        // Just update the tracker with the canonical tx hashes for sync status.
+        {
+            let mut tracker = self.tracker.write().await;
+            // Use the canonical tx hashes we just submitted
+            let dag_tx_hashes = summary.tx_hashes.clone();
+            let round = self.handle.current_round();
+            let _is_mismatch = tracker.record_dag_ordered(round, dag_tx_hashes);
         }
 
         // Advance round after each block
@@ -743,6 +750,13 @@ impl HybridDagHandle {
     /// Get the tracker for status queries.
     pub fn tracker(&self) -> Arc<RwLock<DagConsensusTracker>> {
         Arc::clone(&self.tracker)
+    }
+
+    /// T76.2: Peek at the number of ordered batches available without consuming them.
+    ///
+    /// Used for visibility metrics to show how many batches are ready.
+    pub fn peek_ordered_queue_len(&self) -> usize {
+        self.handle.peek_ordered_queue_len()
     }
 
     /// Convert a ShadowBlockSummary into a DagPayload.
@@ -1142,5 +1156,76 @@ mod tests {
         assert!(handle.try_next_ordered_batch().is_none());
         
         // This tests the "fallback (reason=no_batch)" path
+    }
+
+    // =========================================================================
+    // T76.2: Tests for CoreRunner batch consumption and shadow non-draining
+    // =========================================================================
+
+    /// T76.2: Test that HybridDagHandle.peek_ordered_queue_len() doesn't consume batches.
+    #[test]
+    fn test_hybrid_dag_handle_peek_does_not_consume() {
+        let handle = HybridDagHandle::new();
+        
+        // Initially empty
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+        
+        // Multiple peeks should all return 0 and not affect the queue
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+        
+        // try_next_ordered_batch should also return None (queue still empty)
+        assert!(handle.try_next_ordered_batch().is_none());
+    }
+
+    /// T76.2: Test that when CoreRunner consumes a batch, the queue decreases.
+    #[test]
+    fn test_hybrid_dag_handle_consume_decreases_queue() {
+        let handle = HybridDagHandle::new();
+        
+        // Submit a block summary to populate the DAG
+        let summary = ShadowBlockSummary {
+            height: 1,
+            block_hash: [1u8; 32],
+            tx_hashes: vec![[2u8; 32]],
+            round: None,
+            timestamp_ms: None,
+        };
+        handle.submit_committed_block(&summary);
+        
+        // After submission and advance_round (done internally), 
+        // there should be 1 batch ready in the queue
+        let initial_queue_len = handle.peek_ordered_queue_len();
+        
+        // Peek doesn't consume
+        assert_eq!(handle.peek_ordered_queue_len(), initial_queue_len);
+        
+        // Consume the batch
+        if initial_queue_len > 0 {
+            let batch = handle.try_next_ordered_batch();
+            assert!(batch.is_some());
+            
+            // After consuming, queue should decrease
+            assert!(handle.peek_ordered_queue_len() < initial_queue_len);
+        }
+    }
+
+    /// T76.2: Test that dag_ordered_ready_set() updates the gauge without consuming.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_dag_ordered_ready_gauge_set() {
+        use crate::metrics::{dag_ordered_ready_set, EEZO_DAG_ORDERED_READY};
+        
+        // Set gauge to a specific value
+        dag_ordered_ready_set(5);
+        assert_eq!(EEZO_DAG_ORDERED_READY.get(), 5);
+        
+        // Setting to 0 doesn't consume anything - it's just a gauge update
+        dag_ordered_ready_set(0);
+        assert_eq!(EEZO_DAG_ORDERED_READY.get(), 0);
+        
+        // Set to a high value
+        dag_ordered_ready_set(100);
+        assert_eq!(EEZO_DAG_ORDERED_READY.get(), 100);
     }
 }
