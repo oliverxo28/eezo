@@ -2416,11 +2416,24 @@ impl CoreRunnerHandle {
         // T76.5: Update metrics for nonce prefilter
         crate::metrics::dag_hybrid_bad_nonce_prefilter_inc_by(bad_nonce_count as u64);
 
-        // Filter txs to only include valid indices
-        let final_txs: Vec<SignedTx> = valid_indices
-            .iter()
-            .filter_map(|&i| txs.get(i).cloned())
-            .collect();
+        // Filter txs to only include valid indices, avoiding clones by using indices
+        // to directly move elements from the original vector.
+        let final_txs: Vec<SignedTx> = if valid_indices.len() == txs.len() {
+            // All txs are valid - no filtering needed, move the entire vector
+            txs
+        } else {
+            // Some txs were filtered - need to select only valid ones
+            // Create a mask of which indices to keep
+            let mut keep_mask = vec![false; txs.len()];
+            for &idx in &valid_indices {
+                keep_mask[idx] = true;
+            }
+            // Drain and filter in one pass
+            txs.into_iter()
+                .enumerate()
+                .filter_map(|(i, tx)| if keep_mask[i] { Some(tx) } else { None })
+                .collect()
+        };
 
         let stats = HybridBatchStats {
             n,

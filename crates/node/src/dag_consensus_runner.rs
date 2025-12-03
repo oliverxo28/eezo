@@ -871,8 +871,9 @@ impl HybridDedupCache {
 
     /// Create a new de-dup cache with the specified capacity.
     pub fn with_capacity(capacity: usize) -> Self {
+        // capacity.max(1) guarantees a value >= 1, so NonZeroUsize::new() will never fail
         let cap = std::num::NonZeroUsize::new(capacity.max(1))
-            .unwrap_or(std::num::NonZeroUsize::new(1).unwrap());
+            .expect("capacity.max(1) guarantees non-zero");
         Self {
             cache: parking_lot::RwLock::new(lru::LruCache::new(cap)),
             max_size: capacity,
@@ -1003,6 +1004,16 @@ impl Default for HybridDedupCache {
 /// - `bad_nonce_count`: number of transactions with stale nonces
 /// 
 /// Note: This function takes indices to avoid cloning transactions.
+/// 
+/// ## Account Lookup Behavior
+/// 
+/// When an account doesn't exist in the accounts map, `accounts.get()` returns
+/// a default `Account` with `balance: 0` and `nonce: 0`. This means:
+/// - A tx with nonce=0 from a new sender will pass the nonce check (0 >= 0)
+/// - A tx with nonce>0 from a new sender will also pass (but will fail at execution)
+/// 
+/// This is the correct behavior: we only filter out txs that are *definitely*
+/// stale, not txs that *might* fail for other reasons.
 pub fn nonce_precheck(
     txs: &[eezo_ledger::SignedTx],
     accounts: &eezo_ledger::Accounts,
