@@ -44,4 +44,5 @@ crates/node/t29_9-*/
 crates/node/src/backup/
 
 # Temp directories
-/tmp/
+/tmp/*.lock
+t29_9-*/.lock

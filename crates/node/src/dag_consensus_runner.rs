@@ -1343,4 +1343,50 @@ mod tests {
         dag_ordered_ready_set(100);
         assert_eq!(EEZO_DAG_ORDERED_READY.get(), 100);
     }
+
+    /// T76.3: Test that enqueuing 2 batches results in queue_len==2 and gauge reads 2,
+    /// and consuming 1 drops both to 1.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_ordered_ready_gauge_matches_queue_len() {
+        use crate::metrics::{dag_ordered_ready_set, EEZO_DAG_ORDERED_READY};
+        
+        let handle = HybridDagHandle::new();
+        
+        // Submit 2 block summaries to populate the DAG with 2 batches
+        // Each submission triggers ordering (threshold=1 by default)
+        for i in 1..=2 {
+            let summary = ShadowBlockSummary {
+                height: i,
+                block_hash: [i as u8; 32],
+                tx_hashes: vec![[i as u8; 32]],
+                tx_bytes: None,
+                round: None,
+                timestamp_ms: None,
+            };
+            handle.submit_committed_block(&summary);
+        }
+        
+        // After submitting 2 blocks, peek should show 2 batches ready
+        let queue_len = handle.peek_ordered_queue_len();
+        
+        // Update gauge to match queue_len (as the shadow runner does)
+        dag_ordered_ready_set(queue_len as u64);
+        
+        // Assert queue_len == 2 and gauge reads 2
+        assert_eq!(queue_len, 2, "Expected 2 batches in queue after 2 submissions");
+        assert_eq!(EEZO_DAG_ORDERED_READY.get(), 2, "Expected gauge to read 2");
+        
+        // Consume 1 batch
+        let batch = handle.try_next_ordered_batch();
+        assert!(batch.is_some(), "Expected to consume 1 batch");
+        
+        // Update gauge to new queue_len
+        let new_queue_len = handle.peek_ordered_queue_len();
+        dag_ordered_ready_set(new_queue_len as u64);
+        
+        // Assert both drop to 1
+        assert_eq!(new_queue_len, 1, "Expected 1 batch remaining after consuming 1");
+        assert_eq!(EEZO_DAG_ORDERED_READY.get(), 1, "Expected gauge to read 1 after consuming");
+    }
 }
