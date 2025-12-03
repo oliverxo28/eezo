@@ -345,7 +345,10 @@ pub struct CoreRunnerHandle {
     // Stored behind a Mutex so we can attach it after construction.
     #[cfg(feature = "dag-consensus")]
     shadow_dag_sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<ShadowBlockSummary>>>>,
-    // T76.1: optional hybrid DAG handle for consuming ordered batches
+    // T76.1: optional hybrid DAG handle for consuming ordered batches.
+    // TODO(T76.2): Wire this into the main consensus loop to try consuming
+    // ordered batches from DAG before falling back to mempool. Currently
+    // the handle is stored but not used until the full hybrid integration.
     #[cfg(feature = "dag-consensus")]
     #[allow(dead_code)]
     hybrid_dag: Arc<Mutex<Option<Arc<HybridDagHandle>>>>,

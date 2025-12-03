@@ -646,14 +646,14 @@ impl HybridDagHandle {
     ///
     /// This feeds the DAG with the committed block so it can order future batches.
     /// In hybrid mode, this should be called after each successful block commit.
+    ///
+    /// Note: This is a synchronous version that uses blocking_write() for the tracker.
+    /// Prefer `submit_committed_block_async()` when in an async context.
     pub fn submit_committed_block(&self, summary: &ShadowBlockSummary) {
-        // Record in tracker
+        // Record in tracker using blocking write
         {
-            // Use blocking write since we're not in async context
-            // This is safe because the tracker lock is held briefly
-            let tracker_guard = self.tracker.blocking_write();
-            // We can't use blocking_write in async context, so we use try_write
-            drop(tracker_guard);
+            let mut tracker_guard = self.tracker.blocking_write();
+            tracker_guard.record_canonical_block(summary);
         }
 
         // Build payload from block summary
