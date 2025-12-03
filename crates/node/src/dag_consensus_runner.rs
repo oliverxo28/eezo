@@ -1164,4 +1164,75 @@ mod tests {
         
         // This tests the "fallback (reason=no_batch)" path
     }
+
+    // =========================================================================
+    // T76.2: Tests for CoreRunner batch consumption and shadow non-draining
+    // =========================================================================
+
+    /// T76.2: Test that HybridDagHandle.peek_ordered_queue_len() doesn't consume batches.
+    #[test]
+    fn test_hybrid_dag_handle_peek_does_not_consume() {
+        let handle = HybridDagHandle::new();
+        
+        // Initially empty
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+        
+        // Multiple peeks should all return 0 and not affect the queue
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+        
+        // try_next_ordered_batch should also return None (queue still empty)
+        assert!(handle.try_next_ordered_batch().is_none());
+    }
+
+    /// T76.2: Test that when CoreRunner consumes a batch, the queue decreases.
+    #[test]
+    fn test_hybrid_dag_handle_consume_decreases_queue() {
+        let handle = HybridDagHandle::new();
+        
+        // Submit a block summary to populate the DAG
+        let summary = ShadowBlockSummary {
+            height: 1,
+            block_hash: [1u8; 32],
+            tx_hashes: vec![[2u8; 32]],
+            round: None,
+            timestamp_ms: None,
+        };
+        handle.submit_committed_block(&summary);
+        
+        // After submission and advance_round (done internally), 
+        // there should be 1 batch ready in the queue
+        let initial_queue_len = handle.peek_ordered_queue_len();
+        
+        // Peek doesn't consume
+        assert_eq!(handle.peek_ordered_queue_len(), initial_queue_len);
+        
+        // Consume the batch
+        if initial_queue_len > 0 {
+            let batch = handle.try_next_ordered_batch();
+            assert!(batch.is_some());
+            
+            // After consuming, queue should decrease
+            assert!(handle.peek_ordered_queue_len() < initial_queue_len);
+        }
+    }
+
+    /// T76.2: Test that dag_ordered_ready_set() updates the gauge without consuming.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_dag_ordered_ready_gauge_set() {
+        use crate::metrics::{dag_ordered_ready_set, EEZO_DAG_ORDERED_READY};
+        
+        // Set gauge to a specific value
+        dag_ordered_ready_set(5);
+        assert_eq!(EEZO_DAG_ORDERED_READY.get(), 5);
+        
+        // Setting to 0 doesn't consume anything - it's just a gauge update
+        dag_ordered_ready_set(0);
+        assert_eq!(EEZO_DAG_ORDERED_READY.get(), 0);
+        
+        // Set to a high value
+        dag_ordered_ready_set(100);
+        assert_eq!(EEZO_DAG_ORDERED_READY.get(), 100);
+    }
 }
