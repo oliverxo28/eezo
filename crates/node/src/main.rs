@@ -1614,6 +1614,11 @@ async fn post_tx(
             pubkey: pubkey_bytes,
             sig: sig_bytes,
         };
+        
+        // T76.3b: Compute the canonical tx hash for the DAG hybrid consumer.
+        // This differs from hash32 (raw envelope hash) used by the queue.
+        use eezo_ledger::tx_types::HasTxHash;
+        let canonical_tx_hash = stx.tx_hash_bytes();
 
         // 5) Hand off to the consensus core (SingleNode::submit_signed_tx)
         // Check which runner is active and use it for submission
@@ -1640,7 +1645,11 @@ async fn post_tx(
                 let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
                 // Best-effort: ignore duplicate/rate-limit errors since the core runner
                 // already accepted the tx.
-                let _ = state.mempool.submit(ip, hash32, raw).await;
+                let _ = state.mempool.submit(ip, hash32, raw.clone()).await;
+                
+                // T76.3b: Insert tx bytes into the canonical hash cache for DAG hybrid consumer.
+                // This allows the hybrid consumer to look up bytes using the canonical SignedTx hash.
+                state.mempool.insert_tx_bytes(canonical_tx_hash, raw);
             }
             
             true        

@@ -346,11 +346,56 @@ impl Mempool {
 
 /// Concurrent wrapper used by the HTTP layer & proposer.
 #[derive(Clone)]
-pub struct SharedMempool(Arc<Mutex<Mempool>>);
+pub struct SharedMempool {
+    inner: Arc<Mutex<Mempool>>,
+    /// T76.3b: Separate cache for tx bytes indexed by canonical tx hash.
+    /// This allows the DAG hybrid consumer to look up bytes using the
+    /// canonical SignedTx.hash(), which differs from the raw envelope hash
+    /// used by the mempool queue.
+    tx_bytes_cache: Arc<parking_lot::RwLock<HashMap<TxHash, Arc<Vec<u8>>>>>,
+}
 
 impl SharedMempool {
     pub fn new(inner: Mempool) -> Self {
-        Self(Arc::new(Mutex::new(inner)))
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
+            tx_bytes_cache: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+        }
+    }
+    
+    /// T76.3b: Insert tx bytes into the canonical hash cache.
+    /// 
+    /// This is called after decoding a tx to store its bytes indexed by
+    /// the canonical SignedTx.hash() (not the raw envelope hash).
+    pub fn insert_tx_bytes(&self, canonical_hash: TxHash, bytes: Vec<u8>) {
+        let mut cache = self.tx_bytes_cache.write();
+        cache.insert(canonical_hash, Arc::new(bytes));
+    }
+    
+    /// T76.3b: Get tx bytes from the canonical hash cache.
+    /// 
+    /// Returns bytes for hashes that are found in the cache.
+    /// This is used by the hybrid DAG consumer to resolve tx bytes.
+    pub fn get_tx_bytes_by_canonical_hash(&self, hashes: &[TxHash]) -> Vec<(TxHash, Arc<Vec<u8>>)> {
+        let cache = self.tx_bytes_cache.read();
+        hashes.iter()
+            .filter_map(|h| cache.get(h).map(|b| (*h, Arc::clone(b))))
+            .collect()
+    }
+    
+    /// T76.3b: Clear entries from the canonical hash cache.
+    /// 
+    /// Called when txs are included in a block and no longer needed.
+    pub fn evict_tx_bytes(&self, hashes: &[TxHash]) {
+        let mut cache = self.tx_bytes_cache.write();
+        for h in hashes {
+            cache.remove(h);
+        }
+    }
+    
+    /// T76.3b: Get current size of the tx bytes cache.
+    pub fn tx_bytes_cache_len(&self) -> usize {
+        self.tx_bytes_cache.read().len()
     }
 
     pub async fn submit(
@@ -359,37 +404,37 @@ impl SharedMempool {
         hash: TxHash,
         bytes: Vec<u8>,
     ) -> Result<(), SubmitError> {
-        let mut g = self.0.lock().await;
+        let mut g = self.inner.lock().await;
         g.submit(ip, hash, bytes)
     }
 
     pub async fn pop_batch(&self, target_bytes: usize) -> Vec<Arc<TxEntry>> {
-        let mut g = self.0.lock().await;
+        let mut g = self.inner.lock().await;
         g.pop_batch(target_bytes)
     }
 
     pub async fn requeue(&self, entry: Arc<TxEntry>, max_requeues: u32) -> Option<u32> {
-        let mut g = self.0.lock().await;
+        let mut g = self.inner.lock().await;
         g.requeue(entry, max_requeues)
     }
 
     pub async fn mark_included(&self, hash: &TxHash, height: u64, approx_bytes: usize) {
-        let mut g = self.0.lock().await;
+        let mut g = self.inner.lock().await;
         g.mark_included(hash, height, approx_bytes);
     }
 
     pub async fn mark_rejected(&self, hash: &TxHash, reason: impl Into<String>, approx_bytes: usize) {
-        let mut g = self.0.lock().await;
+        let mut g = self.inner.lock().await;
         g.mark_rejected(hash, reason, approx_bytes);
     }
 
     pub async fn status(&self, hash: &TxHash) -> Option<TxStatus> {
-        let g = self.0.lock().await;
+        let g = self.inner.lock().await;
         g.status(hash)
     }
 
     pub async fn stats(&self) -> (usize, usize, usize, usize) {
-        let g = self.0.lock().await;
+        let g = self.inner.lock().await;
         (g.len(), g.cur_bytes(), g.max_len(), g.max_bytes())
     }
 
@@ -399,13 +444,13 @@ impl SharedMempool {
     /// dag uses this for "shadow" payload construction without affecting
     /// the hotstuff path or mempool behaviour.
     pub async fn sample_hashes(&self, max: usize) -> Vec<TxHash> {
-        let g = self.0.lock().await;
+        let g = self.inner.lock().await;
         g.sample_hashes(max)
     }
 
     /// Return the number of transactions currently in the mempool.
     pub async fn len(&self) -> usize {
-        let g = self.0.lock().await;
+        let g = self.inner.lock().await;
         g.len()
     }
 
@@ -414,7 +459,7 @@ impl SharedMempool {
     /// This is debug/inspection only; it does NOT remove entries or change any status.
     /// Used by DAG block preview to fetch tx data for decoding.
     pub async fn get_bytes_for_hashes(&self, hashes: &[TxHash]) -> Vec<(TxHash, Arc<Vec<u8>>)> {
-        let g = self.0.lock().await;
+        let g = self.inner.lock().await;
         g.get_bytes_for_hashes(hashes)
     }
 }
@@ -685,5 +730,48 @@ mod tests {
 
         // Mempool unchanged (read-only)
         assert_eq!(mp.len().await, 3);
+    }
+
+    /// T76.3b: Test the canonical hash cache for DAG hybrid consumer.
+    #[tokio::test]
+    async fn canonical_hash_cache_insert_and_lookup() {
+        let mp = SharedMempool::new(Mempool::new(4, 10_000, 10, 600));
+        
+        // Insert tx bytes with canonical hashes
+        let bytes1 = vec![1u8, 2, 3];
+        let bytes2 = vec![4u8, 5, 6];
+        let canonical_hash1 = h(10);
+        let canonical_hash2 = h(20);
+        
+        mp.insert_tx_bytes(canonical_hash1, bytes1.clone());
+        mp.insert_tx_bytes(canonical_hash2, bytes2.clone());
+        
+        // Cache should have 2 entries
+        assert_eq!(mp.tx_bytes_cache_len(), 2);
+        
+        // Lookup by canonical hash should succeed
+        let result = mp.get_tx_bytes_by_canonical_hash(&[canonical_hash1, canonical_hash2]);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, canonical_hash1);
+        assert_eq!(*result[0].1, bytes1);
+        assert_eq!(result[1].0, canonical_hash2);
+        assert_eq!(*result[1].1, bytes2);
+        
+        // Lookup unknown hash should return empty
+        let unknown = h(99);
+        let result2 = mp.get_tx_bytes_by_canonical_hash(&[unknown]);
+        assert_eq!(result2.len(), 0);
+        
+        // Evict one entry
+        mp.evict_tx_bytes(&[canonical_hash1]);
+        assert_eq!(mp.tx_bytes_cache_len(), 1);
+        
+        // Evicted entry should not be found
+        let result3 = mp.get_tx_bytes_by_canonical_hash(&[canonical_hash1]);
+        assert_eq!(result3.len(), 0);
+        
+        // Other entry still present
+        let result4 = mp.get_tx_bytes_by_canonical_hash(&[canonical_hash2]);
+        assert_eq!(result4.len(), 1);
     }
 }
