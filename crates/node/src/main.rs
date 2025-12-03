@@ -117,6 +117,8 @@ use crate::metrics::{
     register_t71_gpu_hash_metrics,
     register_t72_exec_perf_metrics,
     register_t73_stm_metrics,
+    // T76.1: DAG hybrid mode metrics
+    register_dag_hybrid_metrics,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -390,6 +392,7 @@ async fn dag_status_handler(State(state): State<AppState>) -> Json<DagStatusView
     let mode = match env_consensus_mode() {
         ConsensusMode::Hotstuff => "hotstuff".to_string(),
         ConsensusMode::Dag => "dag".to_string(),
+        ConsensusMode::DagHybrid => "dag-hybrid".to_string(),
     };
 
     // Inspect the optional DAG runner handle in AppState
@@ -975,23 +978,58 @@ fn env_u16(var: &str, default_v: u16) -> u16 {
         .unwrap_or(default_v)
 }
 
-#[derive(Clone, Copy, Debug)]
+/// T76.1: Consensus mode enum supporting hotstuff, dag, and dag-hybrid modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConsensusMode {
+    /// Original Hotstuff-style block production (default)
     Hotstuff,
+    /// DAG mode: DAG is used for tx source + dry-run + shadow consensus,
+    /// but Hotstuff still commits blocks.
     Dag,
+    /// T76.1: Hybrid mode: DAG provides ordered batches as primary tx source,
+    /// but Hotstuff/CoreRunnerHandle still performs the canonical commit.
+    DagHybrid,
 }
 
+/// Parse consensus mode from EEZO_CONSENSUS_MODE environment variable.
+///
+/// Accepts:
+/// - `""`, `"hotstuff"`, `"hs"` → Hotstuff (default)
+/// - `"dag"` → Dag
+/// - `"dag-hybrid"`, `"dag_hybrid"` → DagHybrid
+/// - Unknown strings log a warning and fall back to Hotstuff.
 fn env_consensus_mode() -> ConsensusMode {
     match env::var("EEZO_CONSENSUS_MODE") {
         Ok(raw) => {
             let s = raw.trim().to_ascii_lowercase();
-            if s == "dag" {
-                ConsensusMode::Dag
-            } else {
-                ConsensusMode::Hotstuff
+            match s.as_str() {
+                "" | "hotstuff" | "hs" => ConsensusMode::Hotstuff,
+                "dag" => ConsensusMode::Dag,
+                "dag-hybrid" | "dag_hybrid" => ConsensusMode::DagHybrid,
+                unknown => {
+                    log::warn!(
+                        "consensus: unknown EEZO_CONSENSUS_MODE='{}', falling back to hotstuff",
+                        unknown
+                    );
+                    ConsensusMode::Hotstuff
+                }
             }
         }
         Err(_) => ConsensusMode::Hotstuff,
+    }
+}
+
+/// T76.1: Parse EEZO_DAG_ORDERING_ENABLED environment variable.
+///
+/// Returns `true` if the env var is set to "1", "true", "yes", or "on".
+/// Returns `false` otherwise (including when unset).
+fn env_dag_ordering_enabled() -> bool {
+    match env::var("EEZO_DAG_ORDERING_ENABLED") {
+        Ok(raw) => {
+            let s = raw.trim().to_ascii_lowercase();
+            matches!(s.as_str(), "1" | "true" | "yes" | "on")
+        }
+        Err(_) => false,
     }
 }
 
@@ -2741,6 +2779,9 @@ async fn main() -> anyhow::Result<()> {
 
         // T73.4: STM-specific metrics
         register_t73_stm_metrics();
+
+        // T76.1: DAG hybrid mode metrics
+        register_dag_hybrid_metrics();
 	}	
     // T37: spawn a dedicated /metrics HTTP server on EEZO_METRICS_BIND (or default)
     let metrics_bind = std::env::var("EEZO_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9898".into());
@@ -3090,7 +3131,13 @@ async fn main() -> anyhow::Result<()> {
 
         // Read consensus mode from env and log it
         let consensus_mode = env_consensus_mode();
-        log::info!("consensus: EEZO_CONSENSUS_MODE={:?}", consensus_mode);
+        // T76.1: Read DAG ordering enabled flag
+        let dag_ordering_enabled = env_dag_ordering_enabled();
+        log::info!(
+            "main: consensus_mode={:?}, dag_ordering_enabled={}",
+            consensus_mode,
+            dag_ordering_enabled
+        );
 
         // tick cadence & error behavior (env-tunable)
         let tick_ms: u64 = env_u64("EEZO_CONSENSUS_TICK_MS", 200);
@@ -3103,14 +3150,17 @@ async fn main() -> anyhow::Result<()> {
                 let runner = CoreRunnerHandle::spawn(single, Some(persistence.clone()), tick_ms, rollback_on_error);
                 (Some(runner), None)
             }
-            ConsensusMode::Dag => {
-                // T73.fix: In DAG mode, we need BOTH runners:
+            ConsensusMode::Dag | ConsensusMode::DagHybrid => {
+                // T73.fix / T76.1: In DAG and DagHybrid modes, we need BOTH runners:
                 // - CoreRunnerHandle: for actual block production (drains mempool, executes blocks, commits to ledger)
                 // - DagRunnerHandle: for DAG vertex management and shadow block generation
                 //
                 // We create two separate SingleNode instances. The CoreRunnerHandle's node
                 // is the "real" ledger that accumulates state. The DagRunnerHandle's node
                 // is used for dry-run/preview purposes only.
+                //
+                // T76.1: In DagHybrid mode, if dag_ordering_enabled=true, CoreRunnerHandle
+                // will try to consume ordered batches from DagConsensusHandle first.
                 
                 // T57.2: Read shadow sampling config from env
                 let dag_shadow_max_txs: usize = std::env::var("EEZO_DAG_SHADOW_MAX_TXS")
@@ -3138,7 +3188,15 @@ async fn main() -> anyhow::Result<()> {
                 // It will use the DAG handle as a tx source via set_dag_runner() later
                 let runner = CoreRunnerHandle::spawn(single, Some(persistence.clone()), tick_ms, rollback_on_error);
                 
-                log::info!("dag: both CoreRunnerHandle and DagRunnerHandle spawned for DAG mode");
+                let mode_str = if matches!(consensus_mode, ConsensusMode::DagHybrid) {
+                    "DagHybrid"
+                } else {
+                    "DAG"
+                };
+                log::info!(
+                    "dag: both CoreRunnerHandle and DagRunnerHandle spawned for {} mode",
+                    mode_str
+                );
                 (Some(runner), Some(dag))
             }
         }
@@ -3176,7 +3234,13 @@ async fn main() -> anyhow::Result<()> {
 
         // Read consensus mode from env and log it (DAG wiring comes next)
         let consensus_mode = env_consensus_mode();
-        log::info!("consensus: EEZO_CONSENSUS_MODE={:?}", consensus_mode);
+        // T76.1: Read DAG ordering enabled flag
+        let dag_ordering_enabled = env_dag_ordering_enabled();
+        log::info!(
+            "main: consensus_mode={:?}, dag_ordering_enabled={}",
+            consensus_mode,
+            dag_ordering_enabled
+        );
 
         let tick_ms = env_u64("EEZO_CONSENSUS_TICK_MS", 200);
         let rollback_on_error = true;
@@ -3187,14 +3251,17 @@ async fn main() -> anyhow::Result<()> {
                 let runner = CoreRunnerHandle::spawn(single, tick_ms, rollback_on_error);
                 (Some(runner), None)
             }
-            ConsensusMode::Dag => {
-                // T73.fix: In DAG mode, we need BOTH runners:
+            ConsensusMode::Dag | ConsensusMode::DagHybrid => {
+                // T73.fix / T76.1: In DAG and DagHybrid modes, we need BOTH runners:
                 // - CoreRunnerHandle: for actual block production (drains mempool, executes blocks, commits to ledger)
                 // - DagRunnerHandle: for DAG vertex management and shadow block generation
                 //
                 // We create two separate SingleNode instances. The CoreRunnerHandle's node
                 // is the "real" ledger that accumulates state. The DagRunnerHandle's node
                 // is used for dry-run/preview purposes only.
+                //
+                // T76.1: In DagHybrid mode, if dag_ordering_enabled=true, CoreRunnerHandle
+                // will try to consume ordered batches from DagConsensusHandle first.
                 
                 // T57.2: Read shadow sampling config from env
                 let dag_shadow_max_txs: usize = std::env::var("EEZO_DAG_SHADOW_MAX_TXS")
@@ -3223,7 +3290,15 @@ async fn main() -> anyhow::Result<()> {
                 // It will use the DAG handle as a tx source via set_dag_runner() later
                 let runner = CoreRunnerHandle::spawn(single, tick_ms, rollback_on_error);
                 
-                log::info!("dag: both CoreRunnerHandle and DagRunnerHandle spawned for DAG mode");
+                let mode_str = if matches!(consensus_mode, ConsensusMode::DagHybrid) {
+                    "DagHybrid"
+                } else {
+                    "DAG"
+                };
+                log::info!(
+                    "dag: both CoreRunnerHandle and DagRunnerHandle spawned for {} mode",
+                    mode_str
+                );
                 (Some(runner), Some(dag))
             }
         }
@@ -4494,4 +4569,126 @@ async fn main() -> anyhow::Result<()> {
         .context("server failed")?;
     println!("🛑 Server shutdown gracefully");
     Ok(())
+}
+
+// =============================================================================
+// T76.1 — Unit tests for consensus mode parsing
+// =============================================================================
+
+#[cfg(test)]
+mod consensus_mode_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Mutex to serialize env var access across tests
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_consensus_mode_parsing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        // Test empty/unset → Hotstuff
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+
+        std::env::set_var("EEZO_CONSENSUS_MODE", "");
+        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+
+        // Test hotstuff variants
+        std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
+        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+
+        std::env::set_var("EEZO_CONSENSUS_MODE", "HOTSTUFF");
+        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+
+        std::env::set_var("EEZO_CONSENSUS_MODE", "hs");
+        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+
+        std::env::set_var("EEZO_CONSENSUS_MODE", "HS");
+        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+
+        // Test dag
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag");
+        assert_eq!(env_consensus_mode(), ConsensusMode::Dag);
+
+        std::env::set_var("EEZO_CONSENSUS_MODE", "DAG");
+        assert_eq!(env_consensus_mode(), ConsensusMode::Dag);
+
+        // Test dag-hybrid variants
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag-hybrid");
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagHybrid);
+
+        std::env::set_var("EEZO_CONSENSUS_MODE", "DAG-HYBRID");
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagHybrid);
+
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag_hybrid");
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagHybrid);
+
+        std::env::set_var("EEZO_CONSENSUS_MODE", "DAG_HYBRID");
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagHybrid);
+
+        // Test unknown strings fall back to Hotstuff
+        std::env::set_var("EEZO_CONSENSUS_MODE", "unknown");
+        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+
+        std::env::set_var("EEZO_CONSENSUS_MODE", "invalid");
+        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+
+        // Clean up
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+    }
+
+    #[test]
+    fn test_dag_ordering_enabled_parsing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        // Test unset → false
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+        assert!(!env_dag_ordering_enabled());
+
+        // Test empty → false
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "");
+        assert!(!env_dag_ordering_enabled());
+
+        // Test true values
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "1");
+        assert!(env_dag_ordering_enabled());
+
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
+        assert!(env_dag_ordering_enabled());
+
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "TRUE");
+        assert!(env_dag_ordering_enabled());
+
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "yes");
+        assert!(env_dag_ordering_enabled());
+
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "YES");
+        assert!(env_dag_ordering_enabled());
+
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "on");
+        assert!(env_dag_ordering_enabled());
+
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "ON");
+        assert!(env_dag_ordering_enabled());
+
+        // Test false values
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "0");
+        assert!(!env_dag_ordering_enabled());
+
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "false");
+        assert!(!env_dag_ordering_enabled());
+
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "no");
+        assert!(!env_dag_ordering_enabled());
+
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "off");
+        assert!(!env_dag_ordering_enabled());
+
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "unknown");
+        assert!(!env_dag_ordering_enabled());
+
+        // Clean up
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+    }
 }
