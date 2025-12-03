@@ -2075,6 +2075,8 @@ pub fn register_dag_hybrid_metrics() {
     register_dag_hybrid_bytes_metrics();
     // T76.4: Also register the apply-level metrics
     register_dag_hybrid_apply_metrics();
+    // T76.5: Also register the de-dup and nonce prefilter metrics
+    register_dag_hybrid_dedup_metrics();
 }
 
 /// No-op version when metrics feature is disabled.
@@ -2498,5 +2500,116 @@ pub fn register_dag_hybrid_apply_metrics() {
 /// No-op version when metrics feature is disabled.
 #[cfg(not(feature = "metrics"))]
 pub fn register_dag_hybrid_apply_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
+// T76.5 — Hybrid de-dup + nonce guard metrics
+// -----------------------------------------------------------------------------
+
+/// Counter: Total transactions filtered out by de-dup LRU (already committed).
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_SEEN_BEFORE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_seen_before_total",
+        "Total transactions filtered by de-dup (already committed)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total candidate transactions after de-dup filtering.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_CANDIDATE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_candidate_total",
+        "Total candidate transactions after de-dup filtering"
+    )
+    .unwrap()
+});
+
+/// Counter: Total transactions dropped by nonce prefilter (nonce too low).
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_BAD_NONCE_PREFILTER_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_bad_nonce_prefilter_total",
+        "Total transactions dropped by nonce prefilter (nonce < account nonce)"
+    )
+    .unwrap()
+});
+
+/// Gauge: Current size of the de-dup LRU cache.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_DEDUP_LRU_SIZE: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_hybrid_dedup_lru_size",
+        "Current number of tx hashes in the de-dup LRU cache"
+    )
+    .unwrap()
+});
+
+/// Helper: Increment seen_before counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_seen_before_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_SEEN_BEFORE_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment candidate counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_candidate_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_CANDIDATE_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment bad_nonce_prefilter counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_bad_nonce_prefilter_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_BAD_NONCE_PREFILTER_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Set the de-dup LRU size gauge.
+#[inline]
+pub fn dag_hybrid_dedup_lru_size_set(size: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_DEDUP_LRU_SIZE.set(size as i64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = size;
+    }
+}
+
+/// Eagerly register T76.5 DAG hybrid de-dup metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_dag_hybrid_dedup_metrics() {
+    let _ = &*EEZO_DAG_HYBRID_SEEN_BEFORE_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_CANDIDATE_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_BAD_NONCE_PREFILTER_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_DEDUP_LRU_SIZE;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_dag_hybrid_dedup_metrics() {
     // No metrics to register when the feature is off.
 }
