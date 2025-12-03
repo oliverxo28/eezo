@@ -1126,6 +1126,11 @@ impl CoreRunnerHandle {
     /// Spawn variant when persistence is available: pass `Some(db)` to enable real roots.
     #[cfg(feature = "persistence")]
     pub fn spawn(node: SingleNode, db: Option<Arc<Persistence>>, tick_ms: u64, rollback_on_error: bool) -> Arc<Self> {
+        // T76.6: Capture the initial committed height before the node is wrapped in Arc<Mutex<_>>.
+        // This is used to set node_start_round for stale batch detection.
+        #[cfg(feature = "dag-consensus")]
+        let initial_committed_height = node.height;
+        
         let stop = Arc::new(AtomicBool::new(false));
         let node = Arc::new(Mutex::new(node));
         let stop_c = Arc::clone(&stop);
@@ -1195,6 +1200,15 @@ impl CoreRunnerHandle {
             log::info!("consensus: hybrid de-dup LRU cache initialized (capacity={})", cache_size);
         }
 
+        // T76.6: Set node_start_round watermark for stale batch detection.
+        // initial_committed_height was captured before the node was wrapped in Arc<Mutex<_>>.
+        #[cfg(feature = "dag-consensus")]
+        if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
+            // Set node_start_round to the committed height at startup.
+            // Any DAG batch with round <= this value is considered stale.
+            hybrid_dedup_cache.set_node_start_round(initial_committed_height);
+        }
+
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
 			// expose T36.6 bridge metrics on /metrics immediately
@@ -1245,33 +1259,43 @@ impl CoreRunnerHandle {
                             // Try to get next ordered batch from DAG
                             match hybrid_handle.try_next_ordered_batch() {
                                 Some(batch) if !batch.is_empty() => {
-                                    log::debug!(
-                                        "hybrid: dag batch available (n_txs={}, round={}, has_hashes={})",
-                                        batch.tx_count(),
-                                        batch.round,
-                                        batch.tx_hashes.is_some()
-                                    );
-                                    
-                                    // T76.3: If tx_hashes is present but tx_bytes is None,
-                                    // try to resolve bytes from the shared DAG mempool.
-                                    if let (Some(hashes), None) = (&batch.tx_hashes, &batch.tx_bytes) {
-                                        // Get DAG runner handle for mempool access
-                                        let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
-                                        if let Some(dag_handle) = dag_opt {
-                                            // Look up bytes for all tx hashes
-                                            let found = dag_handle.get_bytes_for_hashes(hashes).await;
-                                            for (hash, bytes_arc) in found {
-                                                resolved_tx_bytes.insert(hash, bytes::Bytes::from((*bytes_arc).clone()));
+                                    // T76.6: Check if batch is stale (round <= node_start_round)
+                                    if hybrid_dedup_cache.is_stale_batch(batch.round) {
+                                        log::info!(
+                                            "hybrid: dropping stale batch (reason=pre_start_round, round={}, node_start_round={})",
+                                            batch.round, hybrid_dedup_cache.node_start_round()
+                                        );
+                                        crate::metrics::dag_hybrid_stale_batches_dropped_inc();
+                                        // Continue to next slot without fallback - stale batch is expected
+                                    } else {
+                                        log::debug!(
+                                            "hybrid: dag batch available (n_txs={}, round={}, has_hashes={})",
+                                            batch.tx_count(),
+                                            batch.round,
+                                            batch.tx_hashes.is_some()
+                                        );
+                                        
+                                        // T76.3: If tx_hashes is present but tx_bytes is None,
+                                        // try to resolve bytes from the shared DAG mempool.
+                                        if let (Some(hashes), None) = (&batch.tx_hashes, &batch.tx_bytes) {
+                                            // Get DAG runner handle for mempool access
+                                            let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
+                                            if let Some(dag_handle) = dag_opt {
+                                                // Look up bytes for all tx hashes
+                                                let found = dag_handle.get_bytes_for_hashes(hashes).await;
+                                                for (hash, bytes_arc) in found {
+                                                    resolved_tx_bytes.insert(hash, bytes::Bytes::from((*bytes_arc).clone()));
+                                                }
+                                                log::debug!(
+                                                    "hybrid: resolved {} of {} tx bytes from shared mempool",
+                                                    resolved_tx_bytes.len(), hashes.len()
+                                                );
                                             }
-                                            log::debug!(
-                                                "hybrid: resolved {} of {} tx bytes from shared mempool",
-                                                resolved_tx_bytes.len(), hashes.len()
-                                            );
                                         }
+                                        
+                                        hybrid_batch_opt = Some(batch);
+                                        hybrid_batch_used = true;
                                     }
-                                    
-                                    hybrid_batch_opt = Some(batch);
-                                    hybrid_batch_used = true;
                                 }
                                 Some(_) => {
                                     // Empty batch - fallback
@@ -1414,15 +1438,61 @@ impl CoreRunnerHandle {
                             hybrid_filtered_seen = stats.filtered_seen;
                             hybrid_candidate_count = stats.candidate;
                             hybrid_bad_nonce_prefilter = stats.bad_nonce_pref;
-                            hybrid_stats_opt = Some(stats);
+                            hybrid_stats_opt = Some(stats.clone());
                             
                             if !hybrid_txs.is_empty() {
                                 hybrid_txs
                             } else {
-                                // All txs failed to decode/lookup/nonce - fall back to mempool
-                                log::warn!("hybrid: all batch txs filtered/failed, falling back to mempool");
-                                crate::metrics::dag_hybrid_fallback_inc();
-                                Self::collect_from_mempool(&mut guard, block_max_tx)
+                                // T76.6: Determine the reason for empty candidates and log appropriately
+                                // - dedup_all: all txs filtered by de-dup (pure de-dup, no new txs)
+                                // - decode_errors: some decode failures (genuine error, WARN)
+                                // - no_candidates_mempool_empty: no candidates AND mempool empty (INFO, skip fallback)
+                                
+                                // Update the empty_candidates metric
+                                crate::metrics::dag_hybrid_empty_candidates_inc();
+                                
+                                if stats.decode_err > 0 {
+                                    // Genuine error: decode failures present
+                                    log::warn!(
+                                        "hybrid: batch failed with decode errors (reason=decode_errors, n={} decode_err={})",
+                                        stats.n, stats.decode_err
+                                    );
+                                    crate::metrics::dag_hybrid_fallback_inc();
+                                    Self::collect_from_mempool(&mut guard, block_max_tx)
+                                } else if stats.filtered_seen == stats.n && stats.n > 0 {
+                                    // Pure de-dup: all txs were already committed
+                                    log::info!(
+                                        "hybrid: batch filtered (reason=dedup_all, n={} filtered_seen={})",
+                                        stats.n, stats.filtered_seen
+                                    );
+                                    crate::metrics::dag_hybrid_all_filtered_inc();
+                                    // Check if mempool is empty - if so, skip fallback
+                                    let mempool_len = guard.mempool.len();
+                                    if mempool_len == 0 {
+                                        log::info!("hybrid: no_candidates_mempool_empty, continuing without fallback");
+                                        Vec::new() // Return empty - block will be empty
+                                    } else {
+                                        crate::metrics::dag_hybrid_fallback_inc();
+                                        Self::collect_from_mempool(&mut guard, block_max_tx)
+                                    }
+                                } else {
+                                    // Other reason: candidate == 0 after dedup/nonce prefilter
+                                    let mempool_len = guard.mempool.len();
+                                    if mempool_len == 0 {
+                                        log::info!(
+                                            "hybrid: no candidates (reason=no_candidates_mempool_empty, n={} filtered={} bad_nonce={})",
+                                            stats.n, stats.filtered_seen, stats.bad_nonce_pref
+                                        );
+                                        Vec::new() // Return empty - block will be empty
+                                    } else {
+                                        log::info!(
+                                            "hybrid: no candidates (reason=filtered_out, n={} filtered={} bad_nonce={}), fallback to mempool",
+                                            stats.n, stats.filtered_seen, stats.bad_nonce_pref
+                                        );
+                                        crate::metrics::dag_hybrid_fallback_inc();
+                                        Self::collect_from_mempool(&mut guard, block_max_tx)
+                                    }
+                                }
                             }
                         } else {
                             // Shouldn't happen if hybrid_batch_used is true

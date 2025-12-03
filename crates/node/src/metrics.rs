@@ -2077,6 +2077,8 @@ pub fn register_dag_hybrid_metrics() {
     register_dag_hybrid_apply_metrics();
     // T76.5: Also register the de-dup and nonce prefilter metrics
     register_dag_hybrid_dedup_metrics();
+    // T76.6: Also register the startup/stale batch metrics
+    register_dag_hybrid_startup_metrics();
 }
 
 /// No-op version when metrics feature is disabled.
@@ -2611,5 +2613,83 @@ pub fn register_dag_hybrid_dedup_metrics() {
 /// No-op version when metrics feature is disabled.
 #[cfg(not(feature = "metrics"))]
 pub fn register_dag_hybrid_dedup_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
+// T76.6 — Quiet startup + stale-batch handling metrics
+// -----------------------------------------------------------------------------
+
+/// Counter: Batches where all tx hashes were filtered by de-dup (filtered_seen == n).
+/// Incremented when a batch arrives but all txs are already committed.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_ALL_FILTERED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_all_filtered_total",
+        "Batches where all tx hashes were filtered by de-dup (pure dedup, no candidates)"
+    )
+    .unwrap()
+});
+
+/// Counter: Stale batches dropped at startup (round <= node_start_round).
+/// Incremented when a pre-start DAG batch is detected and dropped.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_STALE_BATCHES_DROPPED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_stale_batches_dropped_total",
+        "Stale DAG batches dropped at startup (round <= node_start_round)"
+    )
+    .unwrap()
+});
+
+/// Counter: Batches where candidate == 0 after dedup/nonce-pref.
+/// Incremented when a batch yields no valid candidates after filtering.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_EMPTY_CANDIDATES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_empty_candidates_total",
+        "Batches with zero candidates after dedup and nonce prefilter"
+    )
+    .unwrap()
+});
+
+/// Helper: Increment all_filtered counter.
+#[inline]
+pub fn dag_hybrid_all_filtered_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_ALL_FILTERED_TOTAL.inc();
+    }
+}
+
+/// Helper: Increment stale_batches_dropped counter.
+#[inline]
+pub fn dag_hybrid_stale_batches_dropped_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_STALE_BATCHES_DROPPED_TOTAL.inc();
+    }
+}
+
+/// Helper: Increment empty_candidates counter.
+#[inline]
+pub fn dag_hybrid_empty_candidates_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_EMPTY_CANDIDATES_TOTAL.inc();
+    }
+}
+
+/// Eagerly register T76.6 quiet startup metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_dag_hybrid_startup_metrics() {
+    let _ = &*EEZO_DAG_HYBRID_ALL_FILTERED_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_STALE_BATCHES_DROPPED_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_EMPTY_CANDIDATES_TOTAL;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_dag_hybrid_startup_metrics() {
     // No metrics to register when the feature is off.
 }
