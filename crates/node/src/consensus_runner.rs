@@ -1175,6 +1175,8 @@ impl CoreRunnerHandle {
                 #[cfg(feature = "dag-consensus")]
                 let mut hybrid_batch_opt: Option<consensus_dag::OrderedBatch> = None;
                 #[cfg(feature = "dag-consensus")]
+                let mut resolved_tx_bytes: std::collections::HashMap<[u8; 32], bytes::Bytes> = std::collections::HashMap::new();
+                #[cfg(feature = "dag-consensus")]
                 if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
                     // Try to get hybrid DAG handle
                     let hybrid_opt: Option<Arc<HybridDagHandle>> = hybrid_dag_c.lock().await.clone();
@@ -1185,11 +1187,30 @@ impl CoreRunnerHandle {
                             match hybrid_handle.try_next_ordered_batch() {
                                 Some(batch) if !batch.is_empty() => {
                                     log::debug!(
-                                        "hybrid: dag batch available (n_txs={}, round={}, has_bytes={})",
+                                        "hybrid: dag batch available (n_txs={}, round={}, has_hashes={})",
                                         batch.tx_count(),
                                         batch.round,
                                         batch.tx_hashes.is_some()
                                     );
+                                    
+                                    // T76.3: If tx_hashes is present but tx_bytes is None,
+                                    // try to resolve bytes from the shared DAG mempool.
+                                    if let (Some(hashes), None) = (&batch.tx_hashes, &batch.tx_bytes) {
+                                        // Get DAG runner handle for mempool access
+                                        let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
+                                        if let Some(dag_handle) = dag_opt {
+                                            // Look up bytes for all tx hashes
+                                            let found = dag_handle.get_bytes_for_hashes(hashes).await;
+                                            for (hash, bytes_arc) in found {
+                                                resolved_tx_bytes.insert(hash, bytes::Bytes::from((*bytes_arc).clone()));
+                                            }
+                                            log::debug!(
+                                                "hybrid: resolved {} of {} tx bytes from shared mempool",
+                                                resolved_tx_bytes.len(), hashes.len()
+                                            );
+                                        }
+                                    }
+                                    
                                     hybrid_batch_opt = Some(batch);
                                     hybrid_batch_used = true;
                                 }
@@ -1304,7 +1325,11 @@ impl CoreRunnerHandle {
                             // T76.3: Process hybrid batch with direct bytes decoding
                             let block_max_bytes = guard.cfg.block_byte_budget;
                             let (hybrid_txs, used, missing, decode_err, size_bytes) = 
-                                Self::collect_txs_from_hybrid_batch(batch, &mut guard, block_max_bytes);
+                                Self::collect_txs_from_hybrid_batch_with_resolved(
+                                    batch,
+                                    &resolved_tx_bytes,
+                                    block_max_bytes,
+                                );
                             
                             // T76.3: Get total hash count for metrics
                             let n = match &batch.tx_hashes {
@@ -1334,6 +1359,7 @@ impl CoreRunnerHandle {
                             } else {
                                 // All txs failed to decode/lookup - fall back to mempool
                                 log::warn!("hybrid: all batch txs failed, falling back to mempool");
+                                crate::metrics::dag_hybrid_fallback_inc();
                                 Self::collect_from_mempool(&mut guard, block_max_tx)
                             }
                         } else {
@@ -2012,8 +2038,9 @@ impl CoreRunnerHandle {
     /// T76.3: Process an OrderedBatch from DAG, extracting SignedTx from bytes.
     ///
     /// For each entry in the batch:
-    /// - If bytes are available, decode directly (no mempool lookup)
-    /// - If bytes are missing, fall back to mempool lookup per-entry
+    /// - First check if bytes were pre-resolved from the shared mempool
+    /// - If bytes are available (either in batch or resolved), decode directly
+    /// - If bytes are missing from both sources, count as missing
     /// - Track metrics: bytes_used, bytes_missing, decode_errors
     ///
     /// Respects `block_max_bytes` cap, leaving remainder for next block.
@@ -2022,9 +2049,9 @@ impl CoreRunnerHandle {
     /// - `Ok(txs)`: vector of successfully decoded SignedTx
     /// - Remainder entries stay in mempool for next block (no drop)
     #[cfg(feature = "dag-consensus")]
-    fn collect_txs_from_hybrid_batch(
+    fn collect_txs_from_hybrid_batch_with_resolved(
         batch: &consensus_dag::OrderedBatch,
-        _guard: &mut SingleNode,  // Currently unused, but kept for future expansion
+        resolved_bytes: &std::collections::HashMap<[u8; 32], bytes::Bytes>,
         block_max_bytes: usize,
     ) -> (Vec<SignedTx>, usize, usize, usize, usize) {
         // Statistics for logging and metrics
@@ -2036,20 +2063,27 @@ impl CoreRunnerHandle {
         let mut txs: Vec<SignedTx> = Vec::new();
         let mut current_bytes: usize = 0;
 
-        for (hash, bytes_opt) in batch.iter_tx_entries() {
-            // Check if we've exceeded block max_bytes cap
-            if current_bytes >= block_max_bytes {
-                // Leave remainder for next block (don't process more)
-                log::debug!(
-                    "hybrid: block max_bytes cap reached ({} >= {}), leaving remainder",
-                    current_bytes, block_max_bytes
-                );
-                break;
-            }
+        // T76.3: If batch has tx_hashes, iterate over them and use resolved_bytes
+        // Otherwise fall back to the batch's iter_tx_entries (which may also have bytes)
+        if let Some(hashes) = &batch.tx_hashes {
+            for hash in hashes {
+                // Check if we've exceeded block max_bytes cap
+                if current_bytes >= block_max_bytes {
+                    log::debug!(
+                        "hybrid: block max_bytes cap reached ({} >= {}), leaving remainder",
+                        current_bytes, block_max_bytes
+                    );
+                    break;
+                }
 
-            match bytes_opt {
-                Some(bytes) => {
-                    // T76.3: Direct bytes available - decode without mempool lookup
+                // First try batch's tx_bytes, then resolved_bytes from shared mempool
+                let bytes_opt = batch.tx_bytes.as_ref()
+                    .and_then(|v| v.iter().position(|_| true)) // placeholder
+                    .and_then(|_| None)
+                    .or_else(|| resolved_bytes.get(hash));
+                
+                // Check resolved_bytes directly for this hash
+                if let Some(bytes) = resolved_bytes.get(hash) {
                     let tx_size = bytes.len();
                     
                     // Check if this tx would exceed the byte budget
@@ -2069,7 +2103,6 @@ impl CoreRunnerHandle {
                             total_size_bytes += tx_size;
                         }
                         None => {
-                            // Decode failed - increment counter, skip this tx
                             decode_errors += 1;
                             log::warn!(
                                 "hybrid: decode error for tx hash=0x{}",
@@ -2077,13 +2110,56 @@ impl CoreRunnerHandle {
                             );
                         }
                     }
+                } else {
+                    // Bytes not found in resolved cache
+                    bytes_missing += 1;
+                    log::debug!(
+                        "hybrid: missing bytes for tx hash=0x{}, will be processed via normal path",
+                        hex::encode(&hash[..4])
+                    );
                 }
-                None => {
-                    // T76.3: Bytes missing from DAG batch.
-                    // The ledger mempool uses sender/nonce-based storage, not hash lookup,
-                    // so we can't do a per-hash fallback lookup here. The transaction
-                    // should still be in the pending mempool and will be processed
-                    // normally in subsequent blocks via the regular drain_for_block path.
+            }
+        } else {
+            // No tx_hashes in batch - use legacy iterator
+            for (hash, bytes_opt) in batch.iter_tx_entries() {
+                if current_bytes >= block_max_bytes {
+                    log::debug!(
+                        "hybrid: block max_bytes cap reached ({} >= {}), leaving remainder",
+                        current_bytes, block_max_bytes
+                    );
+                    break;
+                }
+
+                // Try batch bytes first, then resolved
+                let bytes = bytes_opt.or_else(|| resolved_bytes.get(&hash).map(|b| b));
+                
+                if let Some(bytes_ref) = bytes {
+                    let tx_size = bytes_ref.len();
+                    
+                    if current_bytes + tx_size > block_max_bytes {
+                        log::debug!(
+                            "hybrid: tx would exceed block_max_bytes ({} + {} > {}), stopping",
+                            current_bytes, tx_size, block_max_bytes
+                        );
+                        break;
+                    }
+
+                    match crate::dag_runner::parse_signed_tx_from_envelope(bytes_ref) {
+                        Some(stx) => {
+                            txs.push(stx);
+                            bytes_used += 1;
+                            current_bytes += tx_size;
+                            total_size_bytes += tx_size;
+                        }
+                        None => {
+                            decode_errors += 1;
+                            log::warn!(
+                                "hybrid: decode error for tx hash=0x{}",
+                                hex::encode(&hash[..4])
+                            );
+                        }
+                    }
+                } else {
                     bytes_missing += 1;
                     log::debug!(
                         "hybrid: missing bytes for tx hash=0x{}, will be processed via normal path",

@@ -12,7 +12,7 @@
 //! - **DagStats**: Statistics for monitoring/testing
 //! - **DagError**: Error type for handle operations
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -289,6 +289,10 @@ pub struct DagConsensusHandle {
 
     /// Last ordered round (to avoid re-ordering)
     last_ordered_round: Arc<RwLock<Option<Round>>>,
+    
+    /// T76.3: Payload cache mapping VertexId -> raw payload data.
+    /// Used to retrieve tx hashes when creating OrderedBatch.
+    payload_cache: Arc<RwLock<HashMap<VertexId, Vec<u8>>>>,
 }
 
 impl DagConsensusHandle {
@@ -311,6 +315,7 @@ impl DagConsensusHandle {
             ordered_queue: Arc::new(RwLock::new(VecDeque::new())),
             stats: Arc::new(RwLock::new(DagStats::default())),
             last_ordered_round: Arc::new(RwLock::new(None)),
+            payload_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -346,6 +351,12 @@ impl DagConsensusHandle {
         let node = DagNode::new(current_round, parents, payload_digest, payload.author, timestamp);
 
         let vertex_id = node.id;
+
+        // T76.3: Cache the payload data for later retrieval when creating OrderedBatch
+        {
+            let mut cache = self.payload_cache.write();
+            cache.insert(vertex_id, payload.data);
+        }
 
         // Store in DAG
         self.store.put_node(&node);
@@ -411,8 +422,24 @@ impl DagConsensusHandle {
     }
 
     /// Commit a round (triggers GC if appropriate).
+    /// 
+    /// T76.3: Also clears payload cache entries for vertices from older rounds.
     pub fn commit_round(&self, round: u64) {
         self.store.gc(Round(round));
+
+        // T76.3: Clean up payload cache for vertices that are now committed
+        // We don't need payloads for vertices older than gc_depth rounds behind
+        let gc_cutoff = round.saturating_sub(self.config.gc_depth);
+        {
+            let mut cache = self.payload_cache.write();
+            // Get vertices from older rounds and remove their cached payloads
+            for r in 0..=gc_cutoff {
+                let old_nodes = self.store.get_round_nodes(Round(r));
+                for node in old_nodes {
+                    cache.remove(&node.id);
+                }
+            }
+        }
 
         let mut stats = self.stats.write();
         stats.committed_round = Some(round);
@@ -455,8 +482,44 @@ impl DagConsensusHandle {
 
         // Try to order
         if let Some(bundle) = self.orderer.try_order_round(&self.store, current_round) {
-            // Create batch and enqueue
-            let batch = OrderedBatch::from_bundle(bundle);
+            // T76.3: Extract tx hashes from cached payloads for each vertex in the bundle
+            let mut all_tx_hashes: Vec<[u8; 32]> = Vec::new();
+            
+            {
+                let cache = self.payload_cache.read();
+                for vertex_id in &bundle.vertices {
+                    if let Some(payload_data) = cache.get(vertex_id) {
+                        // Parse tx hashes from the payload data.
+                        // Format: 8 bytes (height) + 32 bytes (block_hash) + N*32 bytes (tx_hashes)
+                        if payload_data.len() >= 40 {
+                            let tx_data = &payload_data[40..];
+                            // Extract 32-byte tx hashes
+                            for chunk in tx_data.chunks_exact(32) {
+                                if let Ok(hash) = <[u8; 32]>::try_from(chunk) {
+                                    all_tx_hashes.push(hash);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // T76.3: Create batch with tx_hashes populated (tx_bytes will be None,
+            // the consumer will need to look up bytes from the shared mempool)
+            let batch = if !all_tx_hashes.is_empty() {
+                // Use with_tx_data to create batch with tx_hashes
+                match OrderedBatch::with_tx_data(
+                    bundle.round.as_u64(),
+                    vec![bundle.clone()],
+                    all_tx_hashes,
+                    None, // tx_bytes not available here, consumer will look up from mempool
+                ) {
+                    Ok(b) => b,
+                    Err(_) => OrderedBatch::from_bundle(bundle),
+                }
+            } else {
+                OrderedBatch::from_bundle(bundle)
+            };
             
             // T74.3: Get vertex count from the batch for metrics (after batch creation)
             let vertex_count = batch.vertex_count() as u64;
