@@ -1259,11 +1259,11 @@ impl CoreRunnerHandle {
                 let mut hybrid_bad_nonce_prefilter: usize = 0;
                 #[cfg(feature = "dag-consensus")]
                 if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
-                    // T76.7: Parse aggregation time budget from environment (default 3ms, configurable 2-5ms)
+                    // T76.7: Parse aggregation time budget from environment (default 3ms, configurable 2-10ms)
                     let agg_time_budget_ms: u64 = std::env::var("EEZO_HYBRID_AGG_TIME_BUDGET_MS")
                         .ok()
                         .and_then(|v| v.parse().ok())
-                        .map(|v: u64| v.clamp(2, 10)) // Clamp to reasonable range
+                        .map(|v: u64| v.clamp(2, 10)) // Clamp to reasonable range (2-10ms)
                         .unwrap_or(3);
                     
                     // Try to get hybrid DAG handle
