@@ -1167,6 +1167,8 @@ impl CoreRunnerHandle {
                 let dag_prepare_start = std::time::Instant::now();
                 
                 // T76.1: Try hybrid batch consumption when in hybrid mode with ordering enabled
+                // Note: _hybrid_batch_used is scaffolding for T76.2 when we'll actually use the 
+                // DAG batch txs instead of mempool. Currently tracks that a batch was available.
                 #[cfg(feature = "dag-consensus")]
                 let mut _hybrid_batch_used = false;
                 #[cfg(feature = "dag-consensus")]
