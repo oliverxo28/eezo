@@ -583,6 +583,194 @@ pub fn spawn_shadow_dag_if_enabled() -> Option<ShadowDagHandle> {
 }
 
 // ---------------------------------------------------------------------------
+// T76.1: HybridDagHandle — DAG ordering source for hybrid mode
+// ---------------------------------------------------------------------------
+
+/// T76.1: Handle for consuming ordered batches from DAG consensus in hybrid mode.
+///
+/// In hybrid mode:
+/// - DAG provides ordered batches as the primary tx source
+/// - CoreRunnerHandle still performs the canonical Hotstuff-style commit
+/// - If no ordered batch is available, fallback to mempool
+///
+/// This type wraps a DagConsensusHandle and provides:
+/// - A method to try to get the next ordered batch (non-blocking)
+/// - A method to submit block summaries (to feed the DAG after commit)
+/// - Metrics for hybrid mode usage
+pub struct HybridDagHandle {
+    /// The DAG consensus handle
+    handle: DagConsensusHandle,
+    /// Author ID for this node's payloads
+    author: AuthorId,
+    /// Shared tracker for sync status
+    tracker: Arc<RwLock<DagConsensusTracker>>,
+}
+
+impl HybridDagHandle {
+    /// Create a new hybrid DAG handle with default configuration.
+    pub fn new() -> Self {
+        let config = DagConsensusConfig::default();
+        let handle = DagConsensusHandle::new(config);
+        let author = AuthorId([0u8; 32]);
+        let tracker = Arc::new(RwLock::new(DagConsensusTracker::new()));
+
+        Self {
+            handle,
+            author,
+            tracker,
+        }
+    }
+
+    /// Create a new hybrid DAG handle with custom configuration.
+    pub fn with_config(config: DagConsensusConfig) -> Self {
+        let handle = DagConsensusHandle::new(config);
+        let author = AuthorId([0u8; 32]);
+        let tracker = Arc::new(RwLock::new(DagConsensusTracker::new()));
+
+        Self {
+            handle,
+            author,
+            tracker,
+        }
+    }
+
+    /// Try to get the next ordered batch from the DAG (non-blocking).
+    ///
+    /// Returns `Some(OrderedBatch)` if a batch is available, `None` otherwise.
+    /// The caller should use this to get transactions for block building in hybrid mode.
+    pub fn try_next_ordered_batch(&self) -> Option<consensus_dag::OrderedBatch> {
+        self.handle.try_next_ordered_batch()
+    }
+
+    /// Submit a block summary after it has been committed.
+    ///
+    /// This feeds the DAG with the committed block so it can order future batches.
+    /// In hybrid mode, this should be called after each successful block commit.
+    pub fn submit_committed_block(&self, summary: &ShadowBlockSummary) {
+        // Record in tracker
+        {
+            // Use blocking write since we're not in async context
+            // This is safe because the tracker lock is held briefly
+            let tracker_guard = self.tracker.blocking_write();
+            // We can't use blocking_write in async context, so we use try_write
+            drop(tracker_guard);
+        }
+
+        // Build payload from block summary
+        let payload = self.summary_to_payload(summary);
+
+        // Submit to DAG handle
+        match self.handle.submit_payload(payload) {
+            Ok(_vertex_id) => {
+                log::debug!(
+                    "dag-hybrid: payload submitted for height={}",
+                    summary.height
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "dag-hybrid: payload submit failed at height={}: {}",
+                    summary.height,
+                    e
+                );
+            }
+        }
+
+        // Advance round after each block
+        self.handle.advance_round();
+    }
+
+    /// Submit a block summary asynchronously (for use in async contexts).
+    pub async fn submit_committed_block_async(&self, summary: &ShadowBlockSummary) {
+        // Record in tracker
+        {
+            let mut tracker = self.tracker.write().await;
+            tracker.record_canonical_block(summary);
+        }
+
+        // Build payload from block summary
+        let payload = self.summary_to_payload(summary);
+
+        // Submit to DAG handle
+        match self.handle.submit_payload(payload) {
+            Ok(_vertex_id) => {
+                log::debug!(
+                    "dag-hybrid: payload submitted for height={}",
+                    summary.height
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "dag-hybrid: payload submit failed at height={}: {}",
+                    summary.height,
+                    e
+                );
+            }
+        }
+
+        // Try to order and consume batches
+        while let Some(batch) = self.handle.try_next_ordered_batch() {
+            let tx_count = batch.bundles.iter().map(|b| b.tx_count).sum::<usize>();
+            log::debug!(
+                "dag-hybrid: batch ordered (round={}, tx_count={})",
+                batch.round,
+                tx_count
+            );
+
+            // Record in tracker with canonical tx hashes
+            {
+                let mut tracker = self.tracker.write().await;
+                let dag_tx_hashes = tracker.get_canonical_tx_hashes(batch.round)
+                    .unwrap_or_default();
+                let _is_mismatch = tracker.record_dag_ordered(batch.round, dag_tx_hashes);
+            }
+        }
+
+        // Advance round after each block
+        self.handle.advance_round();
+    }
+
+    /// Get the current DAG round.
+    pub fn current_round(&self) -> u64 {
+        self.handle.current_round()
+    }
+
+    /// Get DAG statistics.
+    pub fn stats(&self) -> consensus_dag::DagStats {
+        self.handle.stats()
+    }
+
+    /// Get the tracker for status queries.
+    pub fn tracker(&self) -> Arc<RwLock<DagConsensusTracker>> {
+        Arc::clone(&self.tracker)
+    }
+
+    /// Convert a ShadowBlockSummary into a DagPayload.
+    fn summary_to_payload(&self, summary: &ShadowBlockSummary) -> consensus_dag::DagPayload {
+        let mut data = Vec::with_capacity(8 + 32 + summary.tx_hashes.len() * 32);
+
+        // Height
+        data.extend_from_slice(&summary.height.to_le_bytes());
+
+        // Block hash
+        data.extend_from_slice(&summary.block_hash);
+
+        // Transaction hashes
+        for tx_hash in &summary.tx_hashes {
+            data.extend_from_slice(tx_hash);
+        }
+
+        consensus_dag::DagPayload::new(data, self.author)
+    }
+}
+
+impl Default for HybridDagHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

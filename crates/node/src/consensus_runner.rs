@@ -27,6 +27,10 @@ use eezo_ledger::SignedTx; // T66.0: used by collect_block_txs_from_mempool()
 #[cfg(feature = "dag-consensus")]
 use crate::dag_consensus_runner::ShadowBlockSummary;
 
+// T76.1: Import HybridDagHandle for hybrid mode
+#[cfg(feature = "dag-consensus")]
+use crate::dag_consensus_runner::HybridDagHandle;
+
 /// T60.0 — helper: log a compact summary of block tx hashes.
 /// This does **not** change behaviour; it only logs.
 fn log_block_shadow_debug(prefix: &str, height: u64, blk_opt: &Option<Block>) {
@@ -277,6 +281,42 @@ fn qc_sidecar_enforce_on() -> bool {
     #[cfg(not(feature = "qc-sidecar-v2-enforce"))]
     { false }
 }
+
+/// T76.1: Consensus mode enum for determining tx source behavior.
+/// This is separate from the top-level ConsensusMode in main.rs.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum HybridModeConfig {
+    /// Standard mode: use mempool or DAG candidate as tx source
+    Standard,
+    /// Hybrid mode with DAG ordering enabled: try DAG batches first
+    HybridEnabled,
+}
+
+impl HybridModeConfig {
+    /// Parse hybrid mode configuration from environment.
+    fn from_env() -> Self {
+        // Check if we're in dag-hybrid mode with ordering enabled
+        let mode = std::env::var("EEZO_CONSENSUS_MODE")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        
+        let is_dag_hybrid = mode == "dag-hybrid" || mode == "dag_hybrid";
+        
+        let ordering_enabled = std::env::var("EEZO_DAG_ORDERING_ENABLED")
+            .map(|v| {
+                let s = v.trim().to_ascii_lowercase();
+                matches!(s.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false);
+        
+        if is_dag_hybrid && ordering_enabled {
+            HybridModeConfig::HybridEnabled
+        } else {
+            HybridModeConfig::Standard
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 enum BlockTxSource {
     /// Current behaviour: collect txs directly from mempool.
@@ -305,6 +345,10 @@ pub struct CoreRunnerHandle {
     // Stored behind a Mutex so we can attach it after construction.
     #[cfg(feature = "dag-consensus")]
     shadow_dag_sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<ShadowBlockSummary>>>>,
+    // T76.1: optional hybrid DAG handle for consuming ordered batches
+    #[cfg(feature = "dag-consensus")]
+    #[allow(dead_code)]
+    hybrid_dag: Arc<Mutex<Option<Arc<HybridDagHandle>>>>,
     join: tokio::task::JoinHandle<()>,
 }
 impl CoreRunnerHandle {
@@ -1017,6 +1061,8 @@ impl CoreRunnerHandle {
             dag,
             #[cfg(feature = "dag-consensus")]
             shadow_dag_sender,
+            #[cfg(feature = "dag-consensus")]
+            hybrid_dag: Arc::new(Mutex::new(None)),
             join,
         })
     }
@@ -1640,6 +1686,8 @@ impl CoreRunnerHandle {
             dag,
             #[cfg(feature = "dag-consensus")]
             shadow_dag_sender,
+            #[cfg(feature = "dag-consensus")]
+            hybrid_dag: Arc::new(Mutex::new(None)),
             join,
         })
     }
@@ -1678,6 +1726,22 @@ impl CoreRunnerHandle {
             *guard = sender;
         }
         log::info!("consensus: core_runner: shadow DAG sender attached");
+    }
+
+    /// T76.1: attach or clear the hybrid DAG handle.
+    ///
+    /// When set, the runner can try to consume ordered batches from the DAG
+    /// as the primary tx source in hybrid mode.
+    #[cfg(feature = "dag-consensus")]
+    pub async fn set_hybrid_dag(
+        self: &Arc<Self>,
+        handle: Option<Arc<HybridDagHandle>>,
+    ) {
+        {
+            let mut guard = self.hybrid_dag.lock().await;
+            *guard = handle;
+        }
+        log::info!("consensus: core_runner: hybrid DAG handle attached");
     }
 
     /// Request stop and wait for the loop to finish.
