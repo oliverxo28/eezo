@@ -104,6 +104,10 @@ mod dag_runner;
 #[cfg(feature = "dag-consensus")]
 mod dag_consensus_runner;
 
+// T76.9: Fast Decode Pool module
+#[cfg(feature = "pq44-runtime")]
+mod tx_decode_pool;
+
 // T36.6: expose bridge metrics immediately at boot
 // metrics registrars used at boot
 #[cfg(feature = "metrics")]
@@ -121,6 +125,8 @@ use crate::metrics::{
     register_dag_hybrid_metrics,
     // T76.2: DAG ordered visibility metrics
     register_dag_ordered_metrics,
+    // T76.9: Decode pool metrics
+    register_t76_decode_pool_metrics,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -2907,6 +2913,9 @@ async fn main() -> anyhow::Result<()> {
 
         // T76.2: DAG ordered visibility metrics
         register_dag_ordered_metrics();
+
+        // T76.9: Decode pool metrics
+        register_t76_decode_pool_metrics();
 	}	
     // T37: spawn a dedicated /metrics HTTP server on EEZO_METRICS_BIND (or default)
     let metrics_bind = std::env::var("EEZO_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9898".into());
@@ -2922,6 +2931,10 @@ async fn main() -> anyhow::Result<()> {
         crate::metrics::set_perf_run_id(run_id);
         log::info!("main: perf run_id = {}", run_id);
     }
+
+    // T76.9: Log fast decode pool status at startup
+    #[cfg(feature = "pq44-runtime")]
+    tx_decode_pool::log_fast_decode_status();
 
     // Parse chain_id once, early — ENV overrides, else use genesis (default).
     // Allows decimal (e.g., "31337") or hex ("0x..."), left-padded to 20 bytes.

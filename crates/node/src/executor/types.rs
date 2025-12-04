@@ -81,11 +81,22 @@ impl ApplyFailureCounts {
 // T54 — PARALLEL EXECUTOR CORE TYPES
 // =======================================================================
 
+use std::sync::Arc;
+
+// T76.9: Import DecodedTx for zero-copy handoff
+#[cfg(feature = "pq44-runtime")]
+use crate::tx_decode_pool::DecodedTx;
+
 /// Input to the executor: a selected batch of mempool txs for this block.
 #[derive(Debug)]
 pub struct ExecInput {
     /// All signed txs chosen for this block.
     pub txs: Vec<SignedTx>,
+
+    /// T76.9: Optional pre-decoded transactions for zero-copy handoff.
+    /// When present, executors should use these instead of re-decoding from `txs`.
+    #[cfg(feature = "pq44-runtime")]
+    pub decoded_txs: Option<Vec<Arc<DecodedTx>>>,
 
     /// The height being built (for debug/logs only).
     pub height: u64,
@@ -99,12 +110,61 @@ pub struct ExecInput {
 
 impl ExecInput {
     pub fn new(txs: Vec<SignedTx>, height: u64) -> Self {
-        Self { txs, height, partial_failure_ok: false }
+        Self {
+            txs,
+            height,
+            partial_failure_ok: false,
+            #[cfg(feature = "pq44-runtime")]
+            decoded_txs: None,
+        }
     }
 
     /// T76.4: Create input with partial failure tolerance enabled.
     pub fn with_partial_failure(txs: Vec<SignedTx>, height: u64) -> Self {
-        Self { txs, height, partial_failure_ok: true }
+        Self {
+            txs,
+            height,
+            partial_failure_ok: true,
+            #[cfg(feature = "pq44-runtime")]
+            decoded_txs: None,
+        }
+    }
+
+    /// T76.9: Create input with pre-decoded transactions for zero-copy handoff.
+    #[cfg(feature = "pq44-runtime")]
+    pub fn with_decoded(decoded_txs: Vec<Arc<DecodedTx>>, height: u64) -> Self {
+        // Extract SignedTx references from decoded txs for backward compatibility
+        let txs: Vec<SignedTx> = decoded_txs.iter().map(|d| d.tx.clone()).collect();
+        Self {
+            txs,
+            height,
+            partial_failure_ok: false,
+            decoded_txs: Some(decoded_txs),
+        }
+    }
+
+    /// T76.9: Create input with pre-decoded transactions and partial failure tolerance.
+    #[cfg(feature = "pq44-runtime")]
+    pub fn with_decoded_and_partial_failure(decoded_txs: Vec<Arc<DecodedTx>>, height: u64) -> Self {
+        let txs: Vec<SignedTx> = decoded_txs.iter().map(|d| d.tx.clone()).collect();
+        Self {
+            txs,
+            height,
+            partial_failure_ok: true,
+            decoded_txs: Some(decoded_txs),
+        }
+    }
+
+    /// T76.9: Check if this input has pre-decoded transactions available.
+    #[cfg(feature = "pq44-runtime")]
+    pub fn has_decoded(&self) -> bool {
+        self.decoded_txs.is_some()
+    }
+
+    /// T76.9: Get a reference to the decoded transactions if available.
+    #[cfg(feature = "pq44-runtime")]
+    pub fn get_decoded(&self) -> Option<&[Arc<DecodedTx>]> {
+        self.decoded_txs.as_deref()
     }
 }
 
