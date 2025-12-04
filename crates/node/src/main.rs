@@ -1080,7 +1080,7 @@ enum ConsensusMode {
 
 impl ConsensusMode {
     /// T76.11: Compute the gauge value for the consensus mode metric.
-    /// 
+    ///
     /// Returns:
     /// - 0 for Hotstuff (default mode)
     /// - 1 for DagHybrid mode with DAG ordering enabled
