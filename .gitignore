@@ -38,6 +38,7 @@ t29_9-*/
 
 # Test artifacts
 crates/node/t29_9-*/
+crates/node/test-ops-*/
 
 # Backup directories
 /backup/
