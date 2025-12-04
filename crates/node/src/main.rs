@@ -1959,7 +1959,7 @@ async fn handle_account_lookup(
     let ledger_addr = match parse_account_addr(&addr_normalized) {
         Some(a) => a,
         None => {
-            log::info!("T76.8: /account 404 - invalid address format: {}", addr_normalized);
+            log::info!("T76.8: /account 400 - invalid address format: {}", addr_normalized);
             crate::metrics::http_account_served_inc(route_type, "400");
             return (
                 StatusCode::BAD_REQUEST,
