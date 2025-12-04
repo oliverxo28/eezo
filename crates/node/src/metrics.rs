@@ -35,6 +35,31 @@ pub fn http_inc(route: &str, status: u16) {
     }
 }
 
+// ===================== T76.8: /account endpoint metrics =====================
+/// Counter for account endpoint requests (labeled by route type and status)
+#[cfg(feature = "metrics")]
+pub static EEZO_HTTP_ACCOUNT_SERVED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "eezo_http_account_served_total",
+        "Total /account endpoint requests (labeled by route type and status)",
+        &["route", "status"]
+    )
+    .expect("register eezo_http_account_served_total")
+});
+
+/// Helper to increment account served counter
+#[inline]
+pub fn http_account_served_inc(route: &str, status: &str) {
+    #[cfg(not(feature = "metrics"))]
+    { let _ = (route, status); }
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_HTTP_ACCOUNT_SERVED_TOTAL
+            .with_label_values(&[route, status])
+            .inc();
+    }
+}
+
 // ===================== T29.9: State-sync security metrics =====================
 // TLS client build/handshake failures (including bad CA, builder errors)
 #[cfg(feature = "metrics")]

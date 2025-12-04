@@ -1946,15 +1946,21 @@ async fn get_receipt(
     )
 }
 
-// Update the get_account handler
-async fn get_account(
-    State(state): State<AppState>,
-    AxumPath(addr): AxumPath<String>,
+// T76.8: Helper function to handle account lookup by address string
+async fn handle_account_lookup(
+    state: &AppState,
+    addr: &str,
+    route_type: &str,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // Normalize address to lowercase for consistent lookup
+    let addr_normalized = addr.trim().to_lowercase();
+    
     // First parse into a canonical ledger address
-    let ledger_addr = match parse_account_addr(&addr) {
+    let ledger_addr = match parse_account_addr(&addr_normalized) {
         Some(a) => a,
         None => {
+            log::info!("T76.8: /account 404 - invalid address format: {}", addr_normalized);
+            crate::metrics::http_account_served_inc(route_type, "400");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "invalid address format"})),
@@ -1978,6 +1984,7 @@ async fn get_account(
                 balance: bal.to_string(),
                 nonce: nonce.to_string(),
             };
+            crate::metrics::http_account_served_inc(route_type, "200");
             return (StatusCode::OK, Json(serde_json::json!(view)));
         } else if state.dag_runner.is_some() {
             // DAG mode: fall through to node-level accounts for now
@@ -1993,7 +2000,34 @@ async fn get_account(
         balance: bal.to_string(),
         nonce: nonce.to_string(),
     };
+    crate::metrics::http_account_served_inc(route_type, "200");
     (StatusCode::OK, Json(serde_json::json!(view)))
+}
+
+// T76.8: GET /account/:addr - path-based account lookup (Axum syntax)
+async fn get_account(
+    State(state): State<AppState>,
+    AxumPath(addr): AxumPath<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    handle_account_lookup(&state, &addr, "path").await
+}
+
+// T76.8: GET /account?addr=... - query param-based account lookup (backward compatibility shim)
+async fn get_account_query(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match params.get("addr") {
+        Some(addr) => handle_account_lookup(&state, addr, "query").await,
+        None => {
+            log::info!("T76.8: /account 400 - missing 'addr' query parameter");
+            crate::metrics::http_account_served_inc("query", "400");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing 'addr' query parameter"})),
+            )
+        }
+    }
 }
 
 
@@ -3996,7 +4030,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/receipt/{hash}", get(get_receipt))
         .route("/txpool", get(txpool_handler))
         .route("/block/{height}", get(block_handler))
-        .route("/account/{addr}", get(get_account))
+        // T76.8: Fix route syntax from {addr} to :addr (Axum syntax) and add query param shim
+        .route("/account/:addr", get(get_account))
+        .route("/account", get(get_account_query))
         .route("/faucet", post(post_faucet))
 		// T33 Bridge Alpha endpoints
 		.route("/bridge/mint", post(bridge::post_bridge_mint))
