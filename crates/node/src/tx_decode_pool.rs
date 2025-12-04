@@ -498,6 +498,12 @@ pub fn log_fast_decode_status() {
 mod tests {
     use super::*;
     use eezo_ledger::{Address, TxCore};
+    use std::sync::Mutex;
+
+    /// Lock to serialize tests that modify environment variables.
+    /// This prevents race conditions with other tests (e.g., in consensus_runner.rs)
+    /// that also use environment variables.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Helper: create a test SignedTx.
     fn make_test_tx(nonce: u64) -> SignedTx {
@@ -630,13 +636,8 @@ mod tests {
 
     #[test]
     fn test_is_fast_decode_enabled_env_values() {
-        // Note: These tests must set and check the env var atomically to avoid
-        // race conditions with parallel tests. We combine them in one test.
-        
-        // Test default (unset) case first
-        std::env::remove_var("EEZO_FAST_DECODE_ENABLED");
-        // We can't guarantee the env var is really unset due to parallel tests,
-        // so we just check the parsing logic with explicit values
+        // Acquire lock to prevent race conditions with other env-modifying tests
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         
         // Test that various "true" values work
         std::env::set_var("EEZO_FAST_DECODE_ENABLED", "true");
