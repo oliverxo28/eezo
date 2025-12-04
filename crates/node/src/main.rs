@@ -2940,7 +2940,7 @@ async fn main() -> anyhow::Result<()> {
             "T76.11: consensus mode gauge set to {} (mode={:?}, dag_ordering_enabled={})",
             mode_value, mode, dag_ordering
         );
-    }	
+    }
     // T37: spawn a dedicated /metrics HTTP server on EEZO_METRICS_BIND (or default)
     let metrics_bind = std::env::var("EEZO_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9898".into());
     tokio::spawn(spawn_metrics_server(metrics_bind.clone()));
