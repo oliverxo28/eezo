@@ -1657,7 +1657,7 @@ mod tests {
         
         let hash1 = [1u8; 32];
         let hash2 = [2u8; 32];
-        let hash3 = [3u8; 32];
+        let _hash3 = [3u8; 32]; // Unused for now, kept for symmetry
         
         // Initially empty
         assert!(cache.is_empty());
@@ -1996,5 +1996,193 @@ mod tests {
         let after = EEZO_DAG_HYBRID_EMPTY_CANDIDATES_TOTAL.get();
         
         assert_eq!(after, before + 1);
+    }
+
+    // =========================================================================
+    // T76.7: Tests for multi-batch aggregation and union de-dup
+    // =========================================================================
+
+    /// T76.7: Test that de-dup filter works across multiple batches (union de-dup).
+    #[test]
+    fn test_dedup_filter_across_multiple_batches() {
+        let cache = HybridDedupCache::with_capacity(100);
+        
+        // Simulate batch 1 with hashes A, B
+        let batch1 = vec![[1u8; 32], [2u8; 32]];
+        
+        // Simulate batch 2 with hashes B, C (B is duplicate)
+        let batch2 = vec![[2u8; 32], [3u8; 32]];
+        
+        // Simulate batch 3 with hashes C, D (C is duplicate from batch2)
+        let batch3 = vec![[3u8; 32], [4u8; 32]];
+        
+        // Union of all batches: A, B, B, C, C, D (just for documentation)
+        let _union: Vec<[u8; 32]> = [batch1.clone(), batch2.clone(), batch3.clone()]
+            .concat();
+        
+        // Initially cache is empty, so first batch should all pass
+        let (filtered1, seen1) = cache.filter_batch(&batch1);
+        assert_eq!(seen1, 0);
+        assert_eq!(filtered1.len(), 2);
+        
+        // Record batch1 as committed
+        cache.record_committed_batch(&batch1, 1);
+        
+        // Now filter batch2 - B should be filtered
+        let (filtered2, seen2) = cache.filter_batch(&batch2);
+        assert_eq!(seen2, 1); // B was seen
+        assert_eq!(filtered2.len(), 1); // Only C passes
+        assert_eq!(filtered2[0], [3u8; 32]);
+        
+        // Record batch2 candidates as committed
+        cache.record_committed_batch(&filtered2, 2);
+        
+        // Now filter batch3 - C should be filtered
+        let (filtered3, seen3) = cache.filter_batch(&batch3);
+        assert_eq!(seen3, 1); // C was seen
+        assert_eq!(filtered3.len(), 1); // Only D passes
+        assert_eq!(filtered3[0], [4u8; 32]);
+    }
+
+    /// T76.7: Test heavy duplication across 3 batches shrinks candidates significantly.
+    #[test]
+    fn test_heavy_duplication_across_batches() {
+        let cache = HybridDedupCache::with_capacity(1000);
+        
+        // Create 3 batches with heavy overlap
+        // Batch 1: hashes 0-99 (100 unique)
+        let batch1: Vec<[u8; 32]> = (0u8..100).map(|i| {
+            let mut h = [0u8; 32];
+            h[0] = i;
+            h
+        }).collect();
+        
+        // Batch 2: hashes 50-149 (50 overlap with batch1, 50 new)
+        let batch2: Vec<[u8; 32]> = (50u8..150).map(|i| {
+            let mut h = [0u8; 32];
+            h[0] = i;
+            h
+        }).collect();
+        
+        // Batch 3: hashes 75-174 (75 overlap with batch1+2, 25 new)
+        let batch3: Vec<[u8; 32]> = (75u8..175).map(|i| {
+            let mut h = [0u8; 32];
+            h[0] = i;
+            h
+        }).collect();
+        
+        // Record batch1 as committed
+        cache.record_committed_batch(&batch1, 1);
+        assert_eq!(cache.len(), 100);
+        
+        // Filter batch2 against cache - 50 should be filtered
+        let (filtered2, seen2) = cache.filter_batch(&batch2);
+        assert_eq!(seen2, 50); // 50-99 overlap
+        assert_eq!(filtered2.len(), 50); // 100-149 are new
+        
+        // Record batch2 candidates
+        cache.record_committed_batch(&filtered2, 2);
+        assert_eq!(cache.len(), 150);
+        
+        // Filter batch3 - 75 should be filtered (0-99 from batch1, 100-149 from batch2)
+        let (filtered3, seen3) = cache.filter_batch(&batch3);
+        assert_eq!(seen3, 75); // 75-149 overlap
+        assert_eq!(filtered3.len(), 25); // 150-174 are new
+        
+        // Total unique across 3 batches: 175 (0-174)
+        // If we merged all and filtered at once:
+        let all_hashes: Vec<[u8; 32]> = (0u8..175).map(|i| {
+            let mut h = [0u8; 32];
+            h[0] = i;
+            h
+        }).collect();
+        
+        // Record the new candidates
+        cache.record_committed_batch(&filtered3, 3);
+        
+        // Now filtering all 175 should result in 0 new candidates
+        let (filtered_all, seen_all) = cache.filter_batch(&all_hashes);
+        assert_eq!(seen_all, 175);
+        assert_eq!(filtered_all.len(), 0);
+    }
+
+    /// T76.7: Test that HybridBatchStats includes agg_batches and agg_candidates.
+    #[test]
+    fn test_hybrid_batch_stats_aggregation_fields() {
+        use crate::consensus_runner::HybridBatchStats;
+        
+        let stats = HybridBatchStats {
+            n: 150,
+            filtered_seen: 30,
+            candidate: 120,
+            used: 100,
+            bad_nonce_pref: 10,
+            missing: 5,
+            decode_err: 5,
+            size_bytes: 10000,
+            agg_batches: 3,
+            agg_candidates: 120,
+        };
+        
+        let log_str = stats.to_log_string(95, 5);
+        
+        // Verify the log string contains the aggregation fields
+        assert!(log_str.contains("agg_batches=3"));
+        assert!(log_str.contains("agg_candidates=120"));
+        assert!(log_str.contains("n=150"));
+        assert!(log_str.contains("filtered_seen=30"));
+        assert!(log_str.contains("apply_ok=95"));
+        assert!(log_str.contains("apply_fail=5"));
+    }
+
+    /// T76.7: Test aggregation metrics are registered and can be observed.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_aggregation_metrics_observable() {
+        use crate::metrics::{
+            observe_hybrid_agg_batches_per_block, 
+            observe_hybrid_agg_tx_candidates,
+            EEZO_HYBRID_AGG_BATCHES_PER_BLOCK,
+            EEZO_HYBRID_AGG_TX_CANDIDATES,
+        };
+        
+        // Observe some values
+        observe_hybrid_agg_batches_per_block(3);
+        observe_hybrid_agg_tx_candidates(150);
+        
+        // Verify histograms were updated (no panic)
+        let batches_count = EEZO_HYBRID_AGG_BATCHES_PER_BLOCK.get_sample_count();
+        let candidates_count = EEZO_HYBRID_AGG_TX_CANDIDATES.get_sample_count();
+        
+        assert!(batches_count >= 1);
+        assert!(candidates_count >= 1);
+    }
+
+    /// T76.7: Test STM executor tuning gauges are registered.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_stm_tuning_gauges_registered() {
+        use crate::metrics::{
+            exec_lanes_set, 
+            exec_wave_cap_set,
+            EEZO_EXEC_LANES,
+            EEZO_EXEC_WAVE_CAP,
+        };
+        
+        // Set gauge values
+        exec_lanes_set(32);
+        exec_wave_cap_set(100);
+        
+        // Verify gauges were updated
+        assert_eq!(EEZO_EXEC_LANES.get(), 32);
+        assert_eq!(EEZO_EXEC_WAVE_CAP.get(), 100);
+        
+        // Test different valid values
+        exec_lanes_set(64);
+        assert_eq!(EEZO_EXEC_LANES.get(), 64);
+        
+        // Test wave_cap=0 (unlimited)
+        exec_wave_cap_set(0);
+        assert_eq!(EEZO_EXEC_WAVE_CAP.get(), 0);
     }
 }
