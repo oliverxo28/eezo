@@ -29,13 +29,26 @@ set -euo pipefail
 #   1 - One or more SLOs failing
 #   2 - Metrics endpoint unreachable
 
-METRICS_URL="${1:-http://127.0.0.1:9898/metrics}"
+# Default values
+METRICS_URL="http://127.0.0.1:9898/metrics"
 MEASURE_TPS=false
 
-# Parse options
-for arg in "$@"; do
-  case "$arg" in
-    --tps) MEASURE_TPS=true ;;
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tps)
+      MEASURE_TPS=true
+      shift
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      # First non-flag argument is the metrics URL
+      METRICS_URL="$1"
+      shift
+      ;;
   esac
 done
 
@@ -64,12 +77,24 @@ METRICS=$(curl -sf "$METRICS_URL" 2>/dev/null) || {
   exit 2
 }
 
-# Helper function to extract metric value
+# Helper function to extract metric value (returns integer portion for counters)
 get_metric() {
   local name="$1"
   local default="${2:-0}"
   local value
   value=$(echo "$METRICS" | grep "^${name} " | awk '{print $2}' | head -1)
+  # Prometheus counters are integers, but may have .0 suffix - strip it
+  value="${value%.0}"
+  echo "${value:-$default}"
+}
+
+# Helper function to extract labeled metric value
+get_labeled_metric() {
+  local pattern="$1"
+  local default="${2:-0}"
+  local value
+  value=$(echo "$METRICS" | grep "$pattern" | awk '{print $2}' | head -1)
+  value="${value%.0}"
   echo "${value:-$default}"
 }
 
@@ -158,10 +183,10 @@ APPLY_FAIL=$(get_metric "eezo_dag_hybrid_apply_fail_total" "0")
 echo -e "  eezo_dag_hybrid_apply_ok_total: $APPLY_OK"
 echo -e "  eezo_dag_hybrid_apply_fail_total: $APPLY_FAIL"
 
-# Calculate apply ratio
-TOTAL=$((${APPLY_OK%.*} + ${APPLY_FAIL%.*}))
+# Calculate apply ratio (metrics are already sanitized by get_metric)
+TOTAL=$((APPLY_OK + APPLY_FAIL))
 if [[ "$TOTAL" -gt 0 ]]; then
-  RATIO=$(echo "scale=6; ${APPLY_OK%.*} / $TOTAL" | bc -l)
+  RATIO=$(echo "scale=6; $APPLY_OK / $TOTAL" | bc -l)
   RATIO_PCT=$(echo "scale=2; $RATIO * 100" | bc -l)
   QUALITY_OK=$([[ $(echo "$RATIO >= 0.999" | bc -l) == "1" ]] && echo "true" || echo "false")
   print_status "Apply success ratio" "${RATIO_PCT}%" "$QUALITY_OK" "(expected: ≥99.9%)"
@@ -241,7 +266,7 @@ if [[ "$MEASURE_TPS" == "true" ]]; then
   T2=$(get_metric "eezo_txs_included_total" "0")
   TS2=$(date +%s)
   
-  TX_DELTA=$((${T2%.*} - ${T1%.*}))
+  TX_DELTA=$((T2 - T1))
   TIME_DELTA=$((TS2 - TS1))
   
   if [[ "$TIME_DELTA" -gt 0 ]]; then
@@ -267,18 +292,18 @@ if [[ -n "$AGG_ADAPTIVE" ]]; then
   echo -e "  eezo_hybrid_agg_adaptive_enabled: $AGG_ADAPTIVE ($ADAPTIVE_STR)"
 fi
 
-# Check cap reasons if available
-CAP_TIME=$(echo "$METRICS" | grep 'eezo_hybrid_agg_cap_reason_total{reason="time"}' | awk '{print $2}' || echo "0")
-CAP_BYTES=$(echo "$METRICS" | grep 'eezo_hybrid_agg_cap_reason_total{reason="bytes"}' | awk '{print $2}' || echo "0")
-CAP_TX=$(echo "$METRICS" | grep 'eezo_hybrid_agg_cap_reason_total{reason="tx"}' | awk '{print $2}' || echo "0")
-CAP_EMPTY=$(echo "$METRICS" | grep 'eezo_hybrid_agg_cap_reason_total{reason="empty"}' | awk '{print $2}' || echo "0")
+# Check cap reasons if available (using helper function)
+CAP_TIME=$(get_labeled_metric 'eezo_hybrid_agg_cap_reason_total{reason="time"}' "0")
+CAP_BYTES=$(get_labeled_metric 'eezo_hybrid_agg_cap_reason_total{reason="bytes"}' "0")
+CAP_TX=$(get_labeled_metric 'eezo_hybrid_agg_cap_reason_total{reason="tx"}' "0")
+CAP_EMPTY=$(get_labeled_metric 'eezo_hybrid_agg_cap_reason_total{reason="empty"}' "0")
 
-if [[ -n "$CAP_TIME" || -n "$CAP_BYTES" || -n "$CAP_TX" || -n "$CAP_EMPTY" ]]; then
+if [[ "$CAP_TIME" != "0" || "$CAP_BYTES" != "0" || "$CAP_TX" != "0" || "$CAP_EMPTY" != "0" ]]; then
   echo -e "  ${YELLOW}Cap reasons:${NC}"
-  echo -e "    - time: ${CAP_TIME:-0}"
-  echo -e "    - bytes: ${CAP_BYTES:-0}"
-  echo -e "    - tx: ${CAP_TX:-0}"
-  echo -e "    - empty: ${CAP_EMPTY:-0}"
+  echo -e "    - time: ${CAP_TIME}"
+  echo -e "    - bytes: ${CAP_BYTES}"
+  echo -e "    - tx: ${CAP_TX}"
+  echo -e "    - empty: ${CAP_EMPTY}"
 fi
 echo ""
 
