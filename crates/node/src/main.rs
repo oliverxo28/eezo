@@ -131,6 +131,8 @@ use crate::metrics::{
     register_dag_ordered_metrics,
     // T76.9: Decode pool metrics
     register_t76_decode_pool_metrics,
+    // T76.11: Consensus mode gauge
+    consensus_mode_active_set,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -2920,6 +2922,24 @@ async fn main() -> anyhow::Result<()> {
 
         // T76.9: Decode pool metrics
         register_t76_decode_pool_metrics();
+
+        // T76.11: Set consensus mode gauge based on current mode
+        // 0 = Hotstuff, 1 = Hybrid (dag-hybrid with ordering), 2 = DAG
+        let mode = env_consensus_mode();
+        let dag_ordering = env_dag_ordering_enabled();
+        let mode_value: i64 = match mode {
+            ConsensusMode::Hotstuff => 0,
+            ConsensusMode::DagHybrid => {
+                // If ordering is enabled, show as hybrid (1); otherwise effectively hotstuff (0)
+                if dag_ordering { 1 } else { 0 }
+            }
+            ConsensusMode::Dag => 2,
+        };
+        consensus_mode_active_set(mode_value);
+        log::info!(
+            "T76.11: consensus mode gauge set to {} (mode={:?}, dag_ordering_enabled={})",
+            mode_value, mode, dag_ordering
+        );
 	}	
     // T37: spawn a dedicated /metrics HTTP server on EEZO_METRICS_BIND (or default)
     let metrics_bind = std::env::var("EEZO_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9898".into());
@@ -4877,5 +4897,35 @@ mod consensus_mode_tests {
 
         // Clean up
         std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+    }
+
+    /// T76.11: Test that consensus mode gauge values are computed correctly.
+    /// This tests the logic used to derive the gauge value from mode + ordering flag.
+    #[test]
+    fn test_consensus_mode_gauge_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        // Helper function to compute gauge value (same logic as in main.rs)
+        fn compute_gauge_value(mode: ConsensusMode, dag_ordering: bool) -> i64 {
+            match mode {
+                ConsensusMode::Hotstuff => 0,
+                ConsensusMode::DagHybrid => {
+                    if dag_ordering { 1 } else { 0 }
+                }
+                ConsensusMode::Dag => 2,
+            }
+        }
+
+        // Test Hotstuff mode always returns 0
+        assert_eq!(compute_gauge_value(ConsensusMode::Hotstuff, false), 0);
+        assert_eq!(compute_gauge_value(ConsensusMode::Hotstuff, true), 0);
+
+        // Test DAG mode always returns 2
+        assert_eq!(compute_gauge_value(ConsensusMode::Dag, false), 2);
+        assert_eq!(compute_gauge_value(ConsensusMode::Dag, true), 2);
+
+        // Test DagHybrid mode: returns 1 only when ordering is enabled, else 0
+        assert_eq!(compute_gauge_value(ConsensusMode::DagHybrid, false), 0);
+        assert_eq!(compute_gauge_value(ConsensusMode::DagHybrid, true), 1);
     }
 }
