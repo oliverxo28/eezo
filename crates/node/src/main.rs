@@ -108,6 +108,10 @@ mod dag_consensus_runner;
 #[cfg(feature = "pq44-runtime")]
 mod tx_decode_pool;
 
+// T76.10: Adaptive Aggregation module
+#[cfg(feature = "dag-consensus")]
+mod adaptive_agg;
+
 // T36.6: expose bridge metrics immediately at boot
 // metrics registrars used at boot
 #[cfg(feature = "metrics")]

@@ -2238,6 +2238,8 @@ pub fn register_dag_hybrid_metrics() {
     register_dag_hybrid_startup_metrics();
     // T76.7: Also register the aggregation metrics
     register_t76_hybrid_agg_metrics();
+    // T76.10: Also register the adaptive aggregation metrics
+    register_t76_adaptive_agg_metrics();
 }
 
 /// No-op version when metrics feature is disabled.
@@ -2994,5 +2996,96 @@ pub fn register_t76_decode_pool_metrics() {
 /// No-op version when metrics feature is disabled.
 #[cfg(not(feature = "metrics"))]
 pub fn register_t76_decode_pool_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
+// T76.10 — Adaptive Aggregation & Block Size Shaping metrics
+// -----------------------------------------------------------------------------
+
+/// Counter: Aggregation cap reason (labeled by reason: time, bytes, tx, empty).
+/// Records why each aggregation ended.
+#[cfg(feature = "metrics")]
+pub static EEZO_HYBRID_AGG_CAP_REASON_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "eezo_hybrid_agg_cap_reason_total",
+        "Reason aggregation ended (labeled by reason: time, bytes, tx, empty)",
+        &["reason"]
+    )
+    .unwrap()
+});
+
+/// Gauge: Current adaptive aggregation time budget in milliseconds.
+#[cfg(feature = "metrics")]
+pub static EEZO_HYBRID_AGG_TIME_BUDGET_MS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_hybrid_agg_time_budget_ms",
+        "Current adaptive aggregation time budget in milliseconds"
+    )
+    .unwrap()
+});
+
+/// Gauge: Whether adaptive mode is enabled (1) or fixed budget is used (0).
+#[cfg(feature = "metrics")]
+pub static EEZO_HYBRID_AGG_ADAPTIVE_ENABLED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_hybrid_agg_adaptive_enabled",
+        "Whether adaptive aggregation mode is enabled (1=adaptive, 0=fixed)"
+    )
+    .unwrap()
+});
+
+/// Helper: Observe aggregation cap reason (time, bytes, tx, empty).
+#[inline]
+pub fn observe_hybrid_agg_cap_reason(reason: &str) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_HYBRID_AGG_CAP_REASON_TOTAL
+            .with_label_values(&[reason])
+            .inc();
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = reason;
+    }
+}
+
+/// Helper: Set the current adaptive aggregation time budget in milliseconds.
+#[inline]
+pub fn observe_hybrid_agg_time_budget_ms(budget_ms: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_HYBRID_AGG_TIME_BUDGET_MS.set(budget_ms as i64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = budget_ms;
+    }
+}
+
+/// Helper: Set whether adaptive mode is enabled.
+#[inline]
+pub fn observe_hybrid_agg_adaptive_enabled(enabled: bool) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_HYBRID_AGG_ADAPTIVE_ENABLED.set(if enabled { 1 } else { 0 });
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = enabled;
+    }
+}
+
+/// Eagerly register T76.10 adaptive aggregation metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t76_adaptive_agg_metrics() {
+    let _ = &*EEZO_HYBRID_AGG_CAP_REASON_TOTAL;
+    let _ = &*EEZO_HYBRID_AGG_TIME_BUDGET_MS;
+    let _ = &*EEZO_HYBRID_AGG_ADAPTIVE_ENABLED;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t76_adaptive_agg_metrics() {
     // No metrics to register when the feature is off.
 }
