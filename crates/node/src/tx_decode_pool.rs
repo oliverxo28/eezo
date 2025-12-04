@@ -198,12 +198,17 @@ impl TxDecodePool {
 
     /// Insert a decoded transaction into the cache.
     ///
-    /// If the cache exceeds max_size, performs simple eviction (clears half).
+    /// If the cache exceeds max_size, performs simple FIFO-like eviction
+    /// by removing approximately half of the entries. Note: this is NOT
+    /// a true LRU eviction - entries are removed in arbitrary order based
+    /// on HashMap iteration. For production use with high cache churn,
+    /// consider implementing a proper LRU cache (e.g., using lru crate).
     fn insert(&self, decoded: Arc<DecodedTx>) {
         let mut cache = self.cache.write();
 
-        // Simple eviction: if we exceed max size, clear half the cache
-        // A proper LRU would be better but this is simpler and adequate for now.
+        // Simple eviction: if we exceed max size, clear half the cache.
+        // Note: HashMap keys() order is arbitrary, not LRU order.
+        // This is adequate for workloads where cache hits are common.
         if cache.len() >= self.config.max_cache_size {
             let to_remove: Vec<[u8; 32]> = cache
                 .keys()
@@ -213,6 +218,8 @@ impl TxDecodePool {
             for key in to_remove {
                 cache.remove(&key);
             }
+            // Metrics updated after releasing write lock is ideal but
+            // the performance impact is minimal for this counter increment.
             #[cfg(feature = "metrics")]
             crate::metrics::decode_pool_evictions_inc();
         }
@@ -271,13 +278,14 @@ impl TxDecodePool {
 
         // Collect cache hits and identify misses
         let mut results: Vec<Option<Arc<DecodedTx>>> = vec![None; bytes_list.len()];
-        let mut to_decode: Vec<(usize, &[u8])> = Vec::new();
+        // T76.9: Store (index, already-parsed SignedTx) to avoid double parsing
+        let mut to_decode: Vec<(usize, SignedTx)> = Vec::new();
 
         // First pass: check cache for each item
         {
             let cache = self.cache.read();
             for (i, bytes) in bytes_list.iter().enumerate() {
-                // Quick parse to get hash for cache lookup
+                // Parse to get hash for cache lookup
                 if let Some(stx) = parse_signed_tx_from_envelope(bytes) {
                     let hash = stx.hash();
                     if let Some(cached) = cache.get(&hash) {
@@ -286,39 +294,36 @@ impl TxDecodePool {
                         crate::metrics::decode_pool_cache_hit_inc();
                         continue;
                     }
+                    // Cache miss - store the already-parsed tx for reuse
+                    to_decode.push((i, stx));
                 }
-                // Need to decode this one
-                to_decode.push((i, bytes.as_slice()));
+                // If parse failed, we just skip this item
             }
         }
 
-        // Second pass: parallel decode of cache misses
-        let decoded_batch: Vec<(usize, Option<Arc<DecodedTx>>)> = to_decode
-            .par_iter()
-            .map(|(idx, bytes)| {
+        // Second pass: wrap already-parsed transactions in Arc<DecodedTx>
+        // Note: we already have the parsed SignedTx, so this is O(1) per item
+        let decoded_batch: Vec<(usize, Arc<DecodedTx>)> = to_decode
+            .into_par_iter()
+            .map(|(idx, stx)| {
                 let start = Instant::now();
-                let result = parse_signed_tx_from_envelope(bytes).map(|stx| {
-                    let decoded = Arc::new(DecodedTx::new(stx));
-                    let elapsed = start.elapsed().as_secs_f64();
-                    #[cfg(feature = "metrics")]
-                    {
-                        crate::metrics::decode_pool_cache_miss_inc();
-                        crate::metrics::observe_decode_latency_seconds(elapsed);
-                    }
-                    decoded
-                });
-                (*idx, result)
+                let decoded = Arc::new(DecodedTx::new(stx));
+                let elapsed = start.elapsed().as_secs_f64();
+                #[cfg(feature = "metrics")]
+                {
+                    crate::metrics::decode_pool_cache_miss_inc();
+                    crate::metrics::observe_decode_latency_seconds(elapsed);
+                }
+                (idx, decoded)
             })
             .collect();
 
         // Insert new decoded entries into cache and merge results
-        for (idx, decoded_opt) in decoded_batch {
-            if let Some(decoded) = decoded_opt {
-                self.insert(decoded.clone());
-                results[idx] = Some(decoded);
-                #[cfg(feature = "metrics")]
-                crate::metrics::decode_pool_tx_inc();
-            }
+        for (idx, decoded) in decoded_batch {
+            self.insert(decoded.clone());
+            results[idx] = Some(decoded);
+            #[cfg(feature = "metrics")]
+            crate::metrics::decode_pool_tx_inc();
         }
 
         // Flatten results, keeping only successful decodes
