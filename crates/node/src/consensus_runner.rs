@@ -1284,12 +1284,17 @@ impl CoreRunnerHandle {
                 let mut hybrid_bad_nonce_prefilter: usize = 0;
                 #[cfg(feature = "dag-consensus")]
                 if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
-                    // T76.7: Parse aggregation time budget from environment (default 3ms, configurable 2-10ms)
-                    let agg_time_budget_ms: u64 = std::env::var("EEZO_HYBRID_AGG_TIME_BUDGET_MS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .map(|v: u64| v.clamp(2, 10)) // Clamp to reasonable range (2-10ms)
-                        .unwrap_or(3);
+                    // T76.10: Use adaptive aggregation config for time budget and soft caps.
+                    // If EEZO_HYBRID_AGG_TIME_BUDGET_MS is set, use fixed budget.
+                    // Otherwise, use adaptive calculation based on executor latency.
+                    let agg_config = crate::adaptive_agg::adaptive_agg_config();
+                    let agg_time_budget_ms = agg_config.current_time_budget_ms();
+                    let agg_max_tx = agg_config.max_tx();
+                    let agg_max_bytes = agg_config.max_bytes();
+                    
+                    // T76.10: Update metrics for adaptive mode status
+                    crate::metrics::observe_hybrid_agg_adaptive_enabled(agg_config.is_adaptive());
+                    crate::metrics::observe_hybrid_agg_time_budget_ms(agg_time_budget_ms);
                     
                     // Try to get hybrid DAG handle
                     let hybrid_opt: Option<Arc<HybridDagHandle>> = hybrid_dag_c.lock().await.clone();
@@ -1299,10 +1304,10 @@ impl CoreRunnerHandle {
                             // Get DAG runner handle for mempool access (needed by aggregation function)
                             let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
                             
-                            // Read block_byte_budget for aggregation
+                            // Read block_byte_budget for aggregation, apply soft cap
                             let block_byte_budget = {
                                 let guard = node_c.lock().await;
-                                guard.cfg.block_byte_budget
+                                guard.cfg.block_byte_budget.min(agg_max_bytes)
                             };
                             
                             // Get account snapshot for nonce checking
@@ -1311,15 +1316,20 @@ impl CoreRunnerHandle {
                                 guard.accounts.clone()
                             };
                             
-                            // T76.7: Use multi-batch aggregation
-                            let (agg_txs, agg_stats) = Self::collect_txs_from_aggregated_batches(
+                            // T76.10: Use multi-batch aggregation with adaptive time budget and soft caps
+                            let (agg_txs, agg_stats, cap_reason) = Self::collect_txs_from_aggregated_batches_with_caps(
                                 &hybrid_handle,
                                 dag_opt,
                                 block_byte_budget,
                                 &hybrid_dedup_cache,
                                 &accounts,
                                 agg_time_budget_ms,
+                                agg_max_tx,
+                                agg_max_bytes,
                             ).await;
+                            
+                            // T76.10: Record cap reason in metrics
+                            crate::metrics::observe_hybrid_agg_cap_reason(cap_reason.as_str());
                             
                             if agg_stats.agg_batches > 0 {
                                 hybrid_filtered_seen = agg_stats.filtered_seen;
@@ -1332,9 +1342,10 @@ impl CoreRunnerHandle {
                                     hybrid_batch_used = true;
                                     crate::metrics::dag_hybrid_batches_used_inc();
                                     log::debug!(
-                                        "hybrid-agg: successfully aggregated {} batches with {} txs",
+                                        "hybrid-agg: successfully aggregated {} batches with {} txs (cap_reason={})",
                                         hybrid_aggregated_stats.as_ref().map(|s| s.agg_batches).unwrap_or(0),
-                                        hybrid_aggregated_txs.len()
+                                        hybrid_aggregated_txs.len(),
+                                        cap_reason.as_str()
                                     );
                                 } else {
                                     // Batches consumed but no valid txs - store stats for logging
@@ -1350,6 +1361,8 @@ impl CoreRunnerHandle {
                             // No batches ready - fallback
                             log::debug!("hybrid: fallback (reason=queue_empty)");
                             crate::metrics::dag_hybrid_fallback_inc();
+                            // T76.10: Record empty cap reason
+                            crate::metrics::observe_hybrid_agg_cap_reason("empty");
                         }
                     } else {
                         // No hybrid handle attached yet - fallback
@@ -2813,6 +2826,346 @@ impl CoreRunnerHandle {
         };
         
         (final_txs, stats)
+    }
+
+    /// T76.10: Aggregate multiple OrderedBatches with de-dup filtering, nonce pre-check,
+    /// and soft caps on transaction count and bytes.
+    ///
+    /// This is an enhanced version of collect_txs_from_aggregated_batches that:
+    /// - Applies soft caps on transaction count (max_tx) and total bytes (max_bytes)
+    /// - Tracks the reason aggregation ended (time, bytes, tx, or empty)
+    /// - Uses adaptive time budget from the adaptive_agg module
+    ///
+    /// Returns a tuple of:
+    /// - `txs`: Successfully decoded and validated transactions
+    /// - `stats`: HybridBatchStats with agg_batches and agg_candidates set
+    /// - `cap_reason`: Reason why aggregation ended
+    #[cfg(feature = "dag-consensus")]
+    async fn collect_txs_from_aggregated_batches_with_caps(
+        hybrid_handle: &Arc<crate::dag_consensus_runner::HybridDagHandle>,
+        dag_handle: Option<Arc<DagRunnerHandle>>,
+        block_max_bytes: usize,
+        dedup_cache: &crate::dag_consensus_runner::HybridDedupCache,
+        accounts: &eezo_ledger::Accounts,
+        agg_time_budget_ms: u64,
+        max_tx: usize,
+        max_bytes: usize,
+    ) -> (Vec<SignedTx>, HybridBatchStats, crate::adaptive_agg::AggCapReason) {
+        use std::time::Instant;
+        use crate::adaptive_agg::AggCapReason;
+        
+        let agg_start = Instant::now();
+        let time_budget = std::time::Duration::from_millis(agg_time_budget_ms);
+        
+        // Use the smaller of block_max_bytes and max_bytes soft cap
+        let effective_max_bytes = block_max_bytes.min(max_bytes);
+        
+        // Aggregated values
+        let mut all_hashes: Vec<[u8; 32]> = Vec::new();
+        let mut all_resolved_bytes: std::collections::HashMap<[u8; 32], bytes::Bytes> = std::collections::HashMap::new();
+        let mut total_n: usize = 0;
+        let mut batches_consumed: usize = 0;
+        let mut current_bytes: usize = 0;
+        let mut stale_batches_dropped: usize = 0;
+        let mut cap_reason = AggCapReason::Empty; // Default to empty
+        
+        // Aggregation loop: consume batches until limits are reached
+        loop {
+            // Check time budget
+            if agg_start.elapsed() >= time_budget {
+                log::debug!(
+                    "hybrid-agg: time budget elapsed ({:?} >= {:?}), stopping aggregation",
+                    agg_start.elapsed(), time_budget
+                );
+                cap_reason = AggCapReason::Time;
+                break;
+            }
+            
+            // Check if we've hit the tx count cap
+            if total_n >= max_tx {
+                log::debug!(
+                    "hybrid-agg: tx count cap reached ({} >= {}), stopping aggregation",
+                    total_n, max_tx
+                );
+                cap_reason = AggCapReason::Tx;
+                break;
+            }
+            
+            // Check if we've hit the bytes cap
+            if current_bytes >= effective_max_bytes {
+                log::debug!(
+                    "hybrid-agg: bytes cap reached ({} >= {}), stopping aggregation",
+                    current_bytes, effective_max_bytes
+                );
+                cap_reason = AggCapReason::Bytes;
+                break;
+            }
+            
+            // Check if more batches are available
+            if hybrid_handle.peek_ordered_queue_len() == 0 {
+                log::debug!("hybrid-agg: no more batches available, stopping aggregation");
+                cap_reason = AggCapReason::Empty;
+                break;
+            }
+            
+            // Try to get next batch
+            match hybrid_handle.try_next_ordered_batch() {
+                Some(batch) if !batch.is_empty() => {
+                    // Check if batch is stale
+                    if dedup_cache.is_stale_batch(batch.round) {
+                        log::info!(
+                            "hybrid-agg: dropping stale batch (reason=pre-start-round, round={}, node_start_round={})",
+                            batch.round, dedup_cache.node_start_round()
+                        );
+                        crate::metrics::dag_hybrid_stale_batches_dropped_inc();
+                        stale_batches_dropped += 1;
+                        continue; // Try next batch
+                    }
+                    
+                    // Get tx hashes from this batch
+                    if let Some(hashes) = &batch.tx_hashes {
+                        // Check if adding this batch would exceed tx count cap
+                        if total_n + hashes.len() > max_tx {
+                            // Only take as many as we can fit
+                            let take_count = max_tx.saturating_sub(total_n);
+                            if take_count == 0 {
+                                log::debug!("hybrid-agg: tx cap reached, stopping");
+                                cap_reason = AggCapReason::Tx;
+                                break;
+                            }
+                            // Take partial batch
+                            for hash in hashes.iter().take(take_count) {
+                                all_hashes.push(*hash);
+                            }
+                            total_n += take_count;
+                            batches_consumed += 1;
+                            cap_reason = AggCapReason::Tx;
+                            
+                            log::debug!(
+                                "hybrid-agg: partial batch {} (round={}, took {}/{} txs due to tx cap)",
+                                batches_consumed, batch.round, take_count, hashes.len()
+                            );
+                            break;
+                        }
+                        
+                        // Estimate bytes for this batch (rough estimate)
+                        let estimated_batch_bytes = batch.total_bytes_size();
+                        
+                        // Check if adding this batch would exceed max_bytes
+                        if current_bytes > 0 && current_bytes + estimated_batch_bytes > effective_max_bytes {
+                            log::debug!(
+                                "hybrid-agg: batch would exceed max_bytes ({} + {} > {}), stopping",
+                                current_bytes, estimated_batch_bytes, effective_max_bytes
+                            );
+                            cap_reason = AggCapReason::Bytes;
+                            break;
+                        }
+                        
+                        // Resolve bytes for this batch if needed
+                        if let (Some(batch_hashes), None) = (&batch.tx_hashes, &batch.tx_bytes) {
+                            if let Some(ref dag_h) = dag_handle {
+                                let found = dag_h.get_bytes_for_hashes(batch_hashes).await;
+                                for (hash, bytes_arc) in found {
+                                    all_resolved_bytes.insert(hash, bytes::Bytes::from((*bytes_arc).clone()));
+                                }
+                            }
+                        }
+                        
+                        // Add hashes from batch to aggregate
+                        for hash in hashes {
+                            all_hashes.push(*hash);
+                        }
+                        
+                        // Copy bytes from batch if present
+                        if let Some(tx_bytes) = &batch.tx_bytes {
+                            for (i, bytes_opt) in tx_bytes.iter().enumerate() {
+                                if let Some(bytes) = bytes_opt {
+                                    if i < hashes.len() {
+                                        all_resolved_bytes.insert(hashes[i], bytes.clone());
+                                    }
+                                }
+                            }
+                        }
+                        
+                        total_n += hashes.len();
+                        current_bytes += estimated_batch_bytes;
+                        batches_consumed += 1;
+                        
+                        log::debug!(
+                            "hybrid-agg: consumed batch {} (round={}, txs={}, total_agg={})",
+                            batches_consumed, batch.round, hashes.len(), total_n
+                        );
+                    }
+                }
+                Some(_) => {
+                    // Empty batch - skip and continue
+                    log::debug!("hybrid-agg: skipping empty batch");
+                    continue;
+                }
+                None => {
+                    // No batch available - stop
+                    log::debug!("hybrid-agg: no batch available, stopping");
+                    cap_reason = AggCapReason::Empty;
+                    break;
+                }
+            }
+        }
+        
+        // If no batches were consumed, return empty result
+        if batches_consumed == 0 {
+            log::debug!("hybrid-agg: no batches consumed, returning empty (stale_dropped={})", stale_batches_dropped);
+            return (Vec::new(), HybridBatchStats {
+                n: 0,
+                filtered_seen: 0,
+                candidate: 0,
+                used: 0,
+                bad_nonce_pref: 0,
+                missing: 0,
+                decode_err: 0,
+                size_bytes: 0,
+                agg_batches: batches_consumed,
+                agg_candidates: 0,
+            }, cap_reason);
+        }
+        
+        // Apply de-dup filter to the aggregated hashes (union de-dup)
+        let (candidate_hashes, filtered_seen) = dedup_cache.filter_batch(&all_hashes);
+        let candidate = candidate_hashes.len();
+        
+        // Update metrics for de-dup filtering
+        crate::metrics::dag_hybrid_seen_before_inc_by(filtered_seen as u64);
+        crate::metrics::dag_hybrid_candidate_inc_by(candidate as u64);
+        
+        // If all hashes were filtered out, return early
+        if candidate == 0 && filtered_seen > 0 {
+            log::debug!(
+                "hybrid-agg: all {} hashes filtered by de-dup across {} batches, no candidates",
+                filtered_seen, batches_consumed
+            );
+            return (Vec::new(), HybridBatchStats {
+                n: total_n,
+                filtered_seen,
+                candidate: 0,
+                used: 0,
+                bad_nonce_pref: 0,
+                missing: 0,
+                decode_err: 0,
+                size_bytes: 0,
+                agg_batches: batches_consumed,
+                agg_candidates: candidate,
+            }, cap_reason);
+        }
+        
+        // Decode transactions from filtered candidates (with tx count cap)
+        let mut txs: Vec<SignedTx> = Vec::new();
+        let mut bytes_used: usize = 0;
+        let mut bytes_missing: usize = 0;
+        let mut decode_errors: usize = 0;
+        let mut total_size_bytes: usize = 0;
+        let mut current_tx_bytes: usize = 0;
+        
+        for hash in &candidate_hashes {
+            // Check if we've exceeded tx count cap
+            if txs.len() >= max_tx {
+                log::debug!(
+                    "hybrid-agg: tx count cap reached during decode ({} >= {}), leaving remainder",
+                    txs.len(), max_tx
+                );
+                cap_reason = AggCapReason::Tx;
+                break;
+            }
+            
+            // Check if we've exceeded block max_bytes cap
+            if current_tx_bytes >= effective_max_bytes {
+                log::debug!(
+                    "hybrid-agg: block max_bytes cap reached ({} >= {}), leaving remainder",
+                    current_tx_bytes, effective_max_bytes
+                );
+                cap_reason = AggCapReason::Bytes;
+                break;
+            }
+            
+            if let Some(bytes) = all_resolved_bytes.get(hash) {
+                let tx_size = bytes.len();
+                
+                if current_tx_bytes + tx_size > effective_max_bytes {
+                    log::debug!(
+                        "hybrid-agg: tx would exceed block_max_bytes ({} + {} > {}), stopping",
+                        current_tx_bytes, tx_size, effective_max_bytes
+                    );
+                    cap_reason = AggCapReason::Bytes;
+                    break;
+                }
+                
+                // T76.9: Use helper that respects fast decode setting
+                match decode_tx_from_envelope_bytes(bytes) {
+                    Some(stx) => {
+                        txs.push(stx);
+                        bytes_used += 1;
+                        current_tx_bytes += tx_size;
+                        total_size_bytes += tx_size;
+                    }
+                    None => {
+                        decode_errors += 1;
+                        log::warn!(
+                            "hybrid-agg: decode error for tx hash=0x{}",
+                            hex::encode(&hash[..4])
+                        );
+                    }
+                }
+            } else {
+                bytes_missing += 1;
+                log::debug!(
+                    "hybrid-agg: missing bytes for tx hash=0x{}",
+                    hex::encode(&hash[..4])
+                );
+            }
+        }
+        
+        // Apply nonce pre-check
+        let (valid_indices, bad_nonce_count) = 
+            crate::dag_consensus_runner::nonce_precheck(&txs, accounts);
+        
+        // Update metrics for nonce prefilter
+        crate::metrics::dag_hybrid_bad_nonce_prefilter_inc_by(bad_nonce_count as u64);
+        
+        // Filter txs to only include valid indices
+        let final_txs: Vec<SignedTx> = if valid_indices.len() == txs.len() {
+            txs
+        } else {
+            let mut keep_mask = vec![false; txs.len()];
+            for &idx in &valid_indices {
+                keep_mask[idx] = true;
+            }
+            txs.into_iter()
+                .enumerate()
+                .filter_map(|(i, tx)| if keep_mask[i] { Some(tx) } else { None })
+                .collect()
+        };
+        
+        log::info!(
+            "hybrid-agg: aggregated {} batches, total_n={}, filtered_seen={}, candidates={}, used={}, cap_reason={}",
+            batches_consumed, total_n, filtered_seen, candidate, bytes_used, cap_reason.as_str()
+        );
+        
+        // Emit aggregation metrics
+        crate::metrics::observe_hybrid_agg_batches_per_block(batches_consumed as u64);
+        crate::metrics::observe_hybrid_agg_tx_candidates(candidate as u64);
+        
+        let stats = HybridBatchStats {
+            n: total_n,
+            filtered_seen,
+            candidate,
+            used: bytes_used,
+            bad_nonce_pref: bad_nonce_count,
+            missing: bytes_missing,
+            decode_err: decode_errors,
+            size_bytes: total_size_bytes,
+            agg_batches: batches_consumed,
+            agg_candidates: candidate,
+        };
+        
+        (final_txs, stats, cap_reason)
     }
 
     /// T63.1: Get a snapshot of the current accounts and supply for dry-run execution.
