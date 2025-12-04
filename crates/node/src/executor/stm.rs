@@ -762,6 +762,10 @@ impl Executor for StmExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Mutex to serialize env var access across tests to prevent race conditions
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_stm_executor_new() {
@@ -803,6 +807,8 @@ mod tests {
     // T76.7: Test exec_lanes and wave_cap configuration from environment
     #[test]
     fn test_stm_config_from_env_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
         // Clear env vars to test defaults
         std::env::remove_var("EEZO_EXEC_LANES");
         std::env::remove_var("EEZO_EXEC_WAVE_CAP");
@@ -816,6 +822,8 @@ mod tests {
 
     #[test]
     fn test_stm_config_from_env_valid_lanes() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
         // Set valid exec_lanes values
         std::env::set_var("EEZO_EXEC_LANES", "32");
         std::env::set_var("EEZO_EXEC_WAVE_CAP", "50");
@@ -832,6 +840,8 @@ mod tests {
 
     #[test]
     fn test_stm_config_from_env_invalid_lanes_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
         // Set invalid exec_lanes value (should default to 16)
         std::env::set_var("EEZO_EXEC_LANES", "100"); // Invalid, not in 16/32/48/64
         
