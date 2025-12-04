@@ -117,6 +117,31 @@ fn log_block_shadow_debug(prefix: &str, height: u64, blk_opt: &Option<Block>) {
     }
 }
 
+/// T76.9 — Helper: decode tx bytes using fast decode pool if enabled.
+/// 
+/// When `EEZO_FAST_DECODE_ENABLED=true`, uses the global decode pool with caching.
+/// Otherwise, falls back to direct parsing.
+/// 
+/// Note: Returns a cloned SignedTx for backward compatibility with existing code
+/// that expects owned values. For true zero-copy, use the decode pool directly
+/// and work with Arc<DecodedTx>.
+#[cfg(all(feature = "dag-consensus", feature = "pq44-runtime"))]
+fn decode_tx_from_envelope_bytes(bytes: &[u8]) -> Option<SignedTx> {
+    if crate::tx_decode_pool::is_fast_decode_enabled() {
+        crate::tx_decode_pool::decode_tx_global(bytes)
+            .map(|arc_decoded| arc_decoded.tx.clone())
+    } else {
+        crate::dag_runner::parse_signed_tx_from_envelope(bytes)
+    }
+}
+
+/// T76.9 — Fallback for when pq44-runtime is not enabled but dag-consensus is.
+/// This just uses the direct parsing without the decode pool.
+#[cfg(all(feature = "dag-consensus", not(feature = "pq44-runtime")))]
+fn decode_tx_from_envelope_bytes(bytes: &[u8]) -> Option<SignedTx> {
+    crate::dag_runner::parse_signed_tx_from_envelope(bytes)
+}
+
 /// T71.0 — Compute a GPU-accelerated block body hash (optional, for comparison).
 ///
 /// This function:
@@ -2276,7 +2301,8 @@ impl CoreRunnerHandle {
                         break;
                     }
 
-                    match crate::dag_runner::parse_signed_tx_from_envelope(bytes) {
+                    // T76.9: Use helper that respects fast decode setting
+                    match decode_tx_from_envelope_bytes(bytes) {
                         Some(stx) => {
                             txs.push(stx);
                             bytes_used += 1;
@@ -2325,7 +2351,8 @@ impl CoreRunnerHandle {
                         break;
                     }
 
-                    match crate::dag_runner::parse_signed_tx_from_envelope(bytes_ref) {
+                    // T76.9: Use helper that respects fast decode setting
+                    match decode_tx_from_envelope_bytes(bytes_ref) {
                         Some(stx) => {
                             txs.push(stx);
                             bytes_used += 1;
@@ -2449,7 +2476,8 @@ impl CoreRunnerHandle {
                     break;
                 }
 
-                match crate::dag_runner::parse_signed_tx_from_envelope(bytes) {
+                // T76.9: Use helper that respects fast decode setting
+                match decode_tx_from_envelope_bytes(bytes) {
                     Some(stx) => {
                         txs.push(stx);
                         bytes_used += 1;
@@ -2716,7 +2744,8 @@ impl CoreRunnerHandle {
                     break;
                 }
                 
-                match crate::dag_runner::parse_signed_tx_from_envelope(bytes) {
+                // T76.9: Use helper that respects fast decode setting
+                match decode_tx_from_envelope_bytes(bytes) {
                     Some(stx) => {
                         txs.push(stx);
                         bytes_used += 1;

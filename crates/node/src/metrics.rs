@@ -2852,3 +2852,147 @@ pub fn register_dag_hybrid_startup_metrics() {
 pub fn register_dag_hybrid_startup_metrics() {
     // No metrics to register when the feature is off.
 }
+
+// -----------------------------------------------------------------------------
+// T76.9 — Fast Decode Pool metrics
+// -----------------------------------------------------------------------------
+
+/// Counter: Total transactions processed by the decode pool.
+#[cfg(feature = "metrics")]
+pub static EEZO_DECODE_POOL_TX_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_decode_pool_tx_total",
+        "Total transactions processed by the decode pool"
+    )
+    .unwrap()
+});
+
+/// Counter: Cache hits in the decode pool.
+#[cfg(feature = "metrics")]
+pub static EEZO_DECODE_POOL_CACHE_HIT_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_decode_pool_cache_hit_total",
+        "Number of cache hits in the decode pool"
+    )
+    .unwrap()
+});
+
+/// Counter: Cache misses in the decode pool.
+#[cfg(feature = "metrics")]
+pub static EEZO_DECODE_POOL_CACHE_MISS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_decode_pool_cache_miss_total",
+        "Number of cache misses in the decode pool"
+    )
+    .unwrap()
+});
+
+/// Histogram: Per-transaction decode latency in seconds.
+#[cfg(feature = "metrics")]
+pub static EEZO_DECODE_LATENCY_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_decode_latency_seconds",
+        "Per-transaction decode latency (seconds)",
+        vec![0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1]
+    )
+    .unwrap()
+});
+
+/// Counter: Cache evictions in the decode pool.
+#[cfg(feature = "metrics")]
+pub static EEZO_DECODE_POOL_EVICTIONS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_decode_pool_evictions_total",
+        "Number of cache evictions in the decode pool"
+    )
+    .unwrap()
+});
+
+/// Gauge: Current size of the decode pool cache.
+#[cfg(feature = "metrics")]
+pub static EEZO_DECODE_POOL_CACHE_SIZE: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_decode_pool_cache_size",
+        "Current number of entries in the decode pool cache"
+    )
+    .unwrap()
+});
+
+/// Helper: Increment the decode pool tx counter.
+#[inline]
+pub fn decode_pool_tx_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DECODE_POOL_TX_TOTAL.inc();
+    }
+}
+
+/// Helper: Increment the decode pool cache hit counter.
+#[inline]
+pub fn decode_pool_cache_hit_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DECODE_POOL_CACHE_HIT_TOTAL.inc();
+    }
+}
+
+/// Helper: Increment the decode pool cache miss counter.
+#[inline]
+pub fn decode_pool_cache_miss_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DECODE_POOL_CACHE_MISS_TOTAL.inc();
+    }
+}
+
+/// Helper: Observe decode latency.
+#[inline]
+pub fn observe_decode_latency_seconds(seconds: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DECODE_LATENCY_SECONDS.observe(seconds);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = seconds;
+    }
+}
+
+/// Helper: Increment the decode pool evictions counter.
+#[inline]
+pub fn decode_pool_evictions_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DECODE_POOL_EVICTIONS_TOTAL.inc();
+    }
+}
+
+/// Helper: Set the decode pool cache size gauge.
+#[inline]
+pub fn decode_pool_cache_size_set(size: usize) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DECODE_POOL_CACHE_SIZE.set(size as i64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = size;
+    }
+}
+
+/// Eagerly register T76.9 decode pool metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t76_decode_pool_metrics() {
+    let _ = &*EEZO_DECODE_POOL_TX_TOTAL;
+    let _ = &*EEZO_DECODE_POOL_CACHE_HIT_TOTAL;
+    let _ = &*EEZO_DECODE_POOL_CACHE_MISS_TOTAL;
+    let _ = &*EEZO_DECODE_LATENCY_SECONDS;
+    let _ = &*EEZO_DECODE_POOL_EVICTIONS_TOTAL;
+    let _ = &*EEZO_DECODE_POOL_CACHE_SIZE;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t76_decode_pool_metrics() {
+    // No metrics to register when the feature is off.
+}
