@@ -2185,6 +2185,33 @@ pub fn register_dag_shadow_metrics() {
 // T76.1 — DAG Hybrid mode metrics
 // -----------------------------------------------------------------------------
 
+/// Gauge: Active consensus mode (0=hotstuff, 1=hybrid, 2=dag).
+/// Set at startup based on EEZO_CONSENSUS_MODE environment variable.
+#[cfg(feature = "metrics")]
+pub static EEZO_CONSENSUS_MODE_ACTIVE: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_consensus_mode_active",
+        "Active consensus mode: 0=hotstuff, 1=hybrid, 2=dag"
+    )
+    .unwrap()
+});
+
+/// Helper: Set the consensus mode gauge value.
+/// - 0 = Hotstuff (default)
+/// - 1 = Hybrid (dag-hybrid mode with DAG ordering enabled)
+/// - 2 = DAG (full DAG mode)
+#[inline]
+pub fn consensus_mode_active_set(mode: i64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_CONSENSUS_MODE_ACTIVE.set(mode);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = mode;
+    }
+}
+
 /// Counter: Blocks built from DAG consensus ordered batches in hybrid mode.
 #[cfg(feature = "metrics")]
 pub static EEZO_DAG_HYBRID_BATCHES_USED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
@@ -2226,6 +2253,8 @@ pub fn dag_hybrid_fallback_inc() {
 /// Eagerly register T76.1 DAG hybrid mode metrics so they appear on /metrics at boot.
 #[cfg(feature = "metrics")]
 pub fn register_dag_hybrid_metrics() {
+    // T76.11: Register consensus mode gauge
+    let _ = &*EEZO_CONSENSUS_MODE_ACTIVE;
     let _ = &*EEZO_DAG_HYBRID_BATCHES_USED_TOTAL;
     let _ = &*EEZO_DAG_HYBRID_FALLBACK_TOTAL;
     // T76.3: Also register the bytes-level metrics

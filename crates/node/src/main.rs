@@ -131,6 +131,8 @@ use crate::metrics::{
     register_dag_ordered_metrics,
     // T76.9: Decode pool metrics
     register_t76_decode_pool_metrics,
+    // T76.11: Consensus mode gauge
+    consensus_mode_active_set,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -1074,6 +1076,25 @@ enum ConsensusMode {
     /// T76.1: Hybrid mode: DAG provides ordered batches as primary tx source,
     /// but Hotstuff/CoreRunnerHandle still performs the canonical commit.
     DagHybrid,
+}
+
+impl ConsensusMode {
+    /// T76.11: Compute the gauge value for the consensus mode metric.
+    ///
+    /// Returns:
+    /// - 0 for Hotstuff (default mode)
+    /// - 1 for DagHybrid mode with DAG ordering enabled
+    /// - 0 for DagHybrid mode with DAG ordering disabled (effectively hotstuff)
+    /// - 2 for full DAG mode
+    fn gauge_value(&self, dag_ordering_enabled: bool) -> i64 {
+        match self {
+            ConsensusMode::Hotstuff => 0,
+            ConsensusMode::DagHybrid => {
+                if dag_ordering_enabled { 1 } else { 0 }
+            }
+            ConsensusMode::Dag => 2,
+        }
+    }
 }
 
 /// Parse consensus mode from EEZO_CONSENSUS_MODE environment variable.
@@ -2920,7 +2941,18 @@ async fn main() -> anyhow::Result<()> {
 
         // T76.9: Decode pool metrics
         register_t76_decode_pool_metrics();
-	}	
+
+        // T76.11: Set consensus mode gauge based on current mode
+        // 0 = Hotstuff, 1 = Hybrid (dag-hybrid with ordering), 2 = DAG
+        let mode = env_consensus_mode();
+        let dag_ordering = env_dag_ordering_enabled();
+        let mode_value = mode.gauge_value(dag_ordering);
+        consensus_mode_active_set(mode_value);
+        log::info!(
+            "T76.11: consensus mode gauge set to {} (mode={:?}, dag_ordering_enabled={})",
+            mode_value, mode, dag_ordering
+        );
+    }
     // T37: spawn a dedicated /metrics HTTP server on EEZO_METRICS_BIND (or default)
     let metrics_bind = std::env::var("EEZO_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9898".into());
     tokio::spawn(spawn_metrics_server(metrics_bind.clone()));
@@ -4877,5 +4909,24 @@ mod consensus_mode_tests {
 
         // Clean up
         std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+    }
+
+    /// T76.11: Test that consensus mode gauge values are computed correctly.
+    /// This tests the ConsensusMode::gauge_value() method.
+    #[test]
+    fn test_consensus_mode_gauge_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        // Test Hotstuff mode always returns 0
+        assert_eq!(ConsensusMode::Hotstuff.gauge_value(false), 0);
+        assert_eq!(ConsensusMode::Hotstuff.gauge_value(true), 0);
+
+        // Test DAG mode always returns 2
+        assert_eq!(ConsensusMode::Dag.gauge_value(false), 2);
+        assert_eq!(ConsensusMode::Dag.gauge_value(true), 2);
+
+        // Test DagHybrid mode: returns 1 only when ordering is enabled, else 0
+        assert_eq!(ConsensusMode::DagHybrid.gauge_value(false), 0);
+        assert_eq!(ConsensusMode::DagHybrid.gauge_value(true), 1);
     }
 }
