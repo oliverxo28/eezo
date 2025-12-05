@@ -390,8 +390,6 @@ impl Mempool {
                 }
             }
         }
-        // Clean up empty sender queues.
-        self.per_sender.retain(|_, q| !q.pending.is_empty());
         
         if removed > 0 {
             log::debug!(
@@ -399,6 +397,9 @@ impl Mempool {
                 removed
             );
         }
+        
+        // Clean up empty sender queues after logging the removal count.
+        self.per_sender.retain(|_, q| !q.pending.is_empty());
         
         removed
     }
