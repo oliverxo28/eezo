@@ -827,8 +827,10 @@ impl HybridDagHandle {
 
         // Build payload from pending tx hashes.
         // Format: 8 bytes (round as height placeholder) + 32 bytes (zero block hash) + N*32 bytes (tx hashes)
+        // The zero block_hash distinguishes pending tx payloads from committed block payloads,
+        // which have the actual block hash. Both use the same DAG wire format.
         let round = round_hint.unwrap_or_else(|| self.handle.current_round());
-        let block_hash = [0u8; 32]; // Placeholder since these are pending txs, not a committed block
+        let block_hash = [0u8; 32]; // Zero hash indicates pending txs (vs committed block hash)
         
         let mut data = Vec::with_capacity(8 + 32 + tx_hashes.len() * 32);
         data.extend_from_slice(&round.to_le_bytes());
@@ -848,7 +850,9 @@ impl HybridDagHandle {
                     tx_hashes.len()
                 );
                 
-                // Advance round to prepare for next submission
+                // Advance round after each payload submission.
+                // Each DAG vertex needs a unique round number for proper ordering.
+                // This ensures the next submission uses a fresh round.
                 self.handle.advance_round();
                 
                 Ok(tx_hashes.len())

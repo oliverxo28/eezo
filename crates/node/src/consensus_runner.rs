@@ -1275,8 +1275,9 @@ impl CoreRunnerHandle {
                         // Get DAG runner handle for mempool access
                         let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
                         if let Some(dag_handle) = dag_opt {
-                            // Sample pending tx hashes from mempool
-                            // Use the same max as aggregation config
+                            // Sample pending tx hashes from mempool.
+                            // Use the same max_tx as aggregation config to ensure consistency
+                            // between how many txs the DAG orders and how many can be consumed.
                             let agg_config = crate::adaptive_agg::adaptive_agg_config();
                             let max_txs_to_sample = agg_config.max_tx();
                             
