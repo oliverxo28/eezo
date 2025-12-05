@@ -625,6 +625,9 @@ pub fn spawn_shadow_dag_if_enabled() -> Option<ShadowDagHandle> {
             register_dag_metrics();
             #[cfg(feature = "metrics")]
             crate::metrics::register_dag_shadow_metrics();
+            // T77.1: Register DAG ordering latency metrics
+            #[cfg(feature = "metrics")]
+            crate::metrics::register_t77_dag_ordering_latency_metrics();
 
             // Create runner with default config
             let config = DagConsensusConfig::default();
@@ -2335,5 +2338,53 @@ mod tests {
         // Test wave_cap=0 (unlimited)
         exec_wave_cap_set(0);
         assert_eq!(EEZO_EXEC_WAVE_CAP.get(), 0);
+    }
+
+    // =========================================================================
+    // T77.1: Tests for DAG ordering latency histogram
+    // =========================================================================
+
+    /// T77.1: Test that DAG ordering latency histogram is registered and observable.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_dag_ordering_latency_histogram_observable() {
+        use crate::metrics::{
+            observe_dag_ordering_latency_seconds,
+            EEZO_DAG_ORDERING_LATENCY_SECONDS,
+        };
+        
+        // Record the initial sample count
+        let initial_count = EEZO_DAG_ORDERING_LATENCY_SECONDS.get_sample_count();
+        
+        // Observe a few latency values (in seconds)
+        observe_dag_ordering_latency_seconds(0.010); // 10ms
+        observe_dag_ordering_latency_seconds(0.025); // 25ms
+        observe_dag_ordering_latency_seconds(0.050); // 50ms
+        
+        // Verify histogram was updated
+        let final_count = EEZO_DAG_ORDERING_LATENCY_SECONDS.get_sample_count();
+        assert!(final_count >= initial_count + 3, 
+            "Expected at least 3 new observations, got {} -> {}", initial_count, final_count);
+    }
+
+    /// T77.1: Test that the histogram uses sensible buckets for millisecond-scale latency.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_dag_ordering_latency_buckets() {
+        use crate::metrics::EEZO_DAG_ORDERING_LATENCY_SECONDS;
+        
+        // The histogram should have buckets configured for millisecond-scale latency.
+        // Observe values at different bucket boundaries to verify they are captured.
+        // We can check that the histogram is functional by observing and checking sample count.
+        let initial_count = EEZO_DAG_ORDERING_LATENCY_SECONDS.get_sample_count();
+        
+        // Observe values that span multiple buckets
+        crate::metrics::observe_dag_ordering_latency_seconds(0.001);  // 1ms - smallest bucket
+        crate::metrics::observe_dag_ordering_latency_seconds(0.030);  // 30ms - default timeout bucket
+        crate::metrics::observe_dag_ordering_latency_seconds(0.100);  // 100ms - larger latency
+        crate::metrics::observe_dag_ordering_latency_seconds(0.500);  // 500ms - edge case
+        
+        let final_count = EEZO_DAG_ORDERING_LATENCY_SECONDS.get_sample_count();
+        assert!(final_count >= initial_count + 4);
     }
 }

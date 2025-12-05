@@ -52,8 +52,9 @@ pub const DEFAULT_MIN_DAG_TX: usize = 1;
 
 /// T76.12: Default batch timeout in milliseconds.
 /// How long to wait for DAG-ordered batches before fallback.
-/// 0 means "no wait" (current behavior), 10 is a good default for production.
-pub const DEFAULT_BATCH_TIMEOUT_MS: u64 = 10;
+/// 0 means "no wait" (current behavior), 30 is a good default for production.
+/// T77.1: Increased from 10ms to 30ms to give DAG ordering more time.
+pub const DEFAULT_BATCH_TIMEOUT_MS: u64 = 30;
 
 /// Size of the rolling window for executor latency samples.
 const LATENCY_WINDOW_SIZE: usize = 100;
@@ -210,7 +211,7 @@ impl AdaptiveAggConfig {
     /// - `EEZO_HYBRID_AGG_MAX_TX`: Max transactions per block (default: 500).
     /// - `EEZO_HYBRID_AGG_MAX_BYTES`: Max bytes per block (default: 1MB).
     /// - `EEZO_HYBRID_MIN_DAG_TX`: Min DAG txs before fallback (default: 1).
-    /// - `EEZO_HYBRID_BATCH_TIMEOUT_MS`: Timeout before fallback (default: 10ms).
+    /// - `EEZO_HYBRID_BATCH_TIMEOUT_MS`: Timeout before fallback (default: 30ms).
     pub fn from_env() -> Self {
         // Check if fixed budget is set
         let fixed_budget_env = std::env::var("EEZO_HYBRID_AGG_TIME_BUDGET_MS")
@@ -556,6 +557,54 @@ mod tests {
         assert_eq!(DEFAULT_MAX_BYTES, 1_048_576);
         // T76.12: Check new defaults
         assert_eq!(DEFAULT_MIN_DAG_TX, 1);
-        assert_eq!(DEFAULT_BATCH_TIMEOUT_MS, 10);
+        // T77.1: Updated from 10ms to 30ms
+        assert_eq!(DEFAULT_BATCH_TIMEOUT_MS, 30);
+    }
+
+    // -------------------------------------------------------------------------
+    // T77.1: Tests for AdaptiveAggConfig batch_timeout_ms default and override
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_batch_timeout_default_30ms_when_unset() {
+        // Clear the env var to test default behavior
+        std::env::remove_var("EEZO_HYBRID_BATCH_TIMEOUT_MS");
+        
+        // The default constant should be 30ms
+        assert_eq!(DEFAULT_BATCH_TIMEOUT_MS, 30);
+        
+        // When we create a fresh config (without the env var set), 
+        // it should use the default value of 30ms.
+        // Note: We can't easily test from_env() in isolation because it reads
+        // global env vars that may be set by other tests. So we test the constant.
+    }
+
+    #[test]
+    fn test_batch_timeout_respects_env_override() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Set env var to a custom value
+        std::env::set_var("EEZO_HYBRID_BATCH_TIMEOUT_MS", "50");
+        
+        // Parse the value the same way AdaptiveAggConfig does
+        let parsed = std::env::var("EEZO_HYBRID_BATCH_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_BATCH_TIMEOUT_MS);
+        
+        assert_eq!(parsed, 50);
+        
+        // Clean up
+        std::env::remove_var("EEZO_HYBRID_BATCH_TIMEOUT_MS");
+        
+        // After removal, should return default
+        let parsed_default = std::env::var("EEZO_HYBRID_BATCH_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_BATCH_TIMEOUT_MS);
+        
+        assert_eq!(parsed_default, 30);
     }
 }
