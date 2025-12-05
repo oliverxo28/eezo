@@ -9,8 +9,15 @@ publish.workspace = true
 # Keep minimal defaults; opt-in per build/test.
 default = ["pq44-runtime", "checkpoints"]
 
+# T77.SAFE-2: Dev-unsafe mode gate. Must be explicitly enabled to allow:
+# - skip-sig-verify feature  
+# - EEZO_DEV_ALLOW_UNSIGNED_TX environment variable
+# NEVER use in production, testnet, or mainnet builds.
+dev-unsafe = ["eezo-crypto/dev-unsafe"]
+
 # Public features used in code and/or tests
-skip-sig-verify = ["eezo-crypto/skip-sig-verify"]
+# T77.SAFE-2: skip-sig-verify now requires dev-unsafe
+skip-sig-verify = ["dev-unsafe", "eezo-crypto/skip-sig-verify"]
 serde = []
 dev-tools = []
 
@@ -197,3 +204,14 @@ required-features = ["pq44-runtime", "testing"]
 name = "genesis_smoke"
 path = "tests/genesis_smoke.rs"
 required-features = ["pq44-runtime", "consensus-tests"]
+
+# T77.SAFE-2: Tests that use unsigned transactions must explicitly enable dev-unsafe
+[[test]]
+name = "block_assemble"
+path = "tests/block_assemble.rs"
+required-features = ["pq44-runtime", "dev-unsafe"]
+
+[[test]]
+name = "bridge_mint"
+path = "tests/bridge_mint.rs"
+required-features = ["pq44-runtime", "dev-unsafe"]

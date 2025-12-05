@@ -2911,6 +2911,10 @@ async fn main() -> anyhow::Result<()> {
         env::set_var("RUST_LOG", &cfg.log_level);
     }
     env_logger::init();
+
+    // T77.SAFE-2: Log dev-unsafe mode warning if enabled
+    eezo_ledger::dev_unsafe::log_startup_warning();
+
     // T36.6: ensure bridge metrics are registered before serving HTTP
     #[cfg(feature = "metrics")]
     {

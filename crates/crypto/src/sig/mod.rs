@@ -1,5 +1,17 @@
 // crates/crypto/src/sig/mod.rs
 
+// -----------------------------------------------------------------------------
+// T77.SAFE-2: Compile-time safety check for skip-sig-verify
+// -----------------------------------------------------------------------------
+// Ensure skip-sig-verify cannot be enabled without dev-unsafe.
+// This is enforced via feature dependencies in Cargo.toml, but we add a
+// compile-time assertion here as defense-in-depth.
+#[cfg(all(feature = "skip-sig-verify", not(feature = "dev-unsafe")))]
+compile_error!(
+    "skip-sig-verify feature requires dev-unsafe feature. \
+     NEVER enable these features in production/testnet/mainnet builds!"
+);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AlgoId {
     // FIPS 204: ML-DSA level 2 (mldsa44)
