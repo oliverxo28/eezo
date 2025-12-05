@@ -27,14 +27,10 @@ pub trait VerifyCache {
 /// Hard cap to avoid DoS with giant witnesses (tune in config)
 pub const MAX_WITNESS_BYTES: usize = 4096;
 
+// T77.SAFE-2: Use centralized dev-unsafe gate instead of inline function.
+// This ensures that the env var only has effect when dev-unsafe feature is enabled.
 fn dev_allow_unsigned_tx() -> bool {
-    match std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {
-        Ok(v) => {
-            let v = v.to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        }
-        Err(_) => false,
-    }
+    crate::dev_unsafe::allow_unsigned_tx()
 }
 
 #[cfg(feature = "mempool-batch-verify")]
