@@ -8,7 +8,7 @@ use crate::{
     cert_store::CertStore,
     config::BatchVerifyCfg,
     consensus_sig,
-    mempool::Mempool,
+    mempool::{Mempool, MempoolTtlConfig},
     supply::Supply,
     verify_cache::VerifyCache,
     HeaderErr,
@@ -494,6 +494,10 @@ pub struct SingleNodeCfg {
     pub header_cache_cap: usize,
     #[cfg(feature = "checkpoints")]
     pub checkpoint_interval: u64,
+    /// T77.SAFE-3: TTL for mempool entries in seconds.
+    /// 0 = disabled (no expiry), which is the default for backwards compatibility.
+    /// When enabled, transactions older than this are purged during drain_for_block.
+    pub mempool_ttl_secs: u64,
 }
 
 impl Default for SingleNodeCfg {
@@ -504,6 +508,8 @@ impl Default for SingleNodeCfg {
             header_cache_cap: 10_000,
             #[cfg(feature = "checkpoints")]
             checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
+            // T77.SAFE-3: Default to 0 (disabled) for backwards compatibility
+            mempool_ttl_secs: 0,
         }
     }
 }
@@ -573,15 +579,21 @@ impl SingleNode {
         } else {
             cfg.checkpoint_interval
         };
+        
+        // T77.SAFE-3: Create TTL config from the mempool_ttl_secs setting
+        let ttl_config = MempoolTtlConfig::new(cfg.mempool_ttl_secs);
+        
         Self {
             cache: VerifyCache::new(cfg.header_cache_cap),
             accounts: Accounts::default(),
             supply: Supply::default(),
             height: 0,
             prev_hash: [0u8; 32],
-            mempool: Mempool::new(
+            // T77.SAFE-3: Use new_with_ttl to pass TTL configuration
+            mempool: Mempool::new_with_ttl(
                 cfg.chain_id,
                 Arc::new(CertStore::new(HashMap::<[u8; 20], ValidatedPk>::new())),
+                ttl_config,
             ),
             cfg,
             sk,

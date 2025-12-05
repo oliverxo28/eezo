@@ -548,6 +548,27 @@ pub static EEZO_CHECKPOINTS_WRITTEN_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+// =========================================================================
+// T77.SAFE-3: Mempool TTL metrics
+// =========================================================================
+
+/// T77.SAFE-3: Counter for transactions expired due to TTL.
+/// This metric tracks the number of transactions dropped from the mempool
+/// because they exceeded the configured TTL (EEZO_MEMPOOL_TTL_SECS).
+pub static EEZO_MEMPOOL_EXPIRED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_mempool_expired_total",
+        "Number of transactions dropped from mempool due to TTL expiry (T77.SAFE-3)"
+    )
+    .unwrap()
+});
+
+/// T77.SAFE-3: Convenience function to increment the expired counter.
+#[inline]
+pub fn inc_mempool_expired(count: u64) {
+    EEZO_MEMPOOL_EXPIRED_TOTAL.inc_by(count);
+}
+
 /// Force registration so names appear on /metrics even before first use.
 pub fn register_t32_metrics() {
     // For HistogramVec we must create labeled children so families appear.
@@ -576,4 +597,7 @@ pub fn register_t32_metrics() {
     let _ = &*TXS_INCLUDED_TOTAL;
 	let _ = &*TXS_REJECTED_TOTAL;
     let _ = &*BLOCK_TX_COUNT;
+
+    // T77.SAFE-3: mempool TTL expiry metric
+    let _ = &*EEZO_MEMPOOL_EXPIRED_TOTAL;
 }

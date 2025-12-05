@@ -82,14 +82,50 @@ pub enum RejectReason {
     InsufficientFunds { have: u128, need: u128 },
 }
 
+// T77.SAFE-3: Import Instant for TTL tracking
+use std::time::Instant;
+
 #[derive(Debug)]
 pub struct MempoolEntry {
     tx: SignedTx,
     size_bytes: usize, // set at admit time from encoder (120 today)
+    /// T77.SAFE-3: Timestamp when the tx was first seen.
+    /// Used for TTL expiration. Does not survive restarts (devnet/single-node friendly).
+    first_seen: Instant,
 }
 
 use std::sync::Arc;
 use std::collections::{BTreeMap, HashMap};
+// T77.SAFE-3: AtomicU64 for thread-safe expired tx counter
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+/// T77.SAFE-3: Configuration for mempool TTL behavior.
+#[derive(Debug, Clone, Copy)]
+pub struct MempoolTtlConfig {
+    /// TTL duration in seconds. 0 = disabled (no expiry).
+    /// Default is 0 for backwards compatibility.
+    pub ttl_secs: u64,
+}
+
+impl Default for MempoolTtlConfig {
+    fn default() -> Self {
+        Self { ttl_secs: 0 }
+    }
+}
+
+impl MempoolTtlConfig {
+    /// Create a new TTL config with the given seconds value.
+    /// A value of 0 disables TTL expiration.
+    pub fn new(ttl_secs: u64) -> Self {
+        Self { ttl_secs }
+    }
+
+    /// Check if TTL is enabled (non-zero).
+    #[inline]
+    pub fn is_enabled(&self) -> bool {
+        self.ttl_secs > 0
+    }
+}
 
 #[derive(Debug, Default)]
 struct SenderQueue {
@@ -107,14 +143,45 @@ pub struct Mempool {
     /// dropping them; only the lowest nonce per sender is considered
     /// ready when building blocks.
     per_sender: HashMap<Address, SenderQueue>,
+    /// T77.SAFE-3: TTL configuration for mempool entries.
+    /// When ttl_secs > 0, entries older than TTL are purged during drain.
+    ttl_config: MempoolTtlConfig,
+    /// T77.SAFE-3: Counter of transactions expired due to TTL.
+    /// Exposed via `expired_count()` for metrics integration.
+    expired_total: AtomicU64,
 }
 
 impl Mempool {
+    /// Create a new mempool with default TTL (disabled).
     pub fn new(chain_id: [u8; 20], cert_store: Arc<dyn CertLookupT4 + Sync + Send>) -> Self {
+        Self::new_with_ttl(chain_id, cert_store, MempoolTtlConfig::default())
+    }
+
+    /// T77.SAFE-3: Create a new mempool with explicit TTL configuration.
+    /// 
+    /// # Arguments
+    /// * `chain_id` - 20-byte chain identifier
+    /// * `cert_store` - Certificate store for signature verification
+    /// * `ttl_config` - TTL configuration (ttl_secs = 0 disables expiry)
+    pub fn new_with_ttl(
+        chain_id: [u8; 20],
+        cert_store: Arc<dyn CertLookupT4 + Sync + Send>,
+        ttl_config: MempoolTtlConfig,
+    ) -> Self {
+        if ttl_config.is_enabled() {
+            log::info!(
+                "mempool: TTL enabled with {} seconds expiry (T77.SAFE-3)",
+                ttl_config.ttl_secs
+            );
+        } else {
+            log::debug!("mempool: TTL disabled (T77.SAFE-3)");
+        }
         Mempool {
             chain_id,
             cert_store,
             per_sender: HashMap::new(),
+            ttl_config,
+            expired_total: AtomicU64::new(0),
         }
     }
 
@@ -189,7 +256,8 @@ impl Mempool {
         match sender_from_pubkey_first20(&tx) {
             Some(sender) => {
                 let nonce = tx.core.nonce;
-                let entry = MempoolEntry { tx, size_bytes };
+                // T77.SAFE-3: Record first_seen timestamp for TTL tracking
+                let entry = MempoolEntry { tx, size_bytes, first_seen: Instant::now() };
 
                 // Fix 1: Use or_default() instead of or_insert_with(SenderQueue::default)
                 // and pass sender by move instead of clone.
@@ -244,6 +312,8 @@ impl Mempool {
                 MempoolEntry {
                     tx: signed,
                     size_bytes,
+                    // T77.SAFE-3: Record first_seen timestamp for TTL tracking
+                    first_seen: Instant::now(),
                 },
             );
             log::info!(
@@ -271,6 +341,16 @@ impl Mempool {
     /// per-sender queue as futures and will be considered once the lower
     /// nonces have been removed by inclusion.
     pub fn drain_for_block(&mut self, max_bytes: usize) -> Vec<SignedTx> {
+        // T77.SAFE-3: Purge expired transactions before building a block.
+        // This ensures stale/zombie txs don't accumulate and cause confusion.
+        let expired = self.purge_expired(Instant::now());
+        if expired > 0 {
+            log::debug!(
+                "mempool: purged {} expired tx(s) before drain (T77.SAFE-3)",
+                expired
+            );
+        }
+
         let mut used = HEADER_BUDGET_BYTES;
         let mut taken = Vec::new();
 
@@ -399,6 +479,91 @@ impl Mempool {
         
         removed
     }
+
+    // =========================================================================
+    // T77.SAFE-3: TTL expiration logic
+    // =========================================================================
+
+    /// T77.SAFE-3: Purge expired transactions from the mempool.
+    ///
+    /// Scans all sender queues and removes any transaction whose age exceeds
+    /// the configured TTL. Empty sender queues are cleaned up afterwards.
+    ///
+    /// # Arguments
+    /// * `now` - Current timestamp for age calculation
+    ///
+    /// # Returns
+    /// Number of transactions removed due to TTL expiration.
+    ///
+    /// # Safety
+    /// - TTL expiry can only delete transactions; it never resurrects or re-enqueues.
+    /// - Does not change nonce rules: dropping a pending tx that was never committed is safe.
+    /// - If TTL is 0 (disabled), returns immediately with 0.
+    pub fn purge_expired(&mut self, now: Instant) -> usize {
+        // Fast path: if TTL is disabled, do nothing
+        if !self.ttl_config.is_enabled() {
+            return 0;
+        }
+
+        let ttl_duration = std::time::Duration::from_secs(self.ttl_config.ttl_secs);
+        let mut expired_count = 0;
+
+        // Iterate over all senders and their queues
+        for (_sender, queue) in self.per_sender.iter_mut() {
+            // Collect nonces of expired entries to remove
+            let expired_nonces: Vec<u64> = queue
+                .pending
+                .iter()
+                .filter_map(|(nonce, entry)| {
+                    // Use saturating_duration_since to handle clock drift safely
+                    let age = now.saturating_duration_since(entry.first_seen);
+                    if age > ttl_duration {
+                        Some(*nonce)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Remove expired entries
+            for nonce in expired_nonces {
+                queue.pending.remove(&nonce);
+                expired_count += 1;
+            }
+        }
+
+        // Clean up empty sender queues
+        self.per_sender.retain(|_, q| !q.pending.is_empty());
+
+        // Update the atomic counter for metrics
+        if expired_count > 0 {
+            self.expired_total.fetch_add(expired_count as u64, AtomicOrdering::Relaxed);
+            // T77.SAFE-3: Also increment the Prometheus metric if metrics feature is enabled
+            #[cfg(feature = "metrics")]
+            crate::metrics::inc_mempool_expired(expired_count as u64);
+            log::info!(
+                "mempool: purged {} expired tx(s) due to TTL (T77.SAFE-3)",
+                expired_count
+            );
+        }
+
+        expired_count
+    }
+
+    /// T77.SAFE-3: Get the total count of transactions expired due to TTL.
+    ///
+    /// This counter is intended for metrics/observability (e.g., `eezo_mempool_expired_total`).
+    /// The counter is monotonically increasing and survives across purge calls.
+    #[inline]
+    pub fn expired_count(&self) -> u64 {
+        self.expired_total.load(AtomicOrdering::Relaxed)
+    }
+
+    /// T77.SAFE-3: Get the current TTL configuration.
+    #[inline]
+    pub fn ttl_config(&self) -> &MempoolTtlConfig {
+        &self.ttl_config
+    }
 }
 
 /// Stateless → signature → sender → stateful checks.
@@ -467,6 +632,7 @@ mod tests {
     use super::*;
     use crate::address::Address;
     use crate::cert_store::ValidatedPk;
+    use std::time::Duration;
 
     /// Stub cert lookup for testing (always returns None).
     struct StubCertLookup;
@@ -478,6 +644,15 @@ mod tests {
 
     fn test_mempool() -> Mempool {
         Mempool::new([0u8; 20], Arc::new(StubCertLookup))
+    }
+
+    /// T77.SAFE-3: Create a mempool with a specific TTL for testing.
+    fn test_mempool_with_ttl(ttl_secs: u64) -> Mempool {
+        Mempool::new_with_ttl(
+            [0u8; 20],
+            Arc::new(StubCertLookup),
+            MempoolTtlConfig::new(ttl_secs),
+        )
     }
 
     fn test_tx(sender_byte: u8, nonce: u64) -> (SignedTx, Address) {
@@ -505,6 +680,16 @@ mod tests {
         (tx, sender)
     }
 
+    /// T77.SAFE-3: Helper to create a MempoolEntry with a specific first_seen time.
+    fn make_entry(tx: SignedTx, size_bytes: usize, first_seen: Instant) -> MempoolEntry {
+        MempoolEntry { tx, size_bytes, first_seen }
+    }
+
+    /// T77.SAFE-3: Helper to create a MempoolEntry with first_seen = now.
+    fn make_entry_now(tx: SignedTx, size_bytes: usize) -> MempoolEntry {
+        make_entry(tx, size_bytes, Instant::now())
+    }
+
     #[test]
     fn test_remove_committed_txs_basic() {
         let mut mp = test_mempool();
@@ -516,9 +701,9 @@ mod tests {
         
         // Manually insert into per_sender map (bypassing admission checks)
         let q = mp.per_sender.entry(sender_a).or_default();
-        q.pending.insert(0, MempoolEntry { tx: tx1, size_bytes: 100 });
-        q.pending.insert(1, MempoolEntry { tx: tx2, size_bytes: 100 });
-        q.pending.insert(2, MempoolEntry { tx: tx3, size_bytes: 100 });
+        q.pending.insert(0, make_entry_now(tx1, 100));
+        q.pending.insert(1, make_entry_now(tx2, 100));
+        q.pending.insert(2, make_entry_now(tx3, 100));
         
         assert_eq!(mp.len(), 3);
         
@@ -544,11 +729,11 @@ mod tests {
         
         // Insert txs from two senders
         let q_a = mp.per_sender.entry(sender_a).or_default();
-        q_a.pending.insert(0, MempoolEntry { tx: tx_a0, size_bytes: 100 });
-        q_a.pending.insert(1, MempoolEntry { tx: tx_a1, size_bytes: 100 });
+        q_a.pending.insert(0, make_entry_now(tx_a0, 100));
+        q_a.pending.insert(1, make_entry_now(tx_a1, 100));
         
         let q_b = mp.per_sender.entry(sender_b).or_default();
-        q_b.pending.insert(0, MempoolEntry { tx: tx_b0, size_bytes: 100 });
+        q_b.pending.insert(0, make_entry_now(tx_b0, 100));
         
         assert_eq!(mp.len(), 3);
         
@@ -571,7 +756,7 @@ mod tests {
         
         let (tx, sender) = test_tx(0xAA, 5);
         let q = mp.per_sender.entry(sender).or_default();
-        q.pending.insert(5, MempoolEntry { tx, size_bytes: 100 });
+        q.pending.insert(5, make_entry_now(tx, 100));
         
         assert_eq!(mp.len(), 1);
         
@@ -599,5 +784,184 @@ mod tests {
         let (_, sender) = test_tx(0xAA, 0);
         let removed = mp.remove_committed_txs(&[(sender, 0)]);
         assert_eq!(removed, 0);
+    }
+
+    // =========================================================================
+    // T77.SAFE-3: TTL expiration tests
+    // =========================================================================
+
+    /// T77.SAFE-3: With TTL = 0 (disabled), nothing expires even if we simulate time passing.
+    #[test]
+    fn ttl_disabled_no_effect() {
+        let mut mp = test_mempool(); // Default TTL = 0 (disabled)
+        assert!(!mp.ttl_config().is_enabled());
+
+        let (tx1, sender) = test_tx(0xAA, 0);
+        
+        // Insert with a very old first_seen (simulating an old tx)
+        let old_time = Instant::now() - Duration::from_secs(3600); // 1 hour ago
+        let q = mp.per_sender.entry(sender).or_default();
+        q.pending.insert(0, make_entry(tx1, 100, old_time));
+        
+        assert_eq!(mp.len(), 1);
+        
+        // Purge should be a no-op when TTL is disabled
+        let expired = mp.purge_expired(Instant::now());
+        assert_eq!(expired, 0);
+        assert_eq!(mp.len(), 1); // Still there
+        assert_eq!(mp.expired_count(), 0);
+    }
+
+    /// T77.SAFE-3: Old txs are removed when TTL is enabled and they exceed the TTL.
+    #[test]
+    fn ttl_expires_old_txs() {
+        let mut mp = test_mempool_with_ttl(60); // 60 second TTL
+        assert!(mp.ttl_config().is_enabled());
+
+        let (tx_old, sender_a) = test_tx(0xAA, 0);
+        let (tx_new, sender_b) = test_tx(0xBB, 0);
+        
+        // Insert one old tx (2 minutes ago) and one new tx (just now)
+        let old_time = Instant::now() - Duration::from_secs(120); // 2 minutes ago
+        let new_time = Instant::now();
+        
+        let q_a = mp.per_sender.entry(sender_a).or_default();
+        q_a.pending.insert(0, make_entry(tx_old, 100, old_time));
+        
+        let q_b = mp.per_sender.entry(sender_b).or_default();
+        q_b.pending.insert(0, make_entry(tx_new, 100, new_time));
+        
+        assert_eq!(mp.len(), 2);
+        
+        // Purge with current time
+        let expired = mp.purge_expired(Instant::now());
+        assert_eq!(expired, 1); // Only the old one should be removed
+        assert_eq!(mp.len(), 1); // Only the new one remains
+        assert_eq!(mp.expired_count(), 1);
+        
+        // The old sender's queue should be cleaned up
+        assert!(mp.per_sender.get(&sender_a).is_none());
+        // The new sender's tx should still be there
+        assert!(mp.per_sender.get(&sender_b).is_some());
+    }
+
+    /// T77.SAFE-3: Tx whose age is just under TTL is kept; one just over TTL is dropped.
+    #[test]
+    fn ttl_respects_boundary() {
+        let ttl_secs = 60;
+        let mut mp = test_mempool_with_ttl(ttl_secs);
+
+        let (tx_under, sender_a) = test_tx(0xAA, 0);
+        let (tx_over, sender_b) = test_tx(0xBB, 0);
+        
+        let now = Instant::now();
+        
+        // One tx is 59 seconds old (under TTL)
+        let under_time = now - Duration::from_secs(59);
+        // One tx is 61 seconds old (over TTL)
+        let over_time = now - Duration::from_secs(61);
+        
+        let q_a = mp.per_sender.entry(sender_a).or_default();
+        q_a.pending.insert(0, make_entry(tx_under, 100, under_time));
+        
+        let q_b = mp.per_sender.entry(sender_b).or_default();
+        q_b.pending.insert(0, make_entry(tx_over, 100, over_time));
+        
+        assert_eq!(mp.len(), 2);
+        
+        // Purge at 'now'
+        let expired = mp.purge_expired(now);
+        assert_eq!(expired, 1); // Only the over-TTL one
+        assert_eq!(mp.len(), 1);
+        
+        // The under-TTL tx should still be there
+        assert!(mp.per_sender.get(&sender_a).is_some());
+        // The over-TTL tx should be gone
+        assert!(mp.per_sender.get(&sender_b).is_none());
+    }
+
+    /// T77.SAFE-3: When all txs for a sender expire, that sender's queue is removed.
+    #[test]
+    fn ttl_cleans_empty_senders() {
+        let mut mp = test_mempool_with_ttl(60);
+
+        let (tx1, sender) = test_tx(0xAA, 0);
+        let (tx2, _) = test_tx(0xAA, 1);
+        let (tx3, _) = test_tx(0xAA, 2);
+        
+        // All txs are old
+        let old_time = Instant::now() - Duration::from_secs(120);
+        
+        let q = mp.per_sender.entry(sender).or_default();
+        q.pending.insert(0, make_entry(tx1, 100, old_time));
+        q.pending.insert(1, make_entry(tx2, 100, old_time));
+        q.pending.insert(2, make_entry(tx3, 100, old_time));
+        
+        assert_eq!(mp.len(), 3);
+        assert_eq!(mp.per_sender.len(), 1); // 1 sender
+        
+        // Purge all
+        let expired = mp.purge_expired(Instant::now());
+        assert_eq!(expired, 3);
+        assert_eq!(mp.len(), 0);
+        assert_eq!(mp.per_sender.len(), 0); // Sender queue cleaned up
+        assert_eq!(mp.expired_count(), 3);
+    }
+
+    /// T77.SAFE-3: Expired counter accumulates across multiple purge calls.
+    #[test]
+    fn ttl_expired_count_accumulates() {
+        let mut mp = test_mempool_with_ttl(60);
+
+        // First batch: 2 old txs
+        let (tx1, sender_a) = test_tx(0xAA, 0);
+        let (tx2, _) = test_tx(0xAA, 1);
+        let old_time = Instant::now() - Duration::from_secs(120);
+        
+        let q = mp.per_sender.entry(sender_a).or_default();
+        q.pending.insert(0, make_entry(tx1, 100, old_time));
+        q.pending.insert(1, make_entry(tx2, 100, old_time));
+        
+        let expired1 = mp.purge_expired(Instant::now());
+        assert_eq!(expired1, 2);
+        assert_eq!(mp.expired_count(), 2);
+
+        // Second batch: 1 old tx
+        let (tx3, sender_b) = test_tx(0xBB, 0);
+        let q_b = mp.per_sender.entry(sender_b).or_default();
+        q_b.pending.insert(0, make_entry(tx3, 100, old_time));
+        
+        let expired2 = mp.purge_expired(Instant::now());
+        assert_eq!(expired2, 1);
+        assert_eq!(mp.expired_count(), 3); // Accumulated
+    }
+
+    /// T77.SAFE-3: Empty mempool purge returns 0.
+    #[test]
+    fn ttl_purge_empty_mempool() {
+        let mut mp = test_mempool_with_ttl(60);
+        assert_eq!(mp.len(), 0);
+        
+        let expired = mp.purge_expired(Instant::now());
+        assert_eq!(expired, 0);
+        assert_eq!(mp.expired_count(), 0);
+    }
+
+    /// T77.SAFE-3: MempoolTtlConfig defaults and methods work correctly.
+    #[test]
+    fn ttl_config_basics() {
+        // Default is disabled
+        let default_cfg = MempoolTtlConfig::default();
+        assert_eq!(default_cfg.ttl_secs, 0);
+        assert!(!default_cfg.is_enabled());
+
+        // Explicit 0 is disabled
+        let zero_cfg = MempoolTtlConfig::new(0);
+        assert!(!zero_cfg.is_enabled());
+
+        // Non-zero is enabled
+        let enabled_cfg = MempoolTtlConfig::new(300);
+        assert!(enabled_cfg.is_enabled());
+        assert_eq!(enabled_cfg.ttl_secs, 300);
     }
 }

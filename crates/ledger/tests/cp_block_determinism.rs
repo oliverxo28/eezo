@@ -18,7 +18,8 @@ fn cfg() -> SingleNodeCfg {
         header_cache_cap: 1024,
         #[cfg(feature = "checkpoints")]
         checkpoint_interval: eezo_ledger::consensus::DEFAULT_CHECKPOINT_INTERVAL,
-    }
+    ..Default::default()
+}
 }
 
 fn now_ms() -> u64 {

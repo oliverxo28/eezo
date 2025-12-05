@@ -23,7 +23,8 @@ fn boot_and_first_qc() {
         block_byte_budget: 4096,
         header_cache_cap: 64,
         checkpoint_interval: 2,
-    };
+        ..Default::default()
+};
     let mut n = SingleNode::new(cfg, sk, pk);
 
     let (b1, _s1) = n.run_one_slot(false).expect("slot1");
@@ -49,7 +50,8 @@ fn monotonicity_and_non_reuse() {
         block_byte_budget: 4096,
         header_cache_cap: 64,
         checkpoint_interval: 2,
-    };
+        ..Default::default()
+};
     let mut n = SingleNode::new(cfg, sk, pk);
 
     let mut qc_heights = Vec::new();
@@ -72,7 +74,8 @@ fn validate_headers_end_to_end_and_tamper_qc() {
         block_byte_budget: 4096,
         header_cache_cap: 64,
         checkpoint_interval: 2,
-    };
+        ..Default::default()
+};
     let mut n = SingleNode::new(cfg, sk.clone(), pk.clone());
 
     // Produce a few blocks and validate each header with PQC
@@ -104,7 +107,8 @@ fn chain_id_isolation() {
         block_byte_budget: 4096,
         header_cache_cap: 64,
         checkpoint_interval: 2,
-    };
+        ..Default::default()
+};
     let mut n = SingleNode::new(cfg, sk.clone(), pk.clone());
 
     // Build a header + valid sig for chain A
@@ -130,7 +134,8 @@ fn budget_independence_of_qc_policy() {
         block_byte_budget: 4096,
         header_cache_cap: 64,
         checkpoint_interval: 2,
-    };
+        ..Default::default()
+};
     let mut n_big = SingleNode::new(cfg_big, sk.clone(), pk.clone());
     let mut qc_big = Vec::new();
     for h in 1u64..=6 {
@@ -144,7 +149,8 @@ fn budget_independence_of_qc_policy() {
         block_byte_budget: 256, // much smaller
         header_cache_cap: 64,
         checkpoint_interval: 2,
-    };
+        ..Default::default()
+};
     let mut n_small = SingleNode::new(cfg_small, sk, pk);
     let mut qc_small = Vec::new();
     for h in 1u64..=6 {
@@ -165,7 +171,8 @@ fn replay_guard_with_verify_cache() {
         block_byte_budget: 4096,
         header_cache_cap: 64,
         checkpoint_interval: 2,
-    };
+        ..Default::default()
+};
     let mut n = SingleNode::new(cfg, sk.clone(), pk.clone());
 
     let (b, _s) = n.run_one_slot(false).expect("slot");
@@ -191,7 +198,8 @@ fn header_serde_roundtrip_preserves_qc() {
         block_byte_budget: 4096,
         header_cache_cap: 64,
         checkpoint_interval: 2,
-    };
+        ..Default::default()
+};
     let mut n = SingleNode::new(cfg, sk.clone(), pk.clone());
 
     // Get a header with a QC (height 2)

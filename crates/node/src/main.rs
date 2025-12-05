@@ -3280,11 +3280,23 @@ async fn main() -> anyhow::Result<()> {
     // 3️⃣a) persistence-enabled variant (Refactored to return (core_runner, dag_runner))
     #[cfg(all(feature = "pq44-runtime", feature = "persistence"))]
     let (core_runner, dag_runner): (Option<Arc<CoreRunnerHandle>>, Option<Arc<DagRunnerHandle>>) = {
+        // T77.SAFE-3: Parse mempool TTL from environment.
+        // Default is 0 (disabled) for backwards compatibility.
+        // Set EEZO_MEMPOOL_TTL_SECS to a positive value (e.g., 300 for 5 minutes) to enable.
+        let mempool_ttl_secs = env_u64("EEZO_MEMPOOL_TTL_SECS", 0);
+        if mempool_ttl_secs > 0 {
+            log::info!(
+                "mempool: TTL enabled via EEZO_MEMPOOL_TTL_SECS={} (T77.SAFE-3)",
+                mempool_ttl_secs
+            );
+        }
+
         // Build runtime cfg from env (with safe defaults)
         let mut cfg = SingleNodeCfg {
             chain_id, // already parsed earlier
             block_byte_budget: env_usize("EEZO_MAX_BLOCK_BYTES", 1 << 20),
             header_cache_cap: env_usize("EEZO_HEADER_CACHE_CAP", 10_000),
+            mempool_ttl_secs, // T77.SAFE-3
             ..Default::default()
         };
         #[cfg(feature = "checkpoints")]
@@ -3383,11 +3395,23 @@ async fn main() -> anyhow::Result<()> {
     // 3️⃣b) non-persistence variant (Refactored to return (core_runner, dag_runner))
     #[cfg(all(feature = "pq44-runtime", not(feature = "persistence")))]
     let (core_runner, dag_runner): (Option<Arc<CoreRunnerHandle>>, Option<Arc<DagRunnerHandle>>) = {
+        // T77.SAFE-3: Parse mempool TTL from environment.
+        // Default is 0 (disabled) for backwards compatibility.
+        // Set EEZO_MEMPOOL_TTL_SECS to a positive value (e.g., 300 for 5 minutes) to enable.
+        let mempool_ttl_secs = env_u64("EEZO_MEMPOOL_TTL_SECS", 0);
+        if mempool_ttl_secs > 0 {
+            log::info!(
+                "mempool: TTL enabled via EEZO_MEMPOOL_TTL_SECS={} (T77.SAFE-3)",
+                mempool_ttl_secs
+            );
+        }
+
         // Build runtime cfg from env (with safe defaults)
     let mut cfg = SingleNodeCfg {
         chain_id, // already parsed earlier
         block_byte_budget: env_usize("EEZO_MAX_BLOCK_BYTES", 1 << 20),
         header_cache_cap: env_usize("EEZO_HEADER_CACHE_CAP", 10_000),
+        mempool_ttl_secs, // T77.SAFE-3
         ..Default::default()
     };
     #[cfg(feature = "checkpoints")]

@@ -11,7 +11,8 @@ fn checkpoints_cfg_compiles_and_node_runs() {
         block_byte_budget: 4096,
         header_cache_cap: 1024,
         checkpoint_interval: 0u64,
-    };
+        ..Default::default()
+};
     let (pk0, sk0) = keypair();
     let mut n0 = SingleNode::new(cfg0, sk0, pk0);
     let _ = n0.run_one_slot(true); // just ensure it runs/compiles
@@ -22,7 +23,8 @@ fn checkpoints_cfg_compiles_and_node_runs() {
         block_byte_budget: 4096,
         header_cache_cap: 1024,
         checkpoint_interval: 7u64,
-    };
+        ..Default::default()
+};
     let (pk1, sk1) = keypair();
     let mut n1 = SingleNode::new(cfg1, sk1, pk1);
     let _ = n1.run_one_slot(true);
@@ -37,7 +39,8 @@ fn interval_one_attaches_every_block() {
         block_byte_budget: 2048,
         header_cache_cap: 64,
         checkpoint_interval: 1u64,
-    };
+        ..Default::default()
+};
     let mut n = SingleNode::new(cfg, sk, pk);
 
     // Height 1: no previous header to certify → qc_hash == 0.
@@ -65,7 +68,8 @@ fn interval_k_attaches_only_on_multiples() {
         block_byte_budget: 2048,
         header_cache_cap: 64,
         checkpoint_interval: k,
-    };
+        ..Default::default()
+};
     let mut n = SingleNode::new(cfg, sk, pk);
 
     // Heights 1..6; only 3 and 6 should carry a non-zero qc_hash.
