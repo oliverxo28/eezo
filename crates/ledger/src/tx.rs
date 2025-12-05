@@ -44,17 +44,13 @@ pub struct Access {
     pub kind: AccessKind,
 }
 
-// Helper for dev-only unsigned transaction mode.
-// This is used by assembly, validation, and precheck to gate signature verification.
+// T77.SAFE-2: Helper for dev-only unsigned transaction mode.
+// This is now gated by the dev-unsafe feature at compile time.
+// The environment variable EEZO_DEV_ALLOW_UNSIGNED_TX has no effect
+// unless the build was compiled with the dev-unsafe feature.
 #[inline]
 pub fn dev_allow_unsigned_tx() -> bool {
-    match std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {
-        Ok(v) => {
-            let v = v.to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        }
-        Err(_) => false,
-    }
+    crate::dev_unsafe::allow_unsigned_tx()
 }
 
 /// Parse optional bucket count from env (`EEZO_EXEC_BUCKETS`). 0 or unset disables buckets.

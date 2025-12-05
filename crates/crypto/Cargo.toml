@@ -59,8 +59,15 @@ pq44-runtime = ["mldsa"]
 # Convenience roll-up
 ml-suite = ["mldsa", "mlkem"]
 
+# T77.SAFE-2: Dev-unsafe mode gate. Must be explicitly enabled to allow:
+# - skip-sig-verify feature
+# - EEZO_DEV_ALLOW_UNSIGNED_TX environment variable
+# NEVER use in production, testnet, or mainnet builds.
+dev-unsafe = []
+
 # Dev/test helper used by sig/mod.rs (bypass real verify)
-skip-sig-verify = []
+# T77.SAFE-2: Now requires dev-unsafe feature to have any effect.
+skip-sig-verify = ["dev-unsafe"]
 
 # Present because code checks it; also pulls serde derive when enabled
 serde_support = ["dep:serde"]

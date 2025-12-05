@@ -13,6 +13,9 @@ pub mod cert_store;
 #[cfg(feature = "pq44-runtime")]
 pub mod evidence;
 
+// T77.SAFE-2: Centralized dev-unsafe mode gate
+pub mod dev_unsafe;
+
 pub mod tx;
 
 pub mod mempool;

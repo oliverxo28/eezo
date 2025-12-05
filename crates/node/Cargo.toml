@@ -113,6 +113,13 @@ testing = ["pq44-runtime"]
 # HTTP surface for state-sync endpoints
 state-sync-http = []
 
+# T77.SAFE-2: Dev-unsafe mode gate. Must be explicitly enabled to allow:
+# - skip-sig-verify feature (bypasses all signature checks)
+# - EEZO_DEV_ALLOW_UNSIGNED_TX env var (allows unsigned transactions)
+# NEVER use in production, testnet, or mainnet builds.
+# Use only for local development benchmarks.
+dev-unsafe = ["eezo-ledger/dev-unsafe", "eezo-crypto/dev-unsafe"]
+
 # Dev-only toggles
 dev-tools = []
 
