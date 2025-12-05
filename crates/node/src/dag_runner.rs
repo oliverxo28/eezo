@@ -1481,6 +1481,25 @@ impl DagRunnerHandle {
         self.mempool.get_bytes_for_hashes(hashes).await
     }
 
+    /// T76.12: Sample pending transaction hashes from the mempool.
+    ///
+    /// This is used by the hybrid DAG mode to feed pending transactions to the
+    /// DAG ordering layer BEFORE block building. Unlike `collect_block_txs_from_dag`,
+    /// this method:
+    /// 1. Samples directly from the mempool (not from DAG candidate)
+    /// 2. Returns hashes only (not full SignedTx)
+    /// 3. Does not drain/consume from the mempool
+    ///
+    /// # Arguments
+    /// * `max_txs` - Maximum number of tx hashes to sample
+    ///
+    /// # Returns
+    /// * Vec of 32-byte tx hashes (canonical SignedTx.hash() values)
+    pub async fn sample_pending_tx_hashes(&self, max_txs: usize) -> Vec<[u8; 32]> {
+        // Use the mempool's sample_hashes method (non-consuming, read-only)
+        self.mempool.sample_hashes(max_txs).await
+    }
+
     /// T69.0: Evaluate the current DAG template against the given policy.
     ///
     /// This runs a dry-run of the DAG candidate and evaluates whether it meets

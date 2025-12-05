@@ -1265,6 +1265,45 @@ impl CoreRunnerHandle {
                 #[cfg(feature = "metrics")]
                 let dag_prepare_start = std::time::Instant::now();
                 
+                // T76.12: Feed hybrid DAG with pending mempool transactions BEFORE consuming.
+                // This is the key fix: submit pending txs at the START of each tick,
+                // so that the DAG can order them and provide batches for block building.
+                #[cfg(feature = "dag-consensus")]
+                if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
+                    let hybrid_opt: Option<Arc<HybridDagHandle>> = hybrid_dag_c.lock().await.clone();
+                    if let Some(hybrid_handle) = hybrid_opt {
+                        // Get DAG runner handle for mempool access
+                        let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
+                        if let Some(dag_handle) = dag_opt {
+                            // Sample pending tx hashes from mempool
+                            // Use the same max as aggregation config
+                            let agg_config = crate::adaptive_agg::adaptive_agg_config();
+                            let max_txs_to_sample = agg_config.max_tx();
+                            
+                            // Get pending tx hashes from the shared mempool via DAG runner
+                            let pending_hashes = dag_handle.sample_pending_tx_hashes(max_txs_to_sample).await;
+                            
+                            if !pending_hashes.is_empty() {
+                                // Submit pending txs to the hybrid DAG
+                                match hybrid_handle.submit_pending_txs(&pending_hashes, None) {
+                                    Ok(count) => {
+                                        log::debug!(
+                                            "dag-hybrid: fed {} pending tx hashes to DAG for ordering",
+                                            count
+                                        );
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "dag-hybrid: failed to submit pending txs: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 // T76.3: Try hybrid batch consumption when in hybrid mode with ordering enabled.
                 // When a batch is available with tx bytes, decode directly from bytes.
                 // For any entries missing bytes, fall back to mempool lookup per-entry.
