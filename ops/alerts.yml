@@ -18,53 +18,133 @@ groups:
     for: 10m
     labels: { severity: warn }
     annotations: { summary: "Mempool backlog beyond limits" }
-    
-  - name: eezo-bridgeops
-    rules:
-      # Node-side: header emission vs serving
-      - alert: BridgeNodeLagHigh
-        expr: eezo_bridge_node_lag > 4
-        for: 10m
-        labels: { severity: warn }
-        annotations:
-          summary: "Bridge node lag > 4 checkpoints for 10m"
-          description: "latest_emitted {{ $value }} ahead of last_served"
 
-      - alert: BridgeHeaderServeStalled
-        expr: (increase(eezo_bridge_headers_served_total[10m]) == 0)
-              and (eezo_bridge_latest_height > eezo_bridge_last_served_height)
-        for: 10m
-        labels: { severity: warn }
-        annotations:
-          summary: "No bridge headers served in 10m while new checkpoints exist"
+- name: eezo-bridgeops
+  rules:
+    # Node-side: header emission vs serving
+    - alert: BridgeNodeLagHigh
+      expr: eezo_bridge_node_lag > 4
+      for: 10m
+      labels: { severity: warn }
+      annotations:
+        summary: "Bridge node lag > 4 checkpoints for 10m"
+        description: "latest_emitted {{ $value }} ahead of last_served"
 
-      - alert: BridgeMonotonicityViolation
-        expr: eezo_bridge_last_served_height > eezo_bridge_latest_height
-        for: 1m
-        labels: { severity: page }
-        annotations:
-          summary: "Last-served exceeds latest-emitted (invariant break)"
+    - alert: BridgeHeaderServeStalled
+      expr: (increase(eezo_bridge_headers_served_total[10m]) == 0)
+            and (eezo_bridge_latest_height > eezo_bridge_last_served_height)
+      for: 10m
+      labels: { severity: warn }
+      annotations:
+        summary: "No bridge headers served in 10m while new checkpoints exist"
 
-      # Relay-side: on-chain sync vs node latest
-      - alert: RelayFallingBehind
-        expr: (eezo_relay_node_latest_height - eezo_relay_onchain_height) > 4
-        for: 10m
-        labels: { severity: warn }
-        annotations:
-          summary: "Relay is >4 checkpoints behind on-chain for 10m"
+    - alert: BridgeMonotonicityViolation
+      expr: eezo_bridge_last_served_height > eezo_bridge_latest_height
+      for: 1m
+      labels: { severity: page }
+      annotations:
+        summary: "Last-served exceeds latest-emitted (invariant break)"
 
-      - alert: RelayNoProgress
-        expr: (increase(eezo_relay_store_success_total[10m]) == 0)
-              and (eezo_relay_node_latest_height > eezo_relay_onchain_height)
-        for: 10m
-        labels: { severity: page }
-        annotations:
-          summary: "Relay made no successful store tx in 10m while behind node"
+    # Relay-side: on-chain sync vs node latest
+    - alert: RelayFallingBehind
+      expr: (eezo_relay_node_latest_height - eezo_relay_onchain_height) > 4
+      for: 10m
+      labels: { severity: warn }
+      annotations:
+        summary: "Relay is >4 checkpoints behind on-chain for 10m"
 
-      - alert: RelayBackoffStuck
-        expr: eezo_relay_backoff_seconds > 60
-        for: 10m
-        labels: { severity: warn }
-        annotations:
-          summary: "Relay backoff > 60s sustained"
-          description: "Check node availability, proof exporter, or contract failures"
+    - alert: RelayNoProgress
+      expr: (increase(eezo_relay_store_success_total[10m]) == 0)
+            and (eezo_relay_node_latest_height > eezo_relay_onchain_height)
+      for: 10m
+      labels: { severity: page }
+      annotations:
+        summary: "Relay made no successful store tx in 10m while behind node"
+
+    - alert: RelayBackoffStuck
+      expr: eezo_relay_backoff_seconds > 60
+      for: 10m
+      labels: { severity: warn }
+      annotations:
+        summary: "Relay backoff > 60s sustained"
+        description: "Check node availability, proof exporter, or contract failures"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T76.12: DAG-Hybrid Canary SLO Alerts
+# ─────────────────────────────────────────────────────────────────────────────
+- name: eezo-dag-hybrid
+  rules:
+    # SLO 1: Zero hybrid fallbacks under normal load
+    - alert: DagHybridFallbackHigh
+      expr: increase(eezo_dag_hybrid_fallback_total[1h]) > 1
+      for: 5m
+      labels: { severity: warn }
+      annotations:
+        summary: "DAG hybrid fallback rate > 1/hour"
+        description: "{{ $value }} fallbacks in the last hour. Check DAG ordering health."
+
+    # SLO 2: Ordering must be in sync
+    - alert: DagShadowHashMismatch
+      expr: eezo_dag_shadow_hash_mismatch_total > 0
+      for: 1m
+      labels: { severity: page }
+      annotations:
+        summary: "DAG shadow hash mismatch detected"
+        description: "{{ $value }} mismatches between DAG and canonical ordering. Critical bug."
+
+    - alert: DagShadowOutOfSync
+      expr: eezo_dag_shadow_in_sync == 0
+      for: 5m
+      labels: { severity: warn }
+      annotations:
+        summary: "DAG shadow consensus out of sync"
+        description: "Shadow DAG is not in sync with canonical consensus."
+
+    # SLO 3: Healthy queue depth
+    - alert: DagOrderedQueueBacklog
+      expr: eezo_dag_ordered_ready > 10
+      for: 5m
+      labels: { severity: warn }
+      annotations:
+        summary: "DAG ordered batch queue backing up"
+        description: "{{ $value }} batches pending. Consumer may be slow or stalled."
+
+    # SLO 4: Apply quality ≥99.9%
+    - alert: DagHybridApplyQualityLow
+      expr: |
+        (
+          rate(eezo_dag_hybrid_apply_ok_total[5m]) /
+          (rate(eezo_dag_hybrid_apply_ok_total[5m]) + rate(eezo_dag_hybrid_apply_fail_total[5m]))
+        ) < 0.999
+      for: 10m
+      labels: { severity: warn }
+      annotations:
+        summary: "DAG hybrid apply success rate < 99.9%"
+        description: "Apply success ratio is {{ $value | printf \"%.4f\" }}. Check for bad transactions."
+
+    # SLO 5: Consensus mode should be hybrid (1) during canary
+    - alert: DagHybridModeNotActive
+      expr: eezo_consensus_mode_active != 1
+      for: 5m
+      labels: { severity: warn }
+      annotations:
+        summary: "Node not running in DAG-hybrid mode"
+        description: "Consensus mode is {{ $value }} (expected: 1=hybrid). Check EEZO_CONSENSUS_MODE."
+
+    # Additional: High bad nonce prefilter rate (expected during spam tests)
+    - alert: DagHybridBadNoncePrefilterHigh
+      expr: rate(eezo_dag_hybrid_bad_nonce_prefilter_total[5m]) > 100
+      for: 10m
+      labels: { severity: info }
+      annotations:
+        summary: "High bad nonce prefilter rate"
+        description: "{{ $value }} tx/s filtered due to stale nonce. Normal during multi-sender spam."
+
+    # Additional: Aggregation time budget changes (informational)
+    - alert: DagHybridAggBudgetChanged
+      expr: delta(eezo_hybrid_agg_time_budget_ms[5m]) != 0 and eezo_hybrid_agg_adaptive_enabled == 1
+      for: 1m
+      labels: { severity: info }
+      annotations:
+        summary: "Adaptive aggregation budget changed"
+        description: "Time budget is now {{ $value }}ms. Adaptive mode adjusting to load."

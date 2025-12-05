@@ -1,0 +1,285 @@
+{
+  "title": "EEZO – DAG-Hybrid Canary",
+  "description": "T76.12: DAG-Hybrid 7-Day Canary SLO Dashboard",
+  "tags": ["eezo", "dag", "hybrid", "canary", "slo"],
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Consensus Mode",
+      "description": "0=hotstuff, 1=hybrid, 2=dag",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "targets": [{"expr": "eezo_consensus_mode_active"}],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Hotstuff", "color": "orange" } } },
+            { "type": "value", "options": { "1": { "text": "Hybrid", "color": "green" } } },
+            { "type": "value", "options": { "2": { "text": "DAG", "color": "blue" } } }
+          ]
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Fallbacks (Total)",
+      "description": "SLO: Should be 0",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "targets": [{"expr": "eezo_dag_hybrid_fallback_total"}],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Hash Mismatches",
+      "description": "SLO: Must be 0",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "targets": [{"expr": "eezo_dag_shadow_hash_mismatch_total"}],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Apply Success Rate",
+      "description": "SLO: ≥99.9%",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        {
+          "expr": "rate(eezo_dag_hybrid_apply_ok_total[5m]) / (rate(eezo_dag_hybrid_apply_ok_total[5m]) + rate(eezo_dag_hybrid_apply_fail_total[5m]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.99 },
+              { "color": "green", "value": 0.999 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "TPS (5m avg)",
+      "description": "Transactions per second",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "targets": [{"expr": "rate(eezo_txs_included_total[5m])"}],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "green", "value": 250 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Queue Depth",
+      "description": "SLO: <10",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "targets": [{"expr": "eezo_dag_ordered_ready"}],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "TPS Over Time",
+      "description": "Transaction throughput",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 6 },
+      "targets": [
+        {"expr": "rate(eezo_txs_included_total[1m])", "legendFormat": "TPS (1m)"},
+        {"expr": "rate(eezo_txs_included_total[5m])", "legendFormat": "TPS (5m)"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Apply OK vs Fail",
+      "description": "Transaction apply outcomes",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 6 },
+      "targets": [
+        {"expr": "rate(eezo_dag_hybrid_apply_ok_total[1m])", "legendFormat": "Apply OK/s"},
+        {"expr": "rate(eezo_dag_hybrid_apply_fail_total[1m])", "legendFormat": "Apply Fail/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Hybrid Batches vs Fallbacks",
+      "description": "DAG batch usage and fallback events",
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 6 },
+      "targets": [
+        {"expr": "rate(eezo_dag_hybrid_batches_used_total[1m])", "legendFormat": "Batches Used/s"},
+        {"expr": "rate(eezo_dag_hybrid_fallback_total[1m])", "legendFormat": "Fallbacks/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Ordered Queue Depth",
+      "description": "DAG ordered batches ready for consumption",
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 6 },
+      "targets": [
+        {"expr": "eezo_dag_ordered_ready", "legendFormat": "Queue Depth"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Apply Failure Reasons",
+      "description": "Breakdown of apply failures by reason",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 6 },
+      "targets": [
+        {"expr": "rate(eezo_dag_hybrid_apply_fail_bad_nonce_total[1m])", "legendFormat": "Bad Nonce"},
+        {"expr": "rate(eezo_dag_hybrid_apply_fail_insufficient_funds_total[1m])", "legendFormat": "Insufficient Funds"},
+        {"expr": "rate(eezo_dag_hybrid_apply_fail_invalid_sender_total[1m])", "legendFormat": "Invalid Sender"},
+        {"expr": "rate(eezo_dag_hybrid_apply_fail_other_total[1m])", "legendFormat": "Other"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Dedup & Prefilter",
+      "description": "Transaction filtering before apply",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 6 },
+      "targets": [
+        {"expr": "rate(eezo_dag_hybrid_seen_before_total[1m])", "legendFormat": "Deduped/s"},
+        {"expr": "rate(eezo_dag_hybrid_candidate_total[1m])", "legendFormat": "Candidates/s"},
+        {"expr": "rate(eezo_dag_hybrid_bad_nonce_prefilter_total[1m])", "legendFormat": "Bad Nonce Prefilter/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Aggregation Cap Reasons",
+      "description": "Why aggregation ended",
+      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 6 },
+      "targets": [
+        {"expr": "rate(eezo_hybrid_agg_cap_reason_total{reason=\"time\"}[1m])", "legendFormat": "Time Budget"},
+        {"expr": "rate(eezo_hybrid_agg_cap_reason_total{reason=\"bytes\"}[1m])", "legendFormat": "Bytes Cap"},
+        {"expr": "rate(eezo_hybrid_agg_cap_reason_total{reason=\"tx\"}[1m])", "legendFormat": "TX Cap"},
+        {"expr": "rate(eezo_hybrid_agg_cap_reason_total{reason=\"empty\"}[1m])", "legendFormat": "Empty"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Aggregation Time Budget",
+      "description": "Adaptive aggregation time budget in ms",
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 6 },
+      "targets": [
+        {"expr": "eezo_hybrid_agg_time_budget_ms", "legendFormat": "Time Budget (ms)"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "STM Executor Metrics",
+      "description": "Waves and conflicts per block",
+      "gridPos": { "x": 0, "y": 28, "w": 12, "h": 6 },
+      "targets": [
+        {"expr": "rate(eezo_stm_block_waves_total[1m])", "legendFormat": "Waves/s"},
+        {"expr": "rate(eezo_stm_block_conflicts_total[1m])", "legendFormat": "Conflicts/s"},
+        {"expr": "rate(eezo_stm_block_retries_total[1m])", "legendFormat": "Retries/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Block Height & Mempool",
+      "description": "Chain progress and pending transactions",
+      "gridPos": { "x": 12, "y": 28, "w": 12, "h": 6 },
+      "targets": [
+        {"expr": "eezo_block_height", "legendFormat": "Block Height"},
+        {"expr": "eezo_mempool_len", "legendFormat": "Mempool Len"}
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Exec Lanes",
+      "description": "Configured execution lanes",
+      "gridPos": { "x": 0, "y": 34, "w": 3, "h": 3 },
+      "targets": [{"expr": "eezo_exec_lanes"}]
+    },
+    {
+      "type": "stat",
+      "title": "Wave Cap",
+      "description": "Max tx per wave",
+      "gridPos": { "x": 3, "y": 34, "w": 3, "h": 3 },
+      "targets": [{"expr": "eezo_exec_wave_cap"}]
+    },
+    {
+      "type": "stat",
+      "title": "Shadow In Sync",
+      "description": "1=synced, 0=out of sync",
+      "gridPos": { "x": 6, "y": 34, "w": 3, "h": 3 },
+      "targets": [{"expr": "eezo_dag_shadow_in_sync"}],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Out of Sync", "color": "red" } } },
+            { "type": "value", "options": { "1": { "text": "In Sync", "color": "green" } } }
+          ]
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Shadow Lag",
+      "description": "Blocks behind canonical",
+      "gridPos": { "x": 9, "y": 34, "w": 3, "h": 3 },
+      "targets": [{"expr": "eezo_dag_shadow_lag_blocks"}]
+    },
+    {
+      "type": "stat",
+      "title": "Adaptive Mode",
+      "description": "1=adaptive, 0=fixed",
+      "gridPos": { "x": 12, "y": 34, "w": 3, "h": 3 },
+      "targets": [{"expr": "eezo_hybrid_agg_adaptive_enabled"}],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Fixed", "color": "blue" } } },
+            { "type": "value", "options": { "1": { "text": "Adaptive", "color": "green" } } }
+          ]
+        }
+      }
+    }
+  ],
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  }
+}
