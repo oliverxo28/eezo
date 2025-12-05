@@ -15,7 +15,8 @@ fn qc_hash_attaches_only_on_interval() {
         header_cache_cap: 32,
         #[cfg(feature = "checkpoints")]
         checkpoint_interval: 2,
-    };
+        ..Default::default()
+};
 
     let mut n = SingleNode::new(cfg, sk, pk);
 
@@ -45,7 +46,8 @@ fn qc_hash_zero_when_not_on_interval() {
         header_cache_cap: 32,
         #[cfg(feature = "checkpoints")]
         checkpoint_interval: 3,
-    };
+        ..Default::default()
+};
 
     let mut n = SingleNode::new(cfg, sk, pk);
 
@@ -75,8 +77,9 @@ fn qc_hash_is_part_of_signed_header() {
         block_byte_budget: 1024,
         header_cache_cap: 32,
         #[cfg(feature = "checkpoints")]
-        checkpoint_interval: 2, // ensure height 2 has qc
-    };
+        checkpoint_interval: 2, // ensure height 2 has qc,
+        ..Default::default()
+};
     let mut n = SingleNode::new(cfg, sk.clone(), pk.clone());
 
     // height 1 (no qc), then height 2 (has qc + proposer signature)
@@ -109,7 +112,8 @@ fn qc_hash_chain_bound() {
         header_cache_cap: 32,
         #[cfg(feature = "checkpoints")]
         checkpoint_interval: 2,
-    };
+        ..Default::default()
+};
     let mut n = SingleNode::new(cfg, sk.clone(), pk.clone());
 
     let (_b1, _s1) = n.run_one_slot(false).expect("slot1");
@@ -142,7 +146,8 @@ fn qc_hash_replay_protection() {
         header_cache_cap: 32,
         #[cfg(feature = "checkpoints")]
         checkpoint_interval: 2,
-    };
+        ..Default::default()
+};
     let mut n = SingleNode::new(cfg, sk.clone(), pk.clone());
 
     let (_b1, _s1) = n.run_one_slot(false).expect("slot1");

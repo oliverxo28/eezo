@@ -64,7 +64,7 @@ pub use tx::{
 };
 
 #[cfg(feature = "pq44-runtime")]
-pub use mempool::{admit_signed_tx, AdmissionOk, RejectReason};
+pub use mempool::{admit_signed_tx, AdmissionOk, MempoolTtlConfig, RejectReason};
 
 pub use block::{
     apply_block, assemble_block, encoded_len_ssz, header_domain_bytes, header_hash, validate_block,
