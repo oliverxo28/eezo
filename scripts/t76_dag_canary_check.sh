@@ -139,6 +139,22 @@ echo -e "${BLUE}[Fallbacks]${NC}"
 FALLBACK_TOTAL=$(get_metric "eezo_dag_hybrid_fallback_total" "0")
 FALLBACK_OK=$([[ "$FALLBACK_TOTAL" == "0" ]] && echo "true" || echo "false")
 print_status "eezo_dag_hybrid_fallback_total" "$FALLBACK_TOTAL" "$FALLBACK_OK" "(expected: 0)"
+
+# T76.12: Show labeled fallback reasons
+FALLBACK_MIN_DAG=$(get_labeled_metric 'eezo_dag_hybrid_fallback_reason_total{reason="min_dag_not_met"}' "0")
+FALLBACK_TIMEOUT=$(get_labeled_metric 'eezo_dag_hybrid_fallback_reason_total{reason="timeout"}' "0")
+FALLBACK_EMPTY=$(get_labeled_metric 'eezo_dag_hybrid_fallback_reason_total{reason="empty"}' "0")
+FALLBACK_NO_HANDLE=$(get_labeled_metric 'eezo_dag_hybrid_fallback_reason_total{reason="no_handle"}' "0")
+FALLBACK_QUEUE_EMPTY=$(get_labeled_metric 'eezo_dag_hybrid_fallback_reason_total{reason="queue_empty"}' "0")
+
+if [[ "${FALLBACK_TOTAL%.*}" -gt 0 ]]; then
+  echo -e "  ${YELLOW}Fallback breakdown:${NC}"
+  echo -e "    - min_dag_not_met: $FALLBACK_MIN_DAG"
+  echo -e "    - timeout: $FALLBACK_TIMEOUT"
+  echo -e "    - empty: $FALLBACK_EMPTY"
+  echo -e "    - no_handle: $FALLBACK_NO_HANDLE"
+  echo -e "    - queue_empty: $FALLBACK_QUEUE_EMPTY"
+fi
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
