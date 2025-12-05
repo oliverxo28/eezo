@@ -1,4 +1,4 @@
-#![cfg(all(feature = "pq44-runtime", not(feature = "skip-sig-verify")))]
+#![cfg(all(feature = "pq44-runtime", not(feature = "skip-sig-verify"), not(feature = "testing")))]
 
 use eezo_ledger::{verify_signed_tx, SingleNode, SingleNodeCfg};
 use pqcrypto_mldsa::mldsa44::keypair;

@@ -51,14 +51,14 @@ impl Accounts {
     // "testing" cargo feature (so integration tests can use them).
     // These NEVER ship in production/mainnet builds.
     // ─────────────────────────────────────────────────────────────
-    #[cfg(any(test, feature = "dev-tools"))]
+    #[cfg(any(test, feature = "dev-tools", feature = "testing"))]
     #[inline]
     pub fn credit_unchecked_for_testing(&mut self, who: Address, amount: u128) {
         let a = self.ensure_mut(who);
         a.balance = a.balance.saturating_add(amount);
     }
 
-    #[cfg(any(test, feature = "dev-tools"))]
+    #[cfg(any(test, feature = "dev-tools", feature = "testing"))]
     #[inline]
     pub fn set_nonce_unchecked_for_testing(&mut self, who: Address, nonce: u64) {
         let a = self.ensure_mut(who);
