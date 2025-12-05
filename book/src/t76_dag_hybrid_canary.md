@@ -96,11 +96,21 @@ export EEZO_GENESIS=crates/genesis.min.json
 
 ### Feature Flags
 
-Ensure the node binary is built with the required features:
+Ensure the node binary is built with the required features for DAG-Hybrid mode:
 
 ```bash
-cargo build --release -p eezo-node --features "metrics,pq44-runtime,checkpoints"
+# Full feature set for DAG-Hybrid canary (includes STM executor and DAG consensus)
+cargo build --release -p eezo-node \
+  --features "pq44-runtime,persistence,checkpoints,metrics,stm-exec,dag-consensus"
 ```
+
+**Required features:**
+- `pq44-runtime`: PQ44 transaction runtime support
+- `persistence`: Database persistence for state snapshots
+- `checkpoints`: Checkpoint/bridge header generation
+- `metrics`: Prometheus metrics exposition
+- `stm-exec`: STM (Software Transactional Memory) executor for parallel tx processing
+- `dag-consensus`: DAG consensus layer for hybrid ordering
 
 ### Starting the Node
 
@@ -115,6 +125,32 @@ rm -rf /tmp/eezo-canary
 
 # Start the node
 ./target/release/eezo-node
+```
+
+**Alternative: Run directly with cargo (for development):**
+
+```bash
+cd ~/Block/eezo
+
+# Set all required env vars
+export EEZO_CONSENSUS_MODE=dag-hybrid
+export EEZO_DAG_ORDERING_ENABLED=1
+export EEZO_EXECUTOR_MODE=stm
+export EEZO_EXEC_LANES=32
+export EEZO_EXEC_WAVE_CAP=256
+export EEZO_HYBRID_AGG_MAX_TX=500
+export EEZO_HYBRID_AGG_MAX_BYTES=$((1 * 1024 * 1024))
+export EEZO_FAST_DECODE_ENABLED=1
+export EEZO_BLOCK_MAX_TX=500
+export EEZO_MEMPOOL_MAX_TX=20000
+export EEZO_MEMPOOL_MAX_BYTES=$((256*1024*1024))
+export EEZO_MEMPOOL_RATE_CAP=20000
+export EEZO_MEMPOOL_RATE_PER_MIN=600000
+
+cargo run -p eezo-node --bin eezo-node \
+  --features "pq44-runtime,persistence,checkpoints,metrics,stm-exec,dag-consensus" -- \
+  --genesis genesis.min.json \
+  --datadir /tmp/eezo-dag-canary
 ```
 
 Verify the node is running in DAG-Hybrid mode:
@@ -403,6 +439,36 @@ curl -s http://127.0.0.1:9898/metrics | grep eezo_dag_ordered_ready
 # 3. If persistent, reduce load or increase aggregation budget
 export EEZO_HYBRID_AGG_TIME_BUDGET_MS=200
 ```
+
+### Troubleshooting: Batches Not Being Used
+
+If `eezo_dag_hybrid_batches_used_total` stays at 0 while `eezo_dag_hybrid_fallback_total` increases:
+
+**Symptom:**
+```bash
+curl -s http://127.0.0.1:9898/metrics | rg 'dag_hybrid'
+# eezo_dag_hybrid_fallback_total 2685  # Increasing
+# eezo_dag_hybrid_batches_used_total 0  # Stuck at 0
+```
+
+**Possible causes and fixes:**
+
+1. **Feature flags missing**: Ensure the node is built with `dag-consensus` feature:
+   ```bash
+   cargo build -p eezo-node --features "pq44-runtime,persistence,checkpoints,metrics,stm-exec,dag-consensus"
+   ```
+
+2. **DagRunnerHandle not attached**: Check logs for `"dag: both CoreRunnerHandle and DagRunnerHandle spawned"`. If missing, the DAG runner is not being created.
+
+3. **Mempool empty**: If no transactions are being submitted, there are no pending txs to order. Use the spam script to generate load:
+   ```bash
+   scripts/spam_tps.sh 600 http://127.0.0.1:8080
+   ```
+
+4. **De-dup filtering everything**: If the same transactions are being resubmitted, de-dup will filter them. Check:
+   ```bash
+   curl -s http://127.0.0.1:9898/metrics | grep eezo_dag_hybrid_seen_before_total
+   ```
 
 ### If Hash Mismatches Occur
 
