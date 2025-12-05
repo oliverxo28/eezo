@@ -119,7 +119,7 @@ impl MempoolTtlConfig {
     pub fn new(ttl_secs: u64) -> Self {
         Self { ttl_secs }
     }
-    
+
     /// Check if TTL is enabled (non-zero).
     #[inline]
     pub fn is_enabled(&self) -> bool {
@@ -515,7 +515,8 @@ impl Mempool {
                 .pending
                 .iter()
                 .filter_map(|(nonce, entry)| {
-                    let age = now.duration_since(entry.first_seen);
+                    // Use saturating_duration_since to handle clock drift safely
+                    let age = now.saturating_duration_since(entry.first_seen);
                     if age > ttl_duration {
                         Some(*nonce)
                     } else {
@@ -537,6 +538,9 @@ impl Mempool {
         // Update the atomic counter for metrics
         if expired_count > 0 {
             self.expired_total.fetch_add(expired_count as u64, AtomicOrdering::Relaxed);
+            // T77.SAFE-3: Also increment the Prometheus metric if metrics feature is enabled
+            #[cfg(feature = "metrics")]
+            crate::metrics::inc_mempool_expired(expired_count as u64);
             log::info!(
                 "mempool: purged {} expired tx(s) due to TTL (T77.SAFE-3)",
                 expired_count
