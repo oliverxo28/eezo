@@ -372,6 +372,36 @@ impl Mempool {
             .map(|entry| entry.size_bytes)
             .sum()
     }
+
+    /// Remove committed transactions from the mempool by sender/nonce pairs.
+    ///
+    /// This is used to clean up transactions that were committed via the hybrid
+    /// DAG path, which bypasses the normal drain_for_block mechanism.
+    ///
+    /// Each entry in `committed` is a (sender, nonce) pair.
+    ///
+    /// Returns the number of transactions actually removed.
+    pub fn remove_committed_txs(&mut self, committed: &[(Address, u64)]) -> usize {
+        let mut removed = 0;
+        for &(sender, nonce) in committed {
+            if let Some(q) = self.per_sender.get_mut(&sender) {
+                if q.pending.remove(&nonce).is_some() {
+                    removed += 1;
+                }
+            }
+        }
+        // Clean up empty sender queues.
+        self.per_sender.retain(|_, q| !q.pending.is_empty());
+        
+        if removed > 0 {
+            log::debug!(
+                "mempool: removed {} committed txs (cleanup after hybrid block)",
+                removed
+            );
+        }
+        
+        removed
+    }
 }
 
 /// Stateless → signature → sender → stateful checks.
@@ -428,5 +458,149 @@ pub fn admit_signed_tx(
             Err(RejectReason::InsufficientFunds { have, need })
         }
         Err(TxStateError::InvalidSender) => Err(RejectReason::InvalidSender),
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::address::Address;
+    use crate::cert_store::ValidatedPk;
+
+    /// Stub cert lookup for testing (always returns None).
+    struct StubCertLookup;
+    impl CertLookupT4 for StubCertLookup {
+        fn get_pk(&self, _signer: &[u8; 20], _at_height: u64) -> Option<ValidatedPk> {
+            None
+        }
+    }
+
+    fn test_mempool() -> Mempool {
+        Mempool::new([0u8; 20], Arc::new(StubCertLookup))
+    }
+
+    fn test_tx(sender_byte: u8, nonce: u64) -> (SignedTx, Address) {
+        // Create a test tx with a deterministic sender address
+        let mut pubkey = vec![0u8; 32];
+        pubkey[0] = sender_byte;
+        
+        let mut addr_bytes = [0u8; 20];
+        addr_bytes[0] = sender_byte;
+        let sender = Address(addr_bytes);
+
+        let mut to_bytes = [0u8; 20];
+        to_bytes[0] = 0x01;
+        let tx = SignedTx {
+            core: TxCore {
+                to: Address(to_bytes),
+                amount: 100,
+                fee: 1,
+                nonce,
+            },
+            pubkey,
+            sig: vec![],
+        };
+
+        (tx, sender)
+    }
+
+    #[test]
+    fn test_remove_committed_txs_basic() {
+        let mut mp = test_mempool();
+        
+        // Enqueue some txs from sender A
+        let (tx1, sender_a) = test_tx(0xAA, 0);
+        let (tx2, _) = test_tx(0xAA, 1);
+        let (tx3, _) = test_tx(0xAA, 2);
+        
+        // Manually insert into per_sender map (bypassing admission checks)
+        let q = mp.per_sender.entry(sender_a).or_default();
+        q.pending.insert(0, MempoolEntry { tx: tx1, size_bytes: 100 });
+        q.pending.insert(1, MempoolEntry { tx: tx2, size_bytes: 100 });
+        q.pending.insert(2, MempoolEntry { tx: tx3, size_bytes: 100 });
+        
+        assert_eq!(mp.len(), 3);
+        
+        // Remove nonces 0 and 1
+        let committed = vec![(sender_a, 0), (sender_a, 1)];
+        let removed = mp.remove_committed_txs(&committed);
+        
+        assert_eq!(removed, 2);
+        assert_eq!(mp.len(), 1);
+        
+        // Verify nonce 2 is still there
+        assert!(mp.per_sender.get(&sender_a).is_some());
+        assert!(mp.per_sender.get(&sender_a).unwrap().pending.contains_key(&2));
+    }
+
+    #[test]
+    fn test_remove_committed_txs_multiple_senders() {
+        let mut mp = test_mempool();
+        
+        let (tx_a0, sender_a) = test_tx(0xAA, 0);
+        let (tx_a1, _) = test_tx(0xAA, 1);
+        let (tx_b0, sender_b) = test_tx(0xBB, 0);
+        
+        // Insert txs from two senders
+        let q_a = mp.per_sender.entry(sender_a).or_default();
+        q_a.pending.insert(0, MempoolEntry { tx: tx_a0, size_bytes: 100 });
+        q_a.pending.insert(1, MempoolEntry { tx: tx_a1, size_bytes: 100 });
+        
+        let q_b = mp.per_sender.entry(sender_b).or_default();
+        q_b.pending.insert(0, MempoolEntry { tx: tx_b0, size_bytes: 100 });
+        
+        assert_eq!(mp.len(), 3);
+        
+        // Remove one from each sender
+        let committed = vec![(sender_a, 0), (sender_b, 0)];
+        let removed = mp.remove_committed_txs(&committed);
+        
+        assert_eq!(removed, 2);
+        assert_eq!(mp.len(), 1);
+        
+        // Sender A still has nonce 1
+        assert!(mp.per_sender.get(&sender_a).is_some());
+        // Sender B queue should be cleaned up (empty)
+        assert!(mp.per_sender.get(&sender_b).is_none());
+    }
+
+    #[test]
+    fn test_remove_committed_txs_nonexistent() {
+        let mut mp = test_mempool();
+        
+        let (tx, sender) = test_tx(0xAA, 5);
+        let q = mp.per_sender.entry(sender).or_default();
+        q.pending.insert(5, MempoolEntry { tx, size_bytes: 100 });
+        
+        assert_eq!(mp.len(), 1);
+        
+        // Try to remove nonexistent nonces
+        let committed = vec![
+            (sender, 0),  // doesn't exist
+            (sender, 10), // doesn't exist
+            (Address([0xCC; 20]), 0), // sender doesn't exist
+        ];
+        let removed = mp.remove_committed_txs(&committed);
+        
+        assert_eq!(removed, 0);
+        assert_eq!(mp.len(), 1); // Nothing was removed
+    }
+
+    #[test]
+    fn test_remove_committed_txs_empty() {
+        let mut mp = test_mempool();
+        
+        // Empty committed list
+        let removed = mp.remove_committed_txs(&[]);
+        assert_eq!(removed, 0);
+        
+        // Empty mempool
+        let (_, sender) = test_tx(0xAA, 0);
+        let removed = mp.remove_committed_txs(&[(sender, 0)]);
+        assert_eq!(removed, 0);
     }
 }

@@ -1754,6 +1754,31 @@ impl CoreRunnerHandle {
                                     guard.last_header = Some(blk.header.clone());
                                     guard.last_txs = Some(blk.txs.clone());
 
+                                    // T76.13: Clean up ledger mempool after hybrid block commit.
+                                    // When hybrid mode is used, txs are sourced from the SharedMempool
+                                    // via DAG ordering, not from the ledger mempool's drain_for_block.
+                                    // If we don't clean up, the ledger mempool accumulates "zombie" txs
+                                    // that have already been committed. These zombies cause liveness
+                                    // issues when the fallback path drains them with stale nonces.
+                                    #[cfg(feature = "dag-consensus")]
+                                    if hybrid_batch_used && !blk.txs.is_empty() {
+                                        let committed_pairs: Vec<(eezo_ledger::Address, u64)> = blk.txs.iter()
+                                            .filter_map(|tx| {
+                                                eezo_ledger::sender_from_pubkey_first20(tx)
+                                                    .map(|sender| (sender, tx.core.nonce))
+                                            })
+                                            .collect();
+                                        if !committed_pairs.is_empty() {
+                                            let removed = guard.mempool.remove_committed_txs(&committed_pairs);
+                                            if removed > 0 {
+                                                log::debug!(
+                                                    "hybrid: cleaned up {} txs from ledger mempool after commit at height={}",
+                                                    removed, blk.header.height
+                                                );
+                                            }
+                                        }
+                                    }
+
                                     Ok(SlotOutcome::Committed { height: blk.header.height })
                                 }
                                 Err(e) => {
