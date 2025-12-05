@@ -3466,4 +3466,64 @@ mod executor_mode_tests {
         std::env::remove_var("EEZO_CONSENSUS_MODE");
         std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
     }
+
+    // -------------------------------------------------------------------------
+    // T77.SAFE-1: HybridBatchStats Tests
+    // -------------------------------------------------------------------------
+
+    /// T77.SAFE-1: Test that HybridBatchStats produces the expected log format.
+    #[cfg(feature = "dag-consensus")]
+    #[test]
+    fn t77_hybrid_batch_stats_log_format() {
+        use super::HybridBatchStats;
+
+        let stats = HybridBatchStats {
+            n: 100,
+            filtered_seen: 20,
+            candidate: 80,
+            used: 75,
+            bad_nonce_pref: 3,
+            missing: 1,
+            decode_err: 1,
+            size_bytes: 9000,
+            agg_batches: 2,
+            agg_candidates: 85,
+        };
+
+        let log_str = stats.to_log_string(70, 5);
+
+        // Verify the log string contains all expected fields
+        assert!(log_str.contains("n=100"), "Missing n=100");
+        assert!(log_str.contains("filtered_seen=20"), "Missing filtered_seen=20");
+        assert!(log_str.contains("candidate=80"), "Missing candidate=80");
+        assert!(log_str.contains("used=75"), "Missing used=75");
+        assert!(log_str.contains("bad_nonce_pref=3"), "Missing bad_nonce_pref=3");
+        assert!(log_str.contains("missing=1"), "Missing missing=1");
+        assert!(log_str.contains("decode_err=1"), "Missing decode_err=1");
+        assert!(log_str.contains("apply_ok=70"), "Missing apply_ok=70");
+        assert!(log_str.contains("apply_fail=5"), "Missing apply_fail=5");
+        assert!(log_str.contains("size_bytes=9000"), "Missing size_bytes=9000");
+        assert!(log_str.contains("agg_batches=2"), "Missing agg_batches=2");
+        assert!(log_str.contains("agg_candidates=85"), "Missing agg_candidates=85");
+    }
+
+    /// T77.SAFE-1: Test HybridBatchStats default values.
+    #[cfg(feature = "dag-consensus")]
+    #[test]
+    fn t77_hybrid_batch_stats_default() {
+        use super::HybridBatchStats;
+
+        let stats = HybridBatchStats::default();
+
+        assert_eq!(stats.n, 0);
+        assert_eq!(stats.filtered_seen, 0);
+        assert_eq!(stats.candidate, 0);
+        assert_eq!(stats.used, 0);
+        assert_eq!(stats.bad_nonce_pref, 0);
+        assert_eq!(stats.missing, 0);
+        assert_eq!(stats.decode_err, 0);
+        assert_eq!(stats.size_bytes, 0);
+        assert_eq!(stats.agg_batches, 0);
+        assert_eq!(stats.agg_candidates, 0);
+    }
 }
