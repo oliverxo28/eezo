@@ -802,6 +802,72 @@ impl HybridDagHandle {
         self.handle.peek_ordered_queue_len()
     }
 
+    /// T76.12: Submit pending mempool transactions to create an ordered batch.
+    ///
+    /// This should be called at the START of each consensus tick (before consuming
+    /// batches) to feed the DAG with pending transactions. The DAG will then order
+    /// these transactions, and they can be consumed for block building.
+    ///
+    /// Unlike `submit_committed_block_async`, which feeds already-committed data
+    /// (useful for shadow mode comparison), this method feeds pending tx hashes
+    /// that are candidates for the NEXT block.
+    ///
+    /// Parameters:
+    /// - `tx_hashes`: Pending transaction hashes from the mempool (in priority order)
+    /// - `round_hint`: Optional round number for the payload (defaults to current round)
+    ///
+    /// Returns:
+    /// - `Ok(count)`: Number of tx hashes submitted to the DAG
+    /// - `Err(msg)`: If submission failed
+    pub fn submit_pending_txs(&self, tx_hashes: &[[u8; 32]], round_hint: Option<u64>) -> Result<usize, String> {
+        if tx_hashes.is_empty() {
+            log::debug!("dag-hybrid: no pending txs to submit");
+            return Ok(0);
+        }
+
+        // Build payload from pending tx hashes.
+        // Format: 8 bytes (round as height placeholder) + 32 bytes (zero block hash) + N*32 bytes (tx hashes)
+        // The zero block_hash distinguishes pending tx payloads from committed block payloads,
+        // which have the actual block hash. Both use the same DAG wire format.
+        let round = round_hint.unwrap_or_else(|| self.handle.current_round());
+        let block_hash = [0u8; 32]; // Zero hash indicates pending txs (vs committed block hash)
+        
+        let mut data = Vec::with_capacity(8 + 32 + tx_hashes.len() * 32);
+        data.extend_from_slice(&round.to_le_bytes());
+        data.extend_from_slice(&block_hash);
+        for hash in tx_hashes {
+            data.extend_from_slice(hash);
+        }
+
+        let payload = consensus_dag::DagPayload::new(data, self.author);
+
+        // Submit to DAG handle
+        match self.handle.submit_payload(payload) {
+            Ok(_vertex_id) => {
+                log::debug!(
+                    "dag-hybrid: pending txs payload submitted (round={}, txs={})",
+                    round,
+                    tx_hashes.len()
+                );
+                
+                // Advance round after each payload submission.
+                // Each DAG vertex needs a unique round number for proper ordering.
+                // This ensures the next submission uses a fresh round.
+                self.handle.advance_round();
+                
+                Ok(tx_hashes.len())
+            }
+            Err(e) => {
+                log::warn!(
+                    "dag-hybrid: pending txs payload submit failed (round={}): {}",
+                    round,
+                    e
+                );
+                Err(format!("payload submit failed: {}", e))
+            }
+        }
+    }
+
     /// Convert a ShadowBlockSummary into a DagPayload.
     fn summary_to_payload(&self, summary: &ShadowBlockSummary) -> consensus_dag::DagPayload {
         let mut data = Vec::with_capacity(8 + 32 + summary.tx_hashes.len() * 32);
@@ -1456,6 +1522,91 @@ mod tests {
         assert!(handle.try_next_ordered_batch().is_none());
         
         // This tests the "fallback (reason=no_batch)" path
+    }
+
+    // =========================================================================
+    // T76.12: Tests for submit_pending_txs (pending mempool tx submission)
+    // =========================================================================
+
+    /// T76.12: Test that submit_pending_txs creates ordered batches from pending tx hashes.
+    #[test]
+    fn test_hybrid_dag_handle_submit_pending_txs_creates_batches() {
+        let handle = HybridDagHandle::new();
+        
+        // Initially no batches
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+        
+        // Submit pending tx hashes
+        let pending_hashes = vec![
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+        ];
+        
+        let result = handle.submit_pending_txs(&pending_hashes, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 3);
+        
+        // Should have 1 batch ready now (threshold=1 by default)
+        assert_eq!(handle.peek_ordered_queue_len(), 1);
+        
+        // Consume the batch
+        let batch = handle.try_next_ordered_batch();
+        assert!(batch.is_some());
+        
+        let batch = batch.unwrap();
+        assert!(!batch.is_empty());
+        
+        // After consuming, queue should be empty
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+    }
+
+    /// T76.12: Test that submit_pending_txs with empty hashes returns Ok(0).
+    #[test]
+    fn test_hybrid_dag_handle_submit_pending_txs_empty() {
+        let handle = HybridDagHandle::new();
+        
+        let result = handle.submit_pending_txs(&[], None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        
+        // Should still have no batches
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+    }
+
+    /// T76.12: Test that submit_pending_txs advances the round after each submission.
+    #[test]
+    fn test_hybrid_dag_handle_submit_pending_txs_advances_round() {
+        let handle = HybridDagHandle::new();
+        
+        let initial_round = handle.current_round();
+        
+        // Submit pending txs
+        let pending_hashes = vec![[1u8; 32], [2u8; 32]];
+        let _ = handle.submit_pending_txs(&pending_hashes, None);
+        
+        // Round should have advanced
+        let new_round = handle.current_round();
+        assert_eq!(new_round, initial_round + 1);
+        
+        // Submit again
+        let _ = handle.submit_pending_txs(&[[3u8; 32]], None);
+        assert_eq!(handle.current_round(), initial_round + 2);
+    }
+
+    /// T76.12: Test that submit_pending_txs respects round_hint parameter.
+    #[test]
+    fn test_hybrid_dag_handle_submit_pending_txs_with_round_hint() {
+        let handle = HybridDagHandle::new();
+        
+        // Submit with explicit round hint
+        let pending_hashes = vec![[1u8; 32]];
+        let result = handle.submit_pending_txs(&pending_hashes, Some(100));
+        assert!(result.is_ok());
+        
+        // Should still advance round after submission
+        // The round hint affects the payload, not the internal round counter
+        assert!(handle.current_round() >= 2);
     }
 
     // =========================================================================
