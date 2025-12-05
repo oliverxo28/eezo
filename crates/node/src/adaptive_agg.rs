@@ -45,6 +45,9 @@ pub const DEFAULT_MAX_BYTES: usize = 1_048_576;
 
 /// T76.12: Default minimum DAG-ordered transactions before fallback.
 /// When >0, the proposer waits for this many txs from DAG batches before falling back.
+/// Default of 1 preserves backward-compatible behavior (any DAG tx counts as success).
+/// For canaries, use higher values (e.g., 50) to ensure meaningful DAG usage.
+/// Set to 0 to disable the min threshold entirely.
 pub const DEFAULT_MIN_DAG_TX: usize = 1;
 
 /// T76.12: Default batch timeout in milliseconds.

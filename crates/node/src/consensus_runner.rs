@@ -1349,15 +1349,20 @@ impl CoreRunnerHandle {
                         let wait_timeout = std::time::Duration::from_millis(batch_timeout_ms);
                         let mut waited_for_batches = false;
                         
-                        // If we need to wait for DAG batches (min_dag_tx > 0, timeout > 0)
-                        // and no batches are immediately available, wait with polling
-                        if min_dag_tx > 0 && batch_timeout_ms > 0 && hybrid_handle.peek_ordered_queue_len() == 0 {
+                        // T76.12: Should we wait for DAG batches before proceeding?
+                        // Wait is only enabled if both min_dag_tx and batch_timeout_ms are > 0.
+                        let should_wait_for_batches = min_dag_tx > 0 && batch_timeout_ms > 0;
+                        
+                        // If we need to wait for DAG batches and no batches are immediately available
+                        if should_wait_for_batches && hybrid_handle.peek_ordered_queue_len() == 0 {
                             log::debug!(
                                 "hybrid: waiting for DAG batches (min_dag_tx={}, timeout_ms={})",
                                 min_dag_tx, batch_timeout_ms
                             );
                             
-                            // Poll loop: wait until timeout or batches arrive
+                            // Poll loop: wait until timeout or batches arrive.
+                            // Uses 1ms polling interval which is appropriate for 10-20ms timeouts.
+                            // This is a short-lived loop (max batch_timeout_ms iterations).
                             loop {
                                 if hybrid_handle.peek_ordered_queue_len() > 0 {
                                     // Batches arrived
@@ -1372,7 +1377,8 @@ impl CoreRunnerHandle {
                                     break;
                                 }
                                 
-                                // Sleep for 1ms between polls (avoid busy-wait)
+                                // Sleep for 1ms between polls (avoid busy-wait).
+                                // 1ms granularity is appropriate for typical 10-20ms timeouts.
                                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                             }
                         }
@@ -1453,12 +1459,12 @@ impl CoreRunnerHandle {
                             }
                         } else {
                             // No batches ready after potential wait - fallback
-                            if waited_for_batches || batch_timeout_ms > 0 {
-                                // We waited but nothing came - timeout fallback
+                            if should_wait_for_batches {
+                                // We were configured to wait but nothing came - timeout fallback
                                 log::debug!("hybrid: fallback (reason=timeout, waited {:?})", wait_start.elapsed());
                                 crate::metrics::dag_hybrid_fallback_reason_inc("timeout");
                             } else {
-                                // No wait requested and no batches - queue empty
+                                // No wait configured and no batches - queue empty
                                 log::debug!("hybrid: fallback (reason=queue_empty)");
                                 crate::metrics::dag_hybrid_fallback_reason_inc("queue_empty");
                             }
