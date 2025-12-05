@@ -2223,6 +2223,7 @@ pub static EEZO_DAG_HYBRID_BATCHES_USED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 /// Counter: Hybrid mode fallbacks to mempool/legacy tx source.
+/// DEPRECATED: Use EEZO_DAG_HYBRID_FALLBACK_REASON_TOTAL with labels instead.
 #[cfg(feature = "metrics")]
 pub static EEZO_DAG_HYBRID_FALLBACK_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -2230,6 +2231,23 @@ pub static EEZO_DAG_HYBRID_FALLBACK_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
         "Hybrid mode fallbacks to mempool/legacy tx source"
     )
     .unwrap()
+});
+
+/// T76.12: Counter with labels for fallback reasons.
+/// Labels:
+/// - reason="min_dag_not_met" — min DAG threshold not met
+/// - reason="timeout" — waited for DAG, hit timeout
+/// - reason="empty" — DAG batch came back empty after de-dup or prefilter
+/// - reason="no_handle" — no hybrid handle attached
+/// - reason="queue_empty" — no batches in queue when checked
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_FALLBACK_REASON_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "eezo_dag_hybrid_fallback_reason_total",
+        "Hybrid mode fallbacks to mempool (labeled by reason)",
+        &["reason"]
+    )
+    .expect("metric registered")
 });
 
 /// Helper: Increment hybrid batches used counter.
@@ -2241,12 +2259,30 @@ pub fn dag_hybrid_batches_used_inc() {
     }
 }
 
-/// Helper: Increment hybrid fallback counter.
+/// Helper: Increment hybrid fallback counter (legacy unlabeled).
 #[inline]
 pub fn dag_hybrid_fallback_inc() {
     #[cfg(feature = "metrics")]
     {
         EEZO_DAG_HYBRID_FALLBACK_TOTAL.inc();
+    }
+}
+
+/// T76.12: Increment hybrid fallback counter with a specific reason label.
+/// Valid reasons: "min_dag_not_met", "timeout", "empty", "no_handle", "queue_empty"
+#[inline]
+pub fn dag_hybrid_fallback_reason_inc(reason: &str) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_FALLBACK_REASON_TOTAL
+            .with_label_values(&[reason])
+            .inc();
+        // Also increment the legacy unlabeled counter for backward compatibility
+        EEZO_DAG_HYBRID_FALLBACK_TOTAL.inc();
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = reason;
     }
 }
 
@@ -2257,6 +2293,8 @@ pub fn register_dag_hybrid_metrics() {
     let _ = &*EEZO_CONSENSUS_MODE_ACTIVE;
     let _ = &*EEZO_DAG_HYBRID_BATCHES_USED_TOTAL;
     let _ = &*EEZO_DAG_HYBRID_FALLBACK_TOTAL;
+    // T76.12: Register labeled fallback counter
+    let _ = &*EEZO_DAG_HYBRID_FALLBACK_REASON_TOTAL;
     // T76.3: Also register the bytes-level metrics
     register_dag_hybrid_bytes_metrics();
     // T76.4: Also register the apply-level metrics

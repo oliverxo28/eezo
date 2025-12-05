@@ -43,6 +43,18 @@ pub const DEFAULT_MAX_TX: usize = 500;
 /// Default maximum bytes per block (1 MB).
 pub const DEFAULT_MAX_BYTES: usize = 1_048_576;
 
+/// T76.12: Default minimum DAG-ordered transactions before fallback.
+/// When >0, the proposer waits for this many txs from DAG batches before falling back.
+/// Default of 1 preserves backward-compatible behavior (any DAG tx counts as success).
+/// For canaries, use higher values (e.g., 50) to ensure meaningful DAG usage.
+/// Set to 0 to disable the min threshold entirely.
+pub const DEFAULT_MIN_DAG_TX: usize = 1;
+
+/// T76.12: Default batch timeout in milliseconds.
+/// How long to wait for DAG-ordered batches before fallback.
+/// 0 means "no wait" (current behavior), 10 is a good default for production.
+pub const DEFAULT_BATCH_TIMEOUT_MS: u64 = 10;
+
 /// Size of the rolling window for executor latency samples.
 const LATENCY_WINDOW_SIZE: usize = 100;
 
@@ -179,6 +191,15 @@ pub struct AdaptiveAggConfig {
     
     /// Rolling latency tracker for executor metrics.
     latency_tracker: LatencyTracker,
+    
+    /// T76.12: Minimum DAG-ordered transactions before fallback.
+    /// When >0, the proposer waits for this many txs from DAG batches before falling back.
+    min_dag_tx: usize,
+    
+    /// T76.12: Batch timeout in milliseconds.
+    /// How long to wait for DAG-ordered batches before fallback.
+    /// 0 means "no wait" (current behavior).
+    batch_timeout_ms: u64,
 }
 
 impl AdaptiveAggConfig {
@@ -188,6 +209,8 @@ impl AdaptiveAggConfig {
     /// - `EEZO_HYBRID_AGG_TIME_BUDGET_MS`: If set, use fixed budget, disable adaptive.
     /// - `EEZO_HYBRID_AGG_MAX_TX`: Max transactions per block (default: 500).
     /// - `EEZO_HYBRID_AGG_MAX_BYTES`: Max bytes per block (default: 1MB).
+    /// - `EEZO_HYBRID_MIN_DAG_TX`: Min DAG txs before fallback (default: 1).
+    /// - `EEZO_HYBRID_BATCH_TIMEOUT_MS`: Timeout before fallback (default: 10ms).
     pub fn from_env() -> Self {
         // Check if fixed budget is set
         let fixed_budget_env = std::env::var("EEZO_HYBRID_AGG_TIME_BUDGET_MS")
@@ -231,9 +254,21 @@ impl AdaptiveAggConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_BLOCK_INTERVAL_MS);
         
+        // T76.12: Parse min DAG tx threshold
+        let min_dag_tx = std::env::var("EEZO_HYBRID_MIN_DAG_TX")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MIN_DAG_TX);
+        
+        // T76.12: Parse batch timeout
+        let batch_timeout_ms = std::env::var("EEZO_HYBRID_BATCH_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_BATCH_TIMEOUT_MS);
+        
         log::info!(
-            "adaptive-agg: max_tx={}, max_bytes={}, block_interval_ms={}",
-            max_tx, max_bytes, block_interval_ms
+            "adaptive-agg: max_tx={}, max_bytes={}, block_interval_ms={}, min_dag_tx={}, batch_timeout_ms={}",
+            max_tx, max_bytes, block_interval_ms, min_dag_tx, batch_timeout_ms
         );
         
         Self {
@@ -243,6 +278,8 @@ impl AdaptiveAggConfig {
             max_bytes,
             block_interval_ms,
             latency_tracker: LatencyTracker::new(),
+            min_dag_tx,
+            batch_timeout_ms,
         }
     }
     
@@ -259,6 +296,16 @@ impl AdaptiveAggConfig {
     /// Get the maximum bytes per block.
     pub fn max_bytes(&self) -> usize {
         self.max_bytes
+    }
+    
+    /// T76.12: Get the minimum DAG-ordered transactions before fallback.
+    pub fn min_dag_tx(&self) -> usize {
+        self.min_dag_tx
+    }
+    
+    /// T76.12: Get the batch timeout in milliseconds.
+    pub fn batch_timeout_ms(&self) -> u64 {
+        self.batch_timeout_ms
     }
     
     /// Record an executor latency sample (in seconds).
@@ -366,6 +413,18 @@ pub fn max_tx() -> usize {
 #[inline]
 pub fn max_bytes() -> usize {
     ADAPTIVE_AGG_CONFIG.max_bytes()
+}
+
+/// T76.12: Get the min_dag_tx from the global config.
+#[inline]
+pub fn min_dag_tx() -> usize {
+    ADAPTIVE_AGG_CONFIG.min_dag_tx()
+}
+
+/// T76.12: Get the batch_timeout_ms from the global config.
+#[inline]
+pub fn batch_timeout_ms() -> u64 {
+    ADAPTIVE_AGG_CONFIG.batch_timeout_ms()
 }
 
 // -----------------------------------------------------------------------------
@@ -495,5 +554,8 @@ mod tests {
         assert!((BASELINE_MS - 3.0).abs() < f64::EPSILON);
         assert_eq!(DEFAULT_MAX_TX, 500);
         assert_eq!(DEFAULT_MAX_BYTES, 1_048_576);
+        // T76.12: Check new defaults
+        assert_eq!(DEFAULT_MIN_DAG_TX, 1);
+        assert_eq!(DEFAULT_BATCH_TIMEOUT_MS, 10);
     }
 }
