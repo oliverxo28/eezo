@@ -2441,9 +2441,14 @@ mod tests {
         let summary_lower = ShadowBlockSummary::new(3, [3u8; 32], vec![]);
         tracker.record_canonical_block(&summary_lower);
 
-        // Tracker should handle this gracefully (may update entry or keep existing)
+        // Tracker should handle this gracefully. In production, the canonical chain
+        // is strictly monotonic, but the tracker updates last_canonical_height on 
+        // every record. This test verifies the tracker doesn't panic on out-of-order data.
         let status2 = tracker.current_status();
-        assert!(status2.last_height >= 0, "Tracker should handle out-of-order gracefully");
+        // The tracker updates last_height to the most recently recorded height,
+        // so after recording height 3, it should reflect that change.
+        assert!(status2.last_height == 3 || status2.last_height == 7, 
+            "Tracker should either update to latest recorded (3) or keep highest (7)");
     }
 
     /// T77.SAFE-1: Test that double-committing the same height updates the entry without crash.
@@ -2489,6 +2494,15 @@ mod tests {
         }
 
         /// Check that nonces are strictly increasing with no gaps or duplicates.
+        ///
+        /// This invariant check is intentionally strict: committed transactions from
+        /// the same sender MUST have consecutive nonces in block order. While the
+        /// mempool may accept future nonces (for burst submissions), by the time
+        /// transactions are committed to a block, the nonce sequence must be gapless.
+        /// 
+        /// This verifies the "sender nonce chain" invariant from T77.SAFE-1.2:
+        /// "for each sender, nonces in committed blocks are strictly increasing
+        /// with no gaps or duplicates."
         fn verify_invariant(&self) -> Result<(), String> {
             for (sender, nonces) in &self.sender_nonces {
                 if nonces.is_empty() {
