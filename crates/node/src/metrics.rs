@@ -3156,3 +3156,46 @@ pub fn register_t76_adaptive_agg_metrics() {
 pub fn register_t76_adaptive_agg_metrics() {
     // No metrics to register when the feature is off.
 }
+
+// -----------------------------------------------------------------------------
+// T77.1 — DAG Ordering Latency Histogram
+// -----------------------------------------------------------------------------
+
+/// Histogram: Time from submit_pending_txs() to batch consumption in hybrid aggregation.
+/// This measures the DAG ordering latency in seconds.
+/// Buckets are chosen for millisecond-scale latency up to a few hundred ms.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_ORDERING_LATENCY_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_dag_ordering_latency_seconds",
+        "Time from pending tx submission to batch readiness in hybrid mode (seconds)",
+        vec![0.001, 0.005, 0.010, 0.020, 0.030, 0.050, 0.100, 0.200, 0.500, 1.0]
+    )
+    .unwrap()
+});
+
+/// Helper: Observe DAG ordering latency (seconds).
+/// Called when a batch is successfully consumed from the DAG ordering queue.
+#[inline]
+pub fn observe_dag_ordering_latency_seconds(seconds: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_ORDERING_LATENCY_SECONDS.observe(seconds);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = seconds;
+    }
+}
+
+/// Eagerly register T77.1 DAG ordering latency metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t77_dag_ordering_latency_metrics() {
+    let _ = &*EEZO_DAG_ORDERING_LATENCY_SECONDS;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t77_dag_ordering_latency_metrics() {
+    // No metrics to register when the feature is off.
+}

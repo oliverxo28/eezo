@@ -460,11 +460,11 @@ impl DagConsensusShadowRunner {
             // In shadow mode, we only observe the queue size, we don't consume batches.
             // Consumption is done by CoreRunner in hybrid mode.
             let queue_len = self.handle.peek_ordered_queue_len();
-            
+
             // Update the "ready" gauge with current queue length
             #[cfg(feature = "metrics")]
             crate::metrics::dag_ordered_ready_set(queue_len as u64);
-            
+
             if queue_len > 0 {
                 log::debug!(
                     "dag-consensus: shadow mode, {} batch(es) ready in queue (not consuming)",
@@ -480,14 +480,14 @@ impl DagConsensusShadowRunner {
                 // Use the canonical tx hashes we just submitted
                 let dag_tx_hashes = summary.tx_hashes.clone();
                 let round = self.handle.current_round();
-                
+
                 let is_mismatch = tracker.record_dag_ordered(round, dag_tx_hashes);
-                
+
                 // T75.2: Increment mismatch counter if detected
                 if is_mismatch {
                     #[cfg(feature = "metrics")]
                     crate::metrics::dag_shadow_hash_mismatch_inc();
-                    
+
                     log::warn!(
                         "dag-consensus: hash mismatch detected at height/round={}",
                         round
@@ -502,13 +502,13 @@ impl DagConsensusShadowRunner {
             {
                 let tracker = self.tracker.read().await;
                 let status = tracker.current_status();
-                
+
                 #[cfg(feature = "metrics")]
                 {
                     crate::metrics::dag_shadow_sync_set(status.in_sync);
                     crate::metrics::dag_shadow_lag_set(status.lagging_by);
                 }
-                
+
                 let _ = status; // silence unused warning when metrics disabled
             }
 
@@ -625,6 +625,9 @@ pub fn spawn_shadow_dag_if_enabled() -> Option<ShadowDagHandle> {
             register_dag_metrics();
             #[cfg(feature = "metrics")]
             crate::metrics::register_dag_shadow_metrics();
+            // T77.1: Register DAG ordering latency metrics
+            #[cfg(feature = "metrics")]
+            crate::metrics::register_t77_dag_ordering_latency_metrics();
 
             // Create runner with default config
             let config = DagConsensusConfig::default();
@@ -831,7 +834,7 @@ impl HybridDagHandle {
         // which have the actual block hash. Both use the same DAG wire format.
         let round = round_hint.unwrap_or_else(|| self.handle.current_round());
         let block_hash = [0u8; 32]; // Zero hash indicates pending txs (vs committed block hash)
-        
+
         let mut data = Vec::with_capacity(8 + 32 + tx_hashes.len() * 32);
         data.extend_from_slice(&round.to_le_bytes());
         data.extend_from_slice(&block_hash);
@@ -849,12 +852,12 @@ impl HybridDagHandle {
                     round,
                     tx_hashes.len()
                 );
-                
+
                 // Advance round after each payload submission.
                 // Each DAG vertex needs a unique round number for proper ordering.
                 // This ensures the next submission uses a fresh round.
                 self.handle.advance_round();
-                
+
                 Ok(tx_hashes.len())
             }
             Err(e) => {
@@ -910,10 +913,10 @@ fn parse_dedup_lru_size() -> usize {
 }
 
 /// T76.5: LRU cache for recently committed canonical tx hashes.
-/// 
+///
 /// Used by the hybrid proposer to filter out transactions that have already
 /// been committed, avoiding "bad_nonce" storms from duplicate submissions.
-/// 
+///
 /// Key properties:
 /// - Uses canonical `SignedTx.hash()`, not raw envelope hash
 /// - Bounded size (default 100k, configurable via `EEZO_HYBRID_DEDUP_LRU`)
@@ -953,13 +956,13 @@ impl HybridDedupCache {
     }
 
     /// Record that a transaction hash was committed at the given height.
-    /// 
+    ///
     /// This is called after block commit to populate the de-dup cache.
     /// Uses canonical `SignedTx.hash()` as the key.
     pub fn record_committed(&self, tx_hash: [u8; 32], height: u64) {
         let mut cache = self.cache.write();
         cache.put(tx_hash, height);
-        
+
         // Update metrics
         #[cfg(feature = "metrics")]
         crate::metrics::dag_hybrid_dedup_lru_size_set(cache.len() as u64);
@@ -971,12 +974,12 @@ impl HybridDedupCache {
         if tx_hashes.is_empty() {
             return;
         }
-        
+
         let mut cache = self.cache.write();
         for hash in tx_hashes {
             cache.put(*hash, height);
         }
-        
+
         // Update metrics
         #[cfg(feature = "metrics")]
         crate::metrics::dag_hybrid_dedup_lru_size_set(cache.len() as u64);
@@ -989,18 +992,18 @@ impl HybridDedupCache {
     }
 
     /// Filter a list of tx hashes, returning only those not in the de-dup cache.
-    /// 
+    ///
     /// Returns `(filtered_hashes, seen_count)`:
     /// - `filtered_hashes`: hashes that are NOT in the cache (candidates)
     /// - `seen_count`: number of hashes that WERE in the cache (filtered out)
-    /// 
+    ///
     /// This is the main entry point for de-dup filtering before batch execution.
     pub fn filter_batch(&self, tx_hashes: &[[u8; 32]]) -> (Vec<[u8; 32]>, usize) {
         let cache = self.cache.read();
-        
+
         let mut filtered = Vec::with_capacity(tx_hashes.len());
         let mut seen_count = 0;
-        
+
         for hash in tx_hashes {
             if cache.contains(hash) {
                 seen_count += 1;
@@ -1008,7 +1011,7 @@ impl HybridDedupCache {
                 filtered.push(*hash);
             }
         }
-        
+
         (filtered, seen_count)
     }
 
@@ -1028,10 +1031,10 @@ impl HybridDedupCache {
     }
 
     /// Perform GC synchronized with commit height.
-    /// 
+    ///
     /// Entries older than `gc_depth` rounds behind the current height are eligible
     /// for eviction (handled automatically by LRU eviction policy).
-    /// 
+    ///
     /// This method is called periodically to ensure consistent GC behavior.
     pub fn gc(&self, current_height: u64, _gc_depth: u64) {
         // LRU cache handles eviction automatically when capacity is reached.
@@ -1044,13 +1047,13 @@ impl HybridDedupCache {
     pub fn clear(&self) {
         let mut cache = self.cache.write();
         cache.clear();
-        
+
         #[cfg(feature = "metrics")]
         crate::metrics::dag_hybrid_dedup_lru_size_set(0);
     }
 
     /// T76.6: Set the node start round (called once at startup).
-    /// 
+    ///
     /// Batches with round <= node_start_round are considered stale and should be dropped.
     /// This prevents processing pre-start DAG batches that contain already-committed txs.
     pub fn set_node_start_round(&self, round: u64) {
@@ -1064,7 +1067,7 @@ impl HybridDedupCache {
     }
 
     /// T76.6: Check if a batch is stale (round <= node_start_round).
-    /// 
+    ///
     /// Returns `true` if the batch should be dropped as stale.
     pub fn is_stale_batch(&self, batch_round: u64) -> bool {
         let start_round = self.node_start_round();
@@ -1085,28 +1088,28 @@ impl Default for HybridDedupCache {
 // ---------------------------------------------------------------------------
 
 /// T76.5: Perform nonce pre-check on candidate transactions.
-/// 
+///
 /// This is a best-effort, read-only peek at sender nonces to filter out
 /// transactions with stale nonces (tx.nonce < account.nonce) before execution.
-/// 
+///
 /// Properties:
 /// - Constant-time: bounded number of lookups
 /// - Non-blocking: uses read-only access to accounts
 /// - Best-effort: may not catch all stale nonces (e.g., concurrent updates)
-/// 
+///
 /// Returns:
 /// - `valid_indices`: indices of transactions that passed nonce check
 /// - `bad_nonce_count`: number of transactions with stale nonces
-/// 
+///
 /// Note: This function takes indices to avoid cloning transactions.
-/// 
+///
 /// ## Account Lookup Behavior
-/// 
+///
 /// When an account doesn't exist in the accounts map, `accounts.get()` returns
 /// a default `Account` with `balance: 0` and `nonce: 0`. This means:
 /// - A tx with nonce=0 from a new sender will pass the nonce check (0 >= 0)
 /// - A tx with nonce>0 from a new sender will also pass (but will fail at execution)
-/// 
+///
 /// This is the correct behavior: we only filter out txs that are *definitely*
 /// stale, not txs that *might* fail for other reasons.
 pub fn nonce_precheck(
@@ -1114,10 +1117,10 @@ pub fn nonce_precheck(
     accounts: &eezo_ledger::Accounts,
 ) -> (Vec<usize>, usize) {
     use eezo_ledger::sender_from_pubkey_first20;
-    
+
     let mut valid_indices = Vec::with_capacity(txs.len());
     let mut bad_nonce_count = 0;
-    
+
     for (i, tx) in txs.iter().enumerate() {
         // Derive sender from pubkey (first 20 bytes)
         // If derivation fails, assume valid (will fail at execution)
@@ -1126,7 +1129,7 @@ pub fn nonce_precheck(
                 // Read-only peek at account nonce
                 let account = accounts.get(&sender);
                 let account_nonce = account.nonce;
-                
+
                 // Check if tx nonce is stale
                 if tx.core.nonce < account_nonce {
                     bad_nonce_count += 1;
@@ -1146,7 +1149,7 @@ pub fn nonce_precheck(
             }
         }
     }
-    
+
     (valid_indices, bad_nonce_count)
 }
 
@@ -1261,7 +1264,7 @@ mod tests {
     #[test]
     fn test_tracker_record_canonical_block() {
         let mut tracker = DagConsensusTracker::new();
-        
+
         let summary = ShadowBlockSummary::new(10, [1u8; 32], vec![[2u8; 32], [3u8; 32]]);
         tracker.record_canonical_block(&summary);
 
@@ -1274,7 +1277,7 @@ mod tests {
     #[test]
     fn test_tracker_in_sync_after_dag_orders() {
         let mut tracker = DagConsensusTracker::new();
-        
+
         // Record canonical block with 2 txs at height 5
         let tx_hashes = vec![[2u8; 32], [3u8; 32]];
         let summary = ShadowBlockSummary::new(5, [1u8; 32], tx_hashes.clone());
@@ -1294,7 +1297,7 @@ mod tests {
     #[test]
     fn test_tracker_out_of_sync_on_mismatch() {
         let mut tracker = DagConsensusTracker::new();
-        
+
         // Record canonical block with 2 txs at height 5
         let summary = ShadowBlockSummary::new(5, [1u8; 32], vec![[2u8; 32], [3u8; 32]]);
         tracker.record_canonical_block(&summary);
@@ -1310,7 +1313,7 @@ mod tests {
     #[test]
     fn test_tracker_window_bounded() {
         let mut tracker = DagConsensusTracker::new();
-        
+
         // Add more than STATUS_WINDOW_SIZE entries
         for i in 0..(STATUS_WINDOW_SIZE + 50) {
             let summary = ShadowBlockSummary::new(i as u64, [i as u8; 32], vec![]);
@@ -1328,19 +1331,19 @@ mod tests {
     #[test]
     fn test_tracker_lenient_lag_in_sync_when_behind_by_one() {
         let mut tracker = DagConsensusTracker::new();
-        
+
         // Record canonical blocks at heights 1, 2, 3
         let tx_hashes = vec![[1u8; 32]];
         for h in 1..=3 {
             let summary = ShadowBlockSummary::new(h, [h as u8; 32], tx_hashes.clone());
             tracker.record_canonical_block(&summary);
         }
-        
+
         // DAG orders heights 1 and 2 with matching hashes (behind by 1)
         for h in 1..=2 {
             tracker.record_dag_ordered(h, tx_hashes.clone());
         }
-        
+
         let status = tracker.current_status();
         assert_eq!(status.lagging_by, 1);
         // T75.2: lagging_by <= 1 should still be considered in_sync
@@ -1350,17 +1353,17 @@ mod tests {
     #[test]
     fn test_tracker_out_of_sync_when_behind_by_two_or_more() {
         let mut tracker = DagConsensusTracker::new();
-        
+
         // Record canonical blocks at heights 1, 2, 3
         let tx_hashes = vec![[1u8; 32]];
         for h in 1..=3 {
             let summary = ShadowBlockSummary::new(h, [h as u8; 32], tx_hashes.clone());
             tracker.record_canonical_block(&summary);
         }
-        
+
         // DAG only orders height 1 (behind by 2)
         tracker.record_dag_ordered(1, tx_hashes.clone());
-        
+
         let status = tracker.current_status();
         assert_eq!(status.lagging_by, 2);
         // T75.2: lagging_by > 1 should be out of sync
@@ -1370,7 +1373,7 @@ mod tests {
     #[test]
     fn test_tracker_hash_mismatch_different_order() {
         let mut tracker = DagConsensusTracker::new();
-        
+
         // Record canonical block with tx hashes in order [A, B]
         let canonical_hashes = vec![[1u8; 32], [2u8; 32]];
         let summary = ShadowBlockSummary::new(5, [0u8; 32], canonical_hashes);
@@ -1381,7 +1384,7 @@ mod tests {
         let is_mismatch = tracker.record_dag_ordered(5, dag_hashes);
 
         assert!(is_mismatch); // Order matters, so this is a mismatch
-        
+
         let status = tracker.current_status();
         assert!(!status.in_sync); // Should be out of sync due to hash mismatch
     }
@@ -1389,20 +1392,20 @@ mod tests {
     #[test]
     fn test_tracker_lenient_lag_with_mismatch_is_out_of_sync() {
         let mut tracker = DagConsensusTracker::new();
-        
+
         // Record canonical blocks at heights 1 and 2
         let canonical_hashes = vec![[1u8; 32], [2u8; 32]];
         for h in 1..=2 {
             let summary = ShadowBlockSummary::new(h, [h as u8; 32], canonical_hashes.clone());
             tracker.record_canonical_block(&summary);
         }
-        
+
         // DAG orders height 1 with mismatched hashes (behind by 1 with content mismatch)
         let dag_hashes = vec![[9u8; 32], [9u8; 32]]; // Different hashes
         let is_mismatch = tracker.record_dag_ordered(1, dag_hashes);
-        
+
         assert!(is_mismatch);
-        
+
         let status = tracker.current_status();
         assert_eq!(status.lagging_by, 1);
         // T75.2: Even with lenient lag, content mismatch should cause out of sync
@@ -1412,7 +1415,7 @@ mod tests {
     #[test]
     fn test_tracker_get_canonical_tx_hashes() {
         let mut tracker = DagConsensusTracker::new();
-        
+
         let tx_hashes = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
         let summary = ShadowBlockSummary::new(10, [0u8; 32], tx_hashes.clone());
         tracker.record_canonical_block(&summary);
@@ -1430,22 +1433,22 @@ mod tests {
     fn test_tracker_compare_tx_hashes_helper() {
         // Test the compare_tx_hashes helper directly
         let canonical = vec![[1u8; 32], [2u8; 32]];
-        
+
         // Matching hashes
         let dag_matching = vec![[1u8; 32], [2u8; 32]];
         assert!(DagConsensusTracker::compare_tx_hashes(&canonical, Some(&dag_matching)));
-        
+
         // Different count
         let dag_short = vec![[1u8; 32]];
         assert!(!DagConsensusTracker::compare_tx_hashes(&canonical, Some(&dag_short)));
-        
+
         // Different content
         let dag_different = vec![[1u8; 32], [9u8; 32]];
         assert!(!DagConsensusTracker::compare_tx_hashes(&canonical, Some(&dag_different)));
-        
+
         // None (DAG hasn't ordered)
         assert!(!DagConsensusTracker::compare_tx_hashes(&canonical, None));
-        
+
         // Empty both
         let empty: Vec<[u8; 32]> = vec![];
         assert!(DagConsensusTracker::compare_tx_hashes(&empty, Some(&empty)));
@@ -1454,7 +1457,7 @@ mod tests {
     // =========================================================================
     // T76.1: HybridDagHandle tests
     // =========================================================================
-    
+
     #[test]
     fn test_hybrid_dag_handle_new() {
         let handle = HybridDagHandle::new();
@@ -1464,7 +1467,7 @@ mod tests {
         let round = handle.current_round();
         assert!(round >= 1); // Round starts at 1
     }
-    
+
     #[test]
     fn test_hybrid_dag_handle_stats() {
         let handle = HybridDagHandle::new();
@@ -1473,7 +1476,7 @@ mod tests {
         assert_eq!(stats.vertices_stored, 0);
         assert_eq!(stats.batches_ordered, 0);
     }
-    
+
     #[test]
     fn test_hybrid_dag_handle_tracker() {
         let handle = HybridDagHandle::new();
@@ -1491,36 +1494,36 @@ mod tests {
     fn test_hybrid_batches_used_metric_increments() {
         // Test that calling dag_hybrid_batches_used_inc() increments the counter
         use crate::metrics::{dag_hybrid_batches_used_inc, EEZO_DAG_HYBRID_BATCHES_USED_TOTAL};
-        
+
         let before = EEZO_DAG_HYBRID_BATCHES_USED_TOTAL.get();
         dag_hybrid_batches_used_inc();
         let after = EEZO_DAG_HYBRID_BATCHES_USED_TOTAL.get();
-        
+
         assert_eq!(after, before + 1);
     }
-    
+
     #[cfg(feature = "metrics")]
     #[test]
     fn test_hybrid_fallback_metric_increments() {
         // Test that calling dag_hybrid_fallback_inc() increments the counter
         use crate::metrics::{dag_hybrid_fallback_inc, EEZO_DAG_HYBRID_FALLBACK_TOTAL};
-        
+
         let before = EEZO_DAG_HYBRID_FALLBACK_TOTAL.get();
         dag_hybrid_fallback_inc();
         let after = EEZO_DAG_HYBRID_FALLBACK_TOTAL.get();
-        
+
         assert_eq!(after, before + 1);
     }
-    
+
     #[test]
     fn test_hybrid_dag_handle_try_next_ordered_batch_returns_none_when_empty() {
         // When no batches have been submitted, try_next_ordered_batch should return None
         let handle = HybridDagHandle::new();
-        
+
         // Multiple calls should all return None
         assert!(handle.try_next_ordered_batch().is_none());
         assert!(handle.try_next_ordered_batch().is_none());
-        
+
         // This tests the "fallback (reason=no_batch)" path
     }
 
@@ -1532,31 +1535,31 @@ mod tests {
     #[test]
     fn test_hybrid_dag_handle_submit_pending_txs_creates_batches() {
         let handle = HybridDagHandle::new();
-        
+
         // Initially no batches
         assert_eq!(handle.peek_ordered_queue_len(), 0);
-        
+
         // Submit pending tx hashes
         let pending_hashes = vec![
             [1u8; 32],
             [2u8; 32],
             [3u8; 32],
         ];
-        
+
         let result = handle.submit_pending_txs(&pending_hashes, None);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 3);
-        
+
         // Should have 1 batch ready now (threshold=1 by default)
         assert_eq!(handle.peek_ordered_queue_len(), 1);
-        
+
         // Consume the batch
         let batch = handle.try_next_ordered_batch();
         assert!(batch.is_some());
-        
+
         let batch = batch.unwrap();
         assert!(!batch.is_empty());
-        
+
         // After consuming, queue should be empty
         assert_eq!(handle.peek_ordered_queue_len(), 0);
     }
@@ -1565,11 +1568,11 @@ mod tests {
     #[test]
     fn test_hybrid_dag_handle_submit_pending_txs_empty() {
         let handle = HybridDagHandle::new();
-        
+
         let result = handle.submit_pending_txs(&[], None);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 0);
-        
+
         // Should still have no batches
         assert_eq!(handle.peek_ordered_queue_len(), 0);
     }
@@ -1578,17 +1581,17 @@ mod tests {
     #[test]
     fn test_hybrid_dag_handle_submit_pending_txs_advances_round() {
         let handle = HybridDagHandle::new();
-        
+
         let initial_round = handle.current_round();
-        
+
         // Submit pending txs
         let pending_hashes = vec![[1u8; 32], [2u8; 32]];
         let _ = handle.submit_pending_txs(&pending_hashes, None);
-        
+
         // Round should have advanced
         let new_round = handle.current_round();
         assert_eq!(new_round, initial_round + 1);
-        
+
         // Submit again
         let _ = handle.submit_pending_txs(&[[3u8; 32]], None);
         assert_eq!(handle.current_round(), initial_round + 2);
@@ -1598,12 +1601,12 @@ mod tests {
     #[test]
     fn test_hybrid_dag_handle_submit_pending_txs_with_round_hint() {
         let handle = HybridDagHandle::new();
-        
+
         // Submit with explicit round hint
         let pending_hashes = vec![[1u8; 32]];
         let result = handle.submit_pending_txs(&pending_hashes, Some(100));
         assert!(result.is_ok());
-        
+
         // Should still advance round after submission
         // The round hint affects the payload, not the internal round counter
         assert!(handle.current_round() >= 2);
@@ -1617,14 +1620,14 @@ mod tests {
     #[test]
     fn test_hybrid_dag_handle_peek_does_not_consume() {
         let handle = HybridDagHandle::new();
-        
+
         // Initially empty
         assert_eq!(handle.peek_ordered_queue_len(), 0);
-        
+
         // Multiple peeks should all return 0 and not affect the queue
         assert_eq!(handle.peek_ordered_queue_len(), 0);
         assert_eq!(handle.peek_ordered_queue_len(), 0);
-        
+
         // try_next_ordered_batch should also return None (queue still empty)
         assert!(handle.try_next_ordered_batch().is_none());
     }
@@ -1633,7 +1636,7 @@ mod tests {
     #[test]
     fn test_hybrid_dag_handle_consume_decreases_queue() {
         let handle = HybridDagHandle::new();
-        
+
         // Submit a block summary to populate the DAG
         let summary = ShadowBlockSummary {
             height: 1,
@@ -1644,19 +1647,19 @@ mod tests {
             timestamp_ms: None,
         };
         handle.submit_committed_block(&summary);
-        
-        // After submission and advance_round (done internally), 
+
+        // After submission and advance_round (done internally),
         // there should be 1 batch ready in the queue
         let initial_queue_len = handle.peek_ordered_queue_len();
-        
+
         // Peek doesn't consume
         assert_eq!(handle.peek_ordered_queue_len(), initial_queue_len);
-        
+
         // Consume the batch
         if initial_queue_len > 0 {
             let batch = handle.try_next_ordered_batch();
             assert!(batch.is_some());
-            
+
             // After consuming, queue should decrease
             assert!(handle.peek_ordered_queue_len() < initial_queue_len);
         }
@@ -1738,15 +1741,15 @@ mod tests {
     #[test]
     fn test_dag_ordered_ready_gauge_set() {
         use crate::metrics::{dag_ordered_ready_set, EEZO_DAG_ORDERED_READY};
-        
+
         // Set gauge to a specific value
         dag_ordered_ready_set(5);
         assert_eq!(EEZO_DAG_ORDERED_READY.get(), 5);
-        
+
         // Setting to 0 doesn't consume anything - it's just a gauge update
         dag_ordered_ready_set(0);
         assert_eq!(EEZO_DAG_ORDERED_READY.get(), 0);
-        
+
         // Set to a high value
         dag_ordered_ready_set(100);
         assert_eq!(EEZO_DAG_ORDERED_READY.get(), 100);
@@ -1758,9 +1761,9 @@ mod tests {
     #[test]
     fn test_ordered_ready_gauge_matches_queue_len() {
         use crate::metrics::{dag_ordered_ready_set, EEZO_DAG_ORDERED_READY};
-        
+
         let handle = HybridDagHandle::new();
-        
+
         // Submit 2 block summaries to populate the DAG with 2 batches
         // Each submission triggers ordering (threshold=1 by default)
         for i in 1..=2 {
@@ -1774,25 +1777,25 @@ mod tests {
             };
             handle.submit_committed_block(&summary);
         }
-        
+
         // After submitting 2 blocks, peek should show 2 batches ready
         let queue_len = handle.peek_ordered_queue_len();
-        
+
         // Update gauge to match queue_len (as the shadow runner does)
         dag_ordered_ready_set(queue_len as u64);
-        
+
         // Assert queue_len == 2 and gauge reads 2
         assert_eq!(queue_len, 2, "Expected 2 batches in queue after 2 submissions");
         assert_eq!(EEZO_DAG_ORDERED_READY.get(), 2, "Expected gauge to read 2");
-        
+
         // Consume 1 batch
         let batch = handle.try_next_ordered_batch();
         assert!(batch.is_some(), "Expected to consume 1 batch");
-        
+
         // Update gauge to new queue_len
         let new_queue_len = handle.peek_ordered_queue_len();
         dag_ordered_ready_set(new_queue_len as u64);
-        
+
         // Assert both drop to 1
         assert_eq!(new_queue_len, 1, "Expected 1 batch remaining after consuming 1");
         assert_eq!(EEZO_DAG_ORDERED_READY.get(), 1, "Expected gauge to read 1 after consuming");
@@ -1805,18 +1808,18 @@ mod tests {
     #[test]
     fn test_dedup_cache_basic() {
         let cache = HybridDedupCache::with_capacity(100);
-        
+
         let hash1 = [1u8; 32];
         let hash2 = [2u8; 32];
         let _hash3 = [3u8; 32]; // Unused for now, kept for symmetry
-        
+
         // Initially empty
         assert!(cache.is_empty());
         assert!(!cache.contains(&hash1));
-        
+
         // Record committed tx
         cache.record_committed(hash1, 1);
-        
+
         assert_eq!(cache.len(), 1);
         assert!(cache.contains(&hash1));
         assert!(!cache.contains(&hash2));
@@ -1825,11 +1828,11 @@ mod tests {
     #[test]
     fn test_dedup_cache_batch_record() {
         let cache = HybridDedupCache::with_capacity(100);
-        
+
         let hashes = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
-        
+
         cache.record_committed_batch(&hashes, 10);
-        
+
         assert_eq!(cache.len(), 3);
         for hash in &hashes {
             assert!(cache.contains(hash));
@@ -1839,15 +1842,15 @@ mod tests {
     #[test]
     fn test_dedup_cache_filter_batch() {
         let cache = HybridDedupCache::with_capacity(100);
-        
+
         // Record some hashes as committed
         let committed = vec![[1u8; 32], [2u8; 32]];
         cache.record_committed_batch(&committed, 1);
-        
+
         // Filter a batch that contains some committed and some new hashes
         let batch = vec![[1u8; 32], [3u8; 32], [2u8; 32], [4u8; 32]];
         let (filtered, seen_count) = cache.filter_batch(&batch);
-        
+
         // Hash 1 and 2 were seen (in cache), 3 and 4 are new
         assert_eq!(seen_count, 2);
         assert_eq!(filtered.len(), 2);
@@ -1858,13 +1861,13 @@ mod tests {
     #[test]
     fn test_dedup_cache_filter_all_seen() {
         let cache = HybridDedupCache::with_capacity(100);
-        
+
         let hashes = vec![[1u8; 32], [2u8; 32]];
         cache.record_committed_batch(&hashes, 1);
-        
+
         // Filter the same batch - all should be filtered
         let (filtered, seen_count) = cache.filter_batch(&hashes);
-        
+
         assert_eq!(seen_count, 2);
         assert_eq!(filtered.len(), 0);
     }
@@ -1872,14 +1875,14 @@ mod tests {
     #[test]
     fn test_dedup_cache_filter_none_seen() {
         let cache = HybridDedupCache::with_capacity(100);
-        
+
         // Cache has some hashes
         cache.record_committed([1u8; 32], 1);
-        
+
         // Filter batch with different hashes - none should be filtered
         let batch = vec![[5u8; 32], [6u8; 32]];
         let (filtered, seen_count) = cache.filter_batch(&batch);
-        
+
         assert_eq!(seen_count, 0);
         assert_eq!(filtered.len(), 2);
     }
@@ -1888,17 +1891,17 @@ mod tests {
     fn test_dedup_cache_lru_eviction() {
         // Small cache to test eviction
         let cache = HybridDedupCache::with_capacity(3);
-        
+
         cache.record_committed([1u8; 32], 1);
         cache.record_committed([2u8; 32], 2);
         cache.record_committed([3u8; 32], 3);
-        
+
         assert_eq!(cache.len(), 3);
         assert!(cache.contains(&[1u8; 32]));
-        
+
         // Adding one more should evict the LRU (oldest)
         cache.record_committed([4u8; 32], 4);
-        
+
         assert_eq!(cache.len(), 3);
         // Hash 1 should be evicted (LRU)
         assert!(!cache.contains(&[1u8; 32]));
@@ -1910,10 +1913,10 @@ mod tests {
     #[test]
     fn test_dedup_cache_clear() {
         let cache = HybridDedupCache::with_capacity(100);
-        
+
         cache.record_committed_batch(&[[1u8; 32], [2u8; 32], [3u8; 32]], 1);
         assert_eq!(cache.len(), 3);
-        
+
         cache.clear();
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
@@ -1926,16 +1929,16 @@ mod tests {
     #[test]
     fn test_nonce_precheck_all_valid() {
         use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
-        
+
         // Create accounts with known nonces
         let mut accounts = Accounts::default();
         let sender_bytes: [u8; 20] = [0x42; 20];
         let sender = Address(sender_bytes);
-        
+
         // Set account nonce to 5
         let acct = Account { balance: 1000, nonce: 5 };
         accounts.put(sender, acct);
-        
+
         // Create txs with valid nonces (>= 5)
         let txs = vec![
             SignedTx {
@@ -1949,9 +1952,9 @@ mod tests {
                 sig: vec![],
             },
         ];
-        
+
         let (valid_indices, bad_nonce_count) = nonce_precheck(&txs, &accounts);
-        
+
         assert_eq!(bad_nonce_count, 0);
         assert_eq!(valid_indices.len(), 2);
         assert_eq!(valid_indices, vec![0, 1]);
@@ -1960,15 +1963,15 @@ mod tests {
     #[test]
     fn test_nonce_precheck_stale_nonce() {
         use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
-        
+
         let mut accounts = Accounts::default();
         let sender_bytes: [u8; 20] = [0x42; 20];
         let sender = Address(sender_bytes);
-        
+
         // Set account nonce to 10
         let acct = Account { balance: 1000, nonce: 10 };
         accounts.put(sender, acct);
-        
+
         // Create txs with mixed nonces - some stale (< 10), some valid (>= 10)
         let txs = vec![
             SignedTx {
@@ -1992,9 +1995,9 @@ mod tests {
                 sig: vec![],
             },
         ];
-        
+
         let (valid_indices, bad_nonce_count) = nonce_precheck(&txs, &accounts);
-        
+
         assert_eq!(bad_nonce_count, 2); // nonces 5 and 8 are stale
         assert_eq!(valid_indices.len(), 2);
         assert_eq!(valid_indices, vec![1, 3]); // indices of nonces 10 and 11
@@ -2003,15 +2006,15 @@ mod tests {
     #[test]
     fn test_nonce_precheck_all_stale() {
         use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
-        
+
         let mut accounts = Accounts::default();
         let sender_bytes: [u8; 20] = [0x42; 20];
         let sender = Address(sender_bytes);
-        
+
         // Set account nonce to 100
         let acct = Account { balance: 1000, nonce: 100 };
         accounts.put(sender, acct);
-        
+
         // Create txs with all stale nonces
         let txs = vec![
             SignedTx {
@@ -2030,9 +2033,9 @@ mod tests {
                 sig: vec![],
             },
         ];
-        
+
         let (valid_indices, bad_nonce_count) = nonce_precheck(&txs, &accounts);
-        
+
         assert_eq!(bad_nonce_count, 3);
         assert!(valid_indices.is_empty());
     }
@@ -2040,12 +2043,12 @@ mod tests {
     #[test]
     fn test_nonce_precheck_empty_txs() {
         use eezo_ledger::Accounts;
-        
+
         let accounts = Accounts::default();
         let txs: Vec<eezo_ledger::SignedTx> = vec![];
-        
+
         let (valid_indices, bad_nonce_count) = nonce_precheck(&txs, &accounts);
-        
+
         assert_eq!(bad_nonce_count, 0);
         assert!(valid_indices.is_empty());
     }
@@ -2057,10 +2060,10 @@ mod tests {
     #[test]
     fn test_dedup_cache_node_start_round_default() {
         let cache = HybridDedupCache::with_capacity(100);
-        
+
         // Default node_start_round should be 0
         assert_eq!(cache.node_start_round(), 0);
-        
+
         // With node_start_round = 0, no batches are considered stale
         assert!(!cache.is_stale_batch(0));
         assert!(!cache.is_stale_batch(1));
@@ -2070,16 +2073,16 @@ mod tests {
     #[test]
     fn test_dedup_cache_set_node_start_round() {
         let cache = HybridDedupCache::with_capacity(100);
-        
+
         // Set node_start_round to 10
         cache.set_node_start_round(10);
         assert_eq!(cache.node_start_round(), 10);
-        
+
         // Batches with round <= 10 are stale
         assert!(cache.is_stale_batch(1));
         assert!(cache.is_stale_batch(5));
         assert!(cache.is_stale_batch(10));
-        
+
         // Batches with round > 10 are not stale
         assert!(!cache.is_stale_batch(11));
         assert!(!cache.is_stale_batch(100));
@@ -2088,10 +2091,10 @@ mod tests {
     #[test]
     fn test_dedup_cache_stale_batch_zero_round() {
         let cache = HybridDedupCache::with_capacity(100);
-        
+
         // Set node_start_round to 5
         cache.set_node_start_round(5);
-        
+
         // Batch with round 0 is stale
         assert!(cache.is_stale_batch(0));
     }
@@ -2099,13 +2102,13 @@ mod tests {
     #[test]
     fn test_dedup_cache_stale_batch_boundary() {
         let cache = HybridDedupCache::with_capacity(100);
-        
+
         // Set node_start_round to exactly the round value
         cache.set_node_start_round(100);
-        
+
         // Boundary case: round == node_start_round should be stale
         assert!(cache.is_stale_batch(100));
-        
+
         // First non-stale batch
         assert!(!cache.is_stale_batch(101));
     }
@@ -2115,11 +2118,11 @@ mod tests {
     #[test]
     fn test_stale_batch_metric_increment() {
         use crate::metrics::{dag_hybrid_stale_batches_dropped_inc, EEZO_DAG_HYBRID_STALE_BATCHES_DROPPED_TOTAL};
-        
+
         let before = EEZO_DAG_HYBRID_STALE_BATCHES_DROPPED_TOTAL.get();
         dag_hybrid_stale_batches_dropped_inc();
         let after = EEZO_DAG_HYBRID_STALE_BATCHES_DROPPED_TOTAL.get();
-        
+
         assert_eq!(after, before + 1);
     }
 
@@ -2128,11 +2131,11 @@ mod tests {
     #[test]
     fn test_all_filtered_metric_increment() {
         use crate::metrics::{dag_hybrid_all_filtered_inc, EEZO_DAG_HYBRID_ALL_FILTERED_TOTAL};
-        
+
         let before = EEZO_DAG_HYBRID_ALL_FILTERED_TOTAL.get();
         dag_hybrid_all_filtered_inc();
         let after = EEZO_DAG_HYBRID_ALL_FILTERED_TOTAL.get();
-        
+
         assert_eq!(after, before + 1);
     }
 
@@ -2141,11 +2144,11 @@ mod tests {
     #[test]
     fn test_empty_candidates_metric_increment() {
         use crate::metrics::{dag_hybrid_empty_candidates_inc, EEZO_DAG_HYBRID_EMPTY_CANDIDATES_TOTAL};
-        
+
         let before = EEZO_DAG_HYBRID_EMPTY_CANDIDATES_TOTAL.get();
         dag_hybrid_empty_candidates_inc();
         let after = EEZO_DAG_HYBRID_EMPTY_CANDIDATES_TOTAL.get();
-        
+
         assert_eq!(after, before + 1);
     }
 
@@ -2157,37 +2160,37 @@ mod tests {
     #[test]
     fn test_dedup_filter_across_multiple_batches() {
         let cache = HybridDedupCache::with_capacity(100);
-        
+
         // Simulate batch 1 with hashes A, B
         let batch1 = vec![[1u8; 32], [2u8; 32]];
-        
+
         // Simulate batch 2 with hashes B, C (B is duplicate)
         let batch2 = vec![[2u8; 32], [3u8; 32]];
-        
+
         // Simulate batch 3 with hashes C, D (C is duplicate from batch2)
         let batch3 = vec![[3u8; 32], [4u8; 32]];
-        
+
         // Union of all batches: A, B, B, C, C, D (just for documentation)
         let _union: Vec<[u8; 32]> = [batch1.clone(), batch2.clone(), batch3.clone()]
             .concat();
-        
+
         // Initially cache is empty, so first batch should all pass
         let (filtered1, seen1) = cache.filter_batch(&batch1);
         assert_eq!(seen1, 0);
         assert_eq!(filtered1.len(), 2);
-        
+
         // Record batch1 as committed
         cache.record_committed_batch(&batch1, 1);
-        
+
         // Now filter batch2 - B should be filtered
         let (filtered2, seen2) = cache.filter_batch(&batch2);
         assert_eq!(seen2, 1); // B was seen
         assert_eq!(filtered2.len(), 1); // Only C passes
         assert_eq!(filtered2[0], [3u8; 32]);
-        
+
         // Record batch2 candidates as committed
         cache.record_committed_batch(&filtered2, 2);
-        
+
         // Now filter batch3 - C should be filtered
         let (filtered3, seen3) = cache.filter_batch(&batch3);
         assert_eq!(seen3, 1); // C was seen
@@ -2199,7 +2202,7 @@ mod tests {
     #[test]
     fn test_heavy_duplication_across_batches() {
         let cache = HybridDedupCache::with_capacity(1000);
-        
+
         // Create 3 batches with heavy overlap
         // Batch 1: hashes 0-99 (100 unique)
         let batch1: Vec<[u8; 32]> = (0u8..100).map(|i| {
@@ -2207,39 +2210,39 @@ mod tests {
             h[0] = i;
             h
         }).collect();
-        
+
         // Batch 2: hashes 50-149 (50 overlap with batch1, 50 new)
         let batch2: Vec<[u8; 32]> = (50u8..150).map(|i| {
             let mut h = [0u8; 32];
             h[0] = i;
             h
         }).collect();
-        
+
         // Batch 3: hashes 75-174 (75 overlap with batch1+2, 25 new)
         let batch3: Vec<[u8; 32]> = (75u8..175).map(|i| {
             let mut h = [0u8; 32];
             h[0] = i;
             h
         }).collect();
-        
+
         // Record batch1 as committed
         cache.record_committed_batch(&batch1, 1);
         assert_eq!(cache.len(), 100);
-        
+
         // Filter batch2 against cache - 50 should be filtered
         let (filtered2, seen2) = cache.filter_batch(&batch2);
         assert_eq!(seen2, 50); // 50-99 overlap
         assert_eq!(filtered2.len(), 50); // 100-149 are new
-        
+
         // Record batch2 candidates
         cache.record_committed_batch(&filtered2, 2);
         assert_eq!(cache.len(), 150);
-        
+
         // Filter batch3 - 75 should be filtered (0-99 from batch1, 100-149 from batch2)
         let (filtered3, seen3) = cache.filter_batch(&batch3);
         assert_eq!(seen3, 75); // 75-149 overlap
         assert_eq!(filtered3.len(), 25); // 150-174 are new
-        
+
         // Total unique across 3 batches: 175 (0-174)
         // If we merged all and filtered at once:
         let all_hashes: Vec<[u8; 32]> = (0u8..175).map(|i| {
@@ -2247,10 +2250,10 @@ mod tests {
             h[0] = i;
             h
         }).collect();
-        
+
         // Record the new candidates
         cache.record_committed_batch(&filtered3, 3);
-        
+
         // Now filtering all 175 should result in 0 new candidates
         let (filtered_all, seen_all) = cache.filter_batch(&all_hashes);
         assert_eq!(seen_all, 175);
@@ -2261,7 +2264,7 @@ mod tests {
     #[test]
     fn test_hybrid_batch_stats_aggregation_fields() {
         use crate::consensus_runner::HybridBatchStats;
-        
+
         let stats = HybridBatchStats {
             n: 150,
             filtered_seen: 30,
@@ -2274,9 +2277,9 @@ mod tests {
             agg_batches: 3,
             agg_candidates: 120,
         };
-        
+
         let log_str = stats.to_log_string(95, 5);
-        
+
         // Verify the log string contains the aggregation fields
         assert!(log_str.contains("agg_batches=3"));
         assert!(log_str.contains("agg_candidates=120"));
@@ -2291,20 +2294,20 @@ mod tests {
     #[test]
     fn test_aggregation_metrics_observable() {
         use crate::metrics::{
-            observe_hybrid_agg_batches_per_block, 
+            observe_hybrid_agg_batches_per_block,
             observe_hybrid_agg_tx_candidates,
             EEZO_HYBRID_AGG_BATCHES_PER_BLOCK,
             EEZO_HYBRID_AGG_TX_CANDIDATES,
         };
-        
+
         // Observe some values
         observe_hybrid_agg_batches_per_block(3);
         observe_hybrid_agg_tx_candidates(150);
-        
+
         // Verify histograms were updated (no panic)
         let batches_count = EEZO_HYBRID_AGG_BATCHES_PER_BLOCK.get_sample_count();
         let candidates_count = EEZO_HYBRID_AGG_TX_CANDIDATES.get_sample_count();
-        
+
         assert!(batches_count >= 1);
         assert!(candidates_count >= 1);
     }
@@ -2314,26 +2317,74 @@ mod tests {
     #[test]
     fn test_stm_tuning_gauges_registered() {
         use crate::metrics::{
-            exec_lanes_set, 
+            exec_lanes_set,
             exec_wave_cap_set,
             EEZO_EXEC_LANES,
             EEZO_EXEC_WAVE_CAP,
         };
-        
+
         // Set gauge values
         exec_lanes_set(32);
         exec_wave_cap_set(100);
-        
+
         // Verify gauges were updated
         assert_eq!(EEZO_EXEC_LANES.get(), 32);
         assert_eq!(EEZO_EXEC_WAVE_CAP.get(), 100);
-        
+
         // Test different valid values
         exec_lanes_set(64);
         assert_eq!(EEZO_EXEC_LANES.get(), 64);
-        
+
         // Test wave_cap=0 (unlimited)
         exec_wave_cap_set(0);
         assert_eq!(EEZO_EXEC_WAVE_CAP.get(), 0);
+    }
+
+    // =========================================================================
+    // T77.1: Tests for DAG ordering latency histogram
+    // =========================================================================
+
+    /// T77.1: Test that DAG ordering latency histogram is registered and observable.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_dag_ordering_latency_histogram_observable() {
+        use crate::metrics::{
+            observe_dag_ordering_latency_seconds,
+            EEZO_DAG_ORDERING_LATENCY_SECONDS,
+        };
+
+        // Record the initial sample count
+        let initial_count = EEZO_DAG_ORDERING_LATENCY_SECONDS.get_sample_count();
+
+        // Observe a few latency values (in seconds)
+        observe_dag_ordering_latency_seconds(0.010); // 10ms
+        observe_dag_ordering_latency_seconds(0.025); // 25ms
+        observe_dag_ordering_latency_seconds(0.050); // 50ms
+
+        // Verify histogram was updated
+        let final_count = EEZO_DAG_ORDERING_LATENCY_SECONDS.get_sample_count();
+        assert!(final_count >= initial_count + 3,
+            "Expected at least 3 new observations, got {} -> {}", initial_count, final_count);
+    }
+
+    /// T77.1: Test that the histogram uses sensible buckets for millisecond-scale latency.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_dag_ordering_latency_buckets() {
+        use crate::metrics::EEZO_DAG_ORDERING_LATENCY_SECONDS;
+
+        // The histogram should have buckets configured for millisecond-scale latency.
+        // Observe values at different bucket boundaries to verify they are captured.
+        // We can check that the histogram is functional by observing and checking sample count.
+        let initial_count = EEZO_DAG_ORDERING_LATENCY_SECONDS.get_sample_count();
+
+        // Observe values that span multiple buckets
+        crate::metrics::observe_dag_ordering_latency_seconds(0.001);  // 1ms - smallest bucket
+        crate::metrics::observe_dag_ordering_latency_seconds(0.030);  // 30ms - default timeout bucket
+        crate::metrics::observe_dag_ordering_latency_seconds(0.100);  // 100ms - larger latency
+        crate::metrics::observe_dag_ordering_latency_seconds(0.500);  // 500ms - edge case
+
+        let final_count = EEZO_DAG_ORDERING_LATENCY_SECONDS.get_sample_count();
+        assert!(final_count >= initial_count + 4);
     }
 }
