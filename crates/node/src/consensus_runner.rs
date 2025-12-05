@@ -1246,6 +1246,11 @@ impl CoreRunnerHandle {
 			// expose T36.6 bridge metrics on /metrics immediately
 			#[cfg(feature = "metrics")]
 			register_t36_bridge_metrics();
+            // T77.1: Register DAG ordering latency metrics for hybrid mode
+            #[cfg(all(feature = "metrics", feature = "dag-consensus"))]
+            if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
+                crate::metrics::register_t77_dag_ordering_latency_metrics();
+            }
             // dev/test knobs
             let log_every: u64 = env::var("EEZO_LOG_COMMIT_EVERY").ok().and_then(|s| s.parse().ok()).unwrap_or(50);
             let max_h_opt: Option<u64> = env::var("EEZO_MAX_HEIGHT").ok().and_then(|s| s.parse().ok());
@@ -1430,11 +1435,17 @@ impl CoreRunnerHandle {
                                         hybrid_aggregated_stats = Some(agg_stats);
                                         hybrid_batch_used = true;
                                         crate::metrics::dag_hybrid_batches_used_inc();
+                                        
+                                        // T77.1: Record DAG ordering latency (time from wait start to successful batch consumption)
+                                        let ordering_latency_secs = wait_start.elapsed().as_secs_f64();
+                                        crate::metrics::observe_dag_ordering_latency_seconds(ordering_latency_secs);
+                                        
                                         log::debug!(
-                                            "hybrid-agg: successfully aggregated {} batches with {} txs (cap_reason={})",
+                                            "hybrid-agg: successfully aggregated {} batches with {} txs (cap_reason={}, latency_ms={:.2})",
                                             hybrid_aggregated_stats.as_ref().map(|s| s.agg_batches).unwrap_or(0),
                                             hybrid_aggregated_txs.len(),
-                                            cap_reason.as_str()
+                                            cap_reason.as_str(),
+                                            ordering_latency_secs * 1000.0
                                         );
                                     } else {
                                         // Batches consumed but no valid txs - store stats for logging

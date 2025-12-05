@@ -67,6 +67,10 @@ export EEZO_HYBRID_AGG_MAX_BYTES=$((1 * 1024 * 1024))  # 1 MiB
 # Enable adaptive aggregation (adjusts budget based on load)
 export EEZO_HYBRID_AGG_ADAPTIVE=1
 
+# T77.1: Batch timeout — how long to wait for DAG batches before fallback (ms)
+# Default is 30ms; increase if DAG ordering latency is high under load
+# export EEZO_HYBRID_BATCH_TIMEOUT_MS=30
+
 # --- Fast Decode Pool (T76.9) ---
 # Enable zero-copy decode pool for improved tx processing
 export EEZO_FAST_DECODE_ENABLED=1
@@ -472,6 +476,7 @@ After the 7-day canary passes all SLOs:
 | `eezo_dag_ordered_ready` | Gauge | Batches ready for consumption |
 | `eezo_dag_hybrid_fallback_total` | Counter | Fallbacks to mempool |
 | `eezo_dag_hybrid_batches_used_total` | Counter | DAG batches consumed |
+| `eezo_dag_ordering_latency_seconds` | Histogram | DAG ordering latency (T77.1) |
 
 ### Apply Metrics
 
