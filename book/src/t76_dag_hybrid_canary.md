@@ -67,6 +67,19 @@ export EEZO_HYBRID_AGG_MAX_BYTES=$((1 * 1024 * 1024))  # 1 MiB
 # Enable adaptive aggregation (adjusts budget based on load)
 export EEZO_HYBRID_AGG_ADAPTIVE=1
 
+# --- Hybrid Fallback Control (T76.12) ---
+# Minimum DAG-ordered transactions before fallback to mempool.
+# When >0, the proposer waits for this many txs from DAG batches before falling back.
+# Set to 0 to disable min threshold (current behavior).
+# Recommended: 50 for canary, 10-100 for production.
+export EEZO_HYBRID_MIN_DAG_TX=50
+
+# Timeout in milliseconds to wait for DAG batches before fallback.
+# If no batches arrive within this time, the proposer falls back to mempool.
+# Set to 0 to disable waiting (current behavior).
+# Recommended: 10-20ms (small relative to block time).
+export EEZO_HYBRID_BATCH_TIMEOUT_MS=10
+
 # --- Fast Decode Pool (T76.9) ---
 # Enable zero-copy decode pool for improved tx processing
 export EEZO_FAST_DECODE_ENABLED=1
@@ -176,13 +189,66 @@ For the canary, start with **Baseline** for 24h, then increase to **Moderate** f
 
 ---
 
+## Tuning Hybrid Fallback Behavior (T76.12)
+
+### Environment Variables
+
+Two new environment variables control when the proposer falls back from DAG batches to the mempool:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EEZO_HYBRID_MIN_DAG_TX` | 1 | Minimum DAG-ordered transactions before fallback |
+| `EEZO_HYBRID_BATCH_TIMEOUT_MS` | 10 | Timeout in milliseconds to wait for DAG batches |
+
+### Recommended Values
+
+| Use Case | MIN_DAG_TX | TIMEOUT_MS | Notes |
+|----------|------------|------------|-------|
+| **Default** | 1 | 10 | Current behavior, fallback if no DAG txs |
+| **Canary** | 50 | 10 | Wait for meaningful DAG batch |
+| **Production (light load)** | 10 | 20 | Lower threshold, longer timeout |
+| **Production (heavy load)** | 100 | 5 | Higher threshold, faster timeout |
+| **Aggressive** | 200 | 0 | Immediate check, no timeout wait |
+
+### Fallback Reason Metrics
+
+The `eezo_dag_hybrid_fallback_reason_total{reason="..."}` counter provides visibility into why fallbacks occur:
+
+| Reason | Description | Interpretation |
+|--------|-------------|----------------|
+| `min_dag_not_met` | DAG batch had fewer than `MIN_DAG_TX` transactions | DAG ordering is slow, consider lowering threshold |
+| `timeout` | Waited `TIMEOUT_MS` but no batches arrived | DAG runner may be stalled or load is low |
+| `empty` | DAG batch was empty after de-dup or nonce prefilter | All txs already committed or have stale nonces |
+| `no_handle` | Hybrid handle not attached | Node starting up or DAG runner not enabled |
+| `queue_empty` | No batches in queue (no timeout wait) | Normal when load is low |
+
+### Interpreting Fallback Patterns
+
+**Healthy canary:**
+- `eezo_dag_hybrid_fallback_total` stays at 0 or very low
+- `eezo_dag_hybrid_batches_used_total` increments on most blocks
+- `reason="min_dag_not_met"` stays low (DAG keeps up with load)
+- `reason="timeout"` stays low (batches arrive quickly)
+
+**Degraded canary:**
+- `reason="min_dag_not_met"` rises rapidly → DAG can't order enough txs
+  - **Fix**: Lower `EEZO_HYBRID_MIN_DAG_TX` or increase `EEZO_HYBRID_AGG_TIME_BUDGET_MS`
+- `reason="timeout"` rises → DAG runner is stalled
+  - **Fix**: Check DAG runner logs, increase `EEZO_HYBRID_BATCH_TIMEOUT_MS`
+- `reason="empty"` rises → De-dup is filtering too aggressively
+  - **Fix**: Check for tx replay issues, verify mempool is fresh
+
+---
+
 ## SLO Definitions & Metric Queries
 
 ### SLO 1: Zero Hybrid Fallbacks
 
 **Goal**: The hybrid mode should never fall back to the legacy mempool path under normal load.
 
-**Metric**: `eezo_dag_hybrid_fallback_total`
+**Metrics**: 
+- `eezo_dag_hybrid_fallback_total` (legacy, total count)
+- `eezo_dag_hybrid_fallback_reason_total{reason="..."}` (labeled by reason)
 
 **Threshold**: Must remain flat (delta = 0 over 1 hour) under steady load.
 
@@ -193,9 +259,15 @@ curl -s http://127.0.0.1:9898/metrics | grep eezo_dag_hybrid_fallback_total
 
 # Monitor for increases (expect 0)
 curl -s http://127.0.0.1:9898/metrics | grep '^eezo_dag_hybrid_fallback_total ' | awk '{print $2}'
+
+# Check fallback reasons (T76.12)
+curl -s http://127.0.0.1:9898/metrics | grep 'eezo_dag_hybrid_fallback_reason_total'
 ```
 
-**Alert Threshold**: `increase(eezo_dag_hybrid_fallback_total[1h]) > 1`
+**Alert Thresholds**:
+- `increase(eezo_dag_hybrid_fallback_total[1h]) > 1` — any fallback is concerning
+- `increase(eezo_dag_hybrid_fallback_reason_total{reason="min_dag_not_met"}[1h]) > 10` — DAG ordering lagging
+- `increase(eezo_dag_hybrid_fallback_reason_total{reason="timeout"}[1h]) > 10` — DAG stalled
 
 ---
 
@@ -470,8 +542,19 @@ After the 7-day canary passes all SLOs:
 |--------|------|-------------|
 | `eezo_consensus_mode_active` | Gauge | 0=hotstuff, 1=hybrid, 2=dag |
 | `eezo_dag_ordered_ready` | Gauge | Batches ready for consumption |
-| `eezo_dag_hybrid_fallback_total` | Counter | Fallbacks to mempool |
+| `eezo_dag_hybrid_fallback_total` | Counter | Fallbacks to mempool (total) |
+| `eezo_dag_hybrid_fallback_reason_total{reason="..."}` | Counter | Fallbacks by reason (T76.12) |
 | `eezo_dag_hybrid_batches_used_total` | Counter | DAG batches consumed |
+
+### Fallback Reason Labels (T76.12)
+
+| Label Value | Description |
+|-------------|-------------|
+| `min_dag_not_met` | DAG batch had fewer txs than `EEZO_HYBRID_MIN_DAG_TX` |
+| `timeout` | Waited `EEZO_HYBRID_BATCH_TIMEOUT_MS` but no batches arrived |
+| `empty` | DAG batch empty after de-dup or nonce prefilter |
+| `no_handle` | Hybrid handle not attached (startup) |
+| `queue_empty` | No batches in queue when checked |
 
 ### Apply Metrics
 

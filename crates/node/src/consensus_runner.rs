@@ -1332,6 +1332,10 @@ impl CoreRunnerHandle {
                     let agg_max_tx = agg_config.max_tx();
                     let agg_max_bytes = agg_config.max_bytes();
                     
+                    // T76.12: Get min DAG threshold and batch timeout
+                    let min_dag_tx = agg_config.min_dag_tx();
+                    let batch_timeout_ms = agg_config.batch_timeout_ms();
+                    
                     // T76.10: Update metrics for adaptive mode status
                     crate::metrics::observe_hybrid_agg_adaptive_enabled(agg_config.is_adaptive());
                     crate::metrics::observe_hybrid_agg_time_budget_ms(agg_time_budget_ms);
@@ -1339,7 +1343,41 @@ impl CoreRunnerHandle {
                     // Try to get hybrid DAG handle
                     let hybrid_opt: Option<Arc<HybridDagHandle>> = hybrid_dag_c.lock().await.clone();
                     if let Some(hybrid_handle) = hybrid_opt {
-                        // T76.7: Check if any batches are available
+                        // T76.12: Implement waiting logic for min_dag_tx and batch_timeout_ms
+                        // If min_dag_tx > 0 and batch_timeout_ms > 0, wait for batches with timeout.
+                        let wait_start = std::time::Instant::now();
+                        let wait_timeout = std::time::Duration::from_millis(batch_timeout_ms);
+                        let mut waited_for_batches = false;
+                        
+                        // If we need to wait for DAG batches (min_dag_tx > 0, timeout > 0)
+                        // and no batches are immediately available, wait with polling
+                        if min_dag_tx > 0 && batch_timeout_ms > 0 && hybrid_handle.peek_ordered_queue_len() == 0 {
+                            log::debug!(
+                                "hybrid: waiting for DAG batches (min_dag_tx={}, timeout_ms={})",
+                                min_dag_tx, batch_timeout_ms
+                            );
+                            
+                            // Poll loop: wait until timeout or batches arrive
+                            loop {
+                                if hybrid_handle.peek_ordered_queue_len() > 0 {
+                                    // Batches arrived
+                                    waited_for_batches = true;
+                                    log::debug!("hybrid: batches arrived after {:?}", wait_start.elapsed());
+                                    break;
+                                }
+                                
+                                if wait_start.elapsed() >= wait_timeout {
+                                    // Timeout expired
+                                    log::debug!("hybrid: timeout expired after {:?}, falling back", wait_start.elapsed());
+                                    break;
+                                }
+                                
+                                // Sleep for 1ms between polls (avoid busy-wait)
+                                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                            }
+                        }
+                        
+                        // T76.7: Check if any batches are available (after potential wait)
                         if hybrid_handle.peek_ordered_queue_len() > 0 {
                             // Get DAG runner handle for mempool access (needed by aggregation function)
                             let dag_opt: Option<Arc<DagRunnerHandle>> = dag_c.lock().await.clone();
@@ -1376,38 +1414,61 @@ impl CoreRunnerHandle {
                                 hybrid_candidate_count = agg_stats.candidate;
                                 hybrid_bad_nonce_prefilter = agg_stats.bad_nonce_pref;
                                 
-                                if !agg_txs.is_empty() {
-                                    hybrid_aggregated_txs = agg_txs;
-                                    hybrid_aggregated_stats = Some(agg_stats);
-                                    hybrid_batch_used = true;
-                                    crate::metrics::dag_hybrid_batches_used_inc();
-                                    log::debug!(
-                                        "hybrid-agg: successfully aggregated {} batches with {} txs (cap_reason={})",
-                                        hybrid_aggregated_stats.as_ref().map(|s| s.agg_batches).unwrap_or(0),
-                                        hybrid_aggregated_txs.len(),
-                                        cap_reason.as_str()
-                                    );
+                                // T76.12: Check if we met the min_dag_tx threshold
+                                let dag_tx_count = agg_txs.len();
+                                
+                                if dag_tx_count >= min_dag_tx || min_dag_tx == 0 {
+                                    // Met threshold (or threshold disabled) - use DAG txs
+                                    if !agg_txs.is_empty() {
+                                        hybrid_aggregated_txs = agg_txs;
+                                        hybrid_aggregated_stats = Some(agg_stats);
+                                        hybrid_batch_used = true;
+                                        crate::metrics::dag_hybrid_batches_used_inc();
+                                        log::debug!(
+                                            "hybrid-agg: successfully aggregated {} batches with {} txs (cap_reason={})",
+                                            hybrid_aggregated_stats.as_ref().map(|s| s.agg_batches).unwrap_or(0),
+                                            hybrid_aggregated_txs.len(),
+                                            cap_reason.as_str()
+                                        );
+                                    } else {
+                                        // Batches consumed but no valid txs - store stats for logging
+                                        hybrid_aggregated_stats = Some(agg_stats);
+                                        log::debug!("hybrid-agg: batches consumed but no valid txs after filtering");
+                                        // T76.12: Fallback with reason=empty
+                                        crate::metrics::dag_hybrid_fallback_reason_inc("empty");
+                                    }
                                 } else {
-                                    // Batches consumed but no valid txs - store stats for logging
+                                    // T76.12: Did not meet min_dag_tx threshold - fallback
+                                    log::debug!(
+                                        "hybrid: fallback (reason=min_dag_not_met, got {} < min {})",
+                                        dag_tx_count, min_dag_tx
+                                    );
                                     hybrid_aggregated_stats = Some(agg_stats);
-                                    log::debug!("hybrid-agg: batches consumed but no valid txs after filtering");
+                                    crate::metrics::dag_hybrid_fallback_reason_inc("min_dag_not_met");
                                 }
                             } else {
                                 // No batches consumed - fallback
                                 log::debug!("hybrid: fallback (reason=no_batches_aggregated)");
-                                crate::metrics::dag_hybrid_fallback_inc();
+                                crate::metrics::dag_hybrid_fallback_reason_inc("empty");
                             }
                         } else {
-                            // No batches ready - fallback
-                            log::debug!("hybrid: fallback (reason=queue_empty)");
-                            crate::metrics::dag_hybrid_fallback_inc();
+                            // No batches ready after potential wait - fallback
+                            if waited_for_batches || batch_timeout_ms > 0 {
+                                // We waited but nothing came - timeout fallback
+                                log::debug!("hybrid: fallback (reason=timeout, waited {:?})", wait_start.elapsed());
+                                crate::metrics::dag_hybrid_fallback_reason_inc("timeout");
+                            } else {
+                                // No wait requested and no batches - queue empty
+                                log::debug!("hybrid: fallback (reason=queue_empty)");
+                                crate::metrics::dag_hybrid_fallback_reason_inc("queue_empty");
+                            }
                             // T76.10: Record empty cap reason
                             crate::metrics::observe_hybrid_agg_cap_reason("empty");
                         }
                     } else {
                         // No hybrid handle attached yet - fallback
                         log::debug!("hybrid: fallback (reason=no_handle)");
-                        crate::metrics::dag_hybrid_fallback_inc();
+                        crate::metrics::dag_hybrid_fallback_reason_inc("no_handle");
                     }
                 }
 
