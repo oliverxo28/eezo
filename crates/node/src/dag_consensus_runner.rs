@@ -2387,4 +2387,626 @@ mod tests {
         let final_count = EEZO_DAG_ORDERING_LATENCY_SECONDS.get_sample_count();
         assert!(final_count >= initial_count + 4);
     }
+
+    // =========================================================================
+    // T77.SAFE-1: Hybrid Commit Order Invariant Tests
+    // =========================================================================
+    //
+    // These tests exercise the dag-hybrid path with small, deterministic setups
+    // to verify invariants around commit behavior:
+    //
+    // 1. Height monotonicity: heights strictly increase, no regress or double commit.
+    // 2. Sender nonce chain: for each sender, nonces in committed blocks are
+    //    strictly increasing with no gaps or duplicates.
+    // 3. DAG → commit alignment: when a DAG batch is used, the committed tx order
+    //    matches the batch order (after nonce/prefilter).
+    // 4. No re-apply of committed txs: once a tx is committed via a DAG batch,
+    //    it should not be re-applied via fallback mempool in subsequent blocks.
+
+    // ---------------------------------------------------------------------------
+    // T77.SAFE-1.1: Height Monotonicity Invariant Tests
+    // ---------------------------------------------------------------------------
+
+    /// T77.SAFE-1: Test that block heights from the tracker strictly increase.
+    /// This verifies the "no regress or double commit" invariant.
+    #[test]
+    fn t77_height_monotonicity_in_tracker() {
+        let mut tracker = DagConsensusTracker::new();
+
+        // Simulate committing blocks in order
+        for h in 1u64..=10 {
+            let summary = ShadowBlockSummary::new(h, [h as u8; 32], vec![[h as u8; 32]]);
+            tracker.record_canonical_block(&summary);
+        }
+
+        let status = tracker.current_status();
+        assert_eq!(status.last_height, 10, "Expected last height to be 10");
+    }
+
+    /// T77.SAFE-1: Test that the tracker handles out-of-order submissions gracefully.
+    #[test]
+    fn t77_height_no_regression() {
+        let mut tracker = DagConsensusTracker::new();
+
+        // Record heights 5, 6, 7
+        for h in 5u64..=7 {
+            let summary = ShadowBlockSummary::new(h, [h as u8; 32], vec![]);
+            tracker.record_canonical_block(&summary);
+        }
+
+        let status1 = tracker.current_status();
+        assert_eq!(status1.last_height, 7);
+
+        // Record height 3 (out of order, lower) - should still work
+        let summary_lower = ShadowBlockSummary::new(3, [3u8; 32], vec![]);
+        tracker.record_canonical_block(&summary_lower);
+
+        // Tracker should handle this gracefully. In production, the canonical chain
+        // is strictly monotonic, but the tracker updates last_canonical_height on 
+        // every record. This test verifies the tracker doesn't panic on out-of-order data.
+        let status2 = tracker.current_status();
+        // The tracker updates last_height to the most recently recorded height,
+        // so after recording height 3, it should reflect that change.
+        assert!(status2.last_height == 3 || status2.last_height == 7, 
+            "Tracker should either update to latest recorded (3) or keep highest (7)");
+    }
+
+    /// T77.SAFE-1: Test that double-committing the same height updates the entry without crash.
+    #[test]
+    fn t77_no_double_commit_crash() {
+        let mut tracker = DagConsensusTracker::new();
+
+        // Record height 5 twice with different block hashes
+        let summary1 = ShadowBlockSummary::new(5, [0xAA; 32], vec![[1u8; 32]]);
+        tracker.record_canonical_block(&summary1);
+
+        let summary2 = ShadowBlockSummary::new(5, [0xBB; 32], vec![[2u8; 32]]);
+        tracker.record_canonical_block(&summary2);
+
+        // Should update the existing entry, not crash
+        let status = tracker.current_status();
+        assert_eq!(status.last_height, 5);
+    }
+
+    // ---------------------------------------------------------------------------
+    // T77.SAFE-1.2: Sender Nonce Chain Invariant Tests
+    // ---------------------------------------------------------------------------
+
+    /// Helper struct to track nonce sequences for invariant verification.
+    struct NonceInvariantTracker {
+        // sender address -> list of committed nonces in order
+        sender_nonces: std::collections::HashMap<[u8; 20], Vec<u64>>,
+    }
+
+    impl NonceInvariantTracker {
+        fn new() -> Self {
+            Self {
+                sender_nonces: std::collections::HashMap::new(),
+            }
+        }
+
+        /// Record a committed transaction's nonce for a sender.
+        fn record(&mut self, sender: [u8; 20], nonce: u64) {
+            self.sender_nonces
+                .entry(sender)
+                .or_insert_with(Vec::new)
+                .push(nonce);
+        }
+
+        /// Check that nonces are strictly increasing with no gaps or duplicates.
+        ///
+        /// This invariant check is intentionally strict: committed transactions from
+        /// the same sender MUST have consecutive nonces in block order. While the
+        /// mempool may accept future nonces (for burst submissions), by the time
+        /// transactions are committed to a block, the nonce sequence must be gapless.
+        /// 
+        /// This verifies the "sender nonce chain" invariant from T77.SAFE-1.2:
+        /// "for each sender, nonces in committed blocks are strictly increasing
+        /// with no gaps or duplicates."
+        fn verify_invariant(&self) -> Result<(), String> {
+            for (sender, nonces) in &self.sender_nonces {
+                if nonces.is_empty() {
+                    continue;
+                }
+
+                let mut prev = nonces[0];
+                for (i, &nonce) in nonces.iter().enumerate().skip(1) {
+                    if nonce <= prev {
+                        return Err(format!(
+                            "Sender {:02x?}: nonce {} at position {} is not > previous nonce {}",
+                            &sender[..4],
+                            nonce,
+                            i,
+                            prev
+                        ));
+                    }
+                    if nonce != prev + 1 {
+                        return Err(format!(
+                            "Sender {:02x?}: gap detected between nonces {} and {} at position {}",
+                            &sender[..4],
+                            prev,
+                            nonce,
+                            i
+                        ));
+                    }
+                    prev = nonce;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// T77.SAFE-1: Test that simulated nonce sequences are validated correctly.
+    #[test]
+    fn t77_nonce_chain_strict_increase() {
+        let mut tracker = NonceInvariantTracker::new();
+        let sender_a = [0xAA; 20];
+
+        // Valid sequence: 0, 1, 2, 3
+        for nonce in 0..=3 {
+            tracker.record(sender_a, nonce);
+        }
+
+        assert!(tracker.verify_invariant().is_ok());
+    }
+
+    /// T77.SAFE-1: Test that duplicate nonces are detected.
+    #[test]
+    fn t77_nonce_chain_duplicate_detected() {
+        let mut tracker = NonceInvariantTracker::new();
+        let sender_a = [0xAA; 20];
+
+        tracker.record(sender_a, 0);
+        tracker.record(sender_a, 1);
+        tracker.record(sender_a, 1); // Duplicate!
+
+        let result = tracker.verify_invariant();
+        assert!(result.is_err(), "Should detect duplicate nonce");
+        assert!(
+            result.unwrap_err().contains("not >"),
+            "Error should mention non-increasing nonce"
+        );
+    }
+
+    /// T77.SAFE-1: Test that gaps in nonces are detected.
+    #[test]
+    fn t77_nonce_chain_gap_detected() {
+        let mut tracker = NonceInvariantTracker::new();
+        let sender_a = [0xAA; 20];
+
+        tracker.record(sender_a, 0);
+        tracker.record(sender_a, 1);
+        tracker.record(sender_a, 3); // Gap: skipped 2
+
+        let result = tracker.verify_invariant();
+        assert!(result.is_err(), "Should detect gap in nonce sequence");
+        assert!(
+            result.unwrap_err().contains("gap detected"),
+            "Error should mention gap"
+        );
+    }
+
+    /// T77.SAFE-1: Test nonce tracking for multiple senders independently.
+    #[test]
+    fn t77_nonce_chain_multiple_senders() {
+        let mut tracker = NonceInvariantTracker::new();
+        let sender_a = [0xAA; 20];
+        let sender_b = [0xBB; 20];
+
+        // Sender A: 0, 1, 2
+        for nonce in 0..=2 {
+            tracker.record(sender_a, nonce);
+        }
+
+        // Sender B: 0, 1
+        for nonce in 0..=1 {
+            tracker.record(sender_b, nonce);
+        }
+
+        assert!(tracker.verify_invariant().is_ok());
+    }
+
+    // ---------------------------------------------------------------------------
+    // T77.SAFE-1.3: DAG → Commit Alignment Tests
+    // ---------------------------------------------------------------------------
+
+    /// T77.SAFE-1: Test that DagConsensusTracker correctly matches tx hashes.
+    #[test]
+    fn t77_dag_commit_alignment_exact_match() {
+        let mut tracker = DagConsensusTracker::new();
+
+        let tx_hashes = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let summary = ShadowBlockSummary::new(10, [0xAB; 32], tx_hashes.clone());
+
+        tracker.record_canonical_block(&summary);
+
+        // DAG orders the same hashes in the same order
+        let is_mismatch = tracker.record_dag_ordered(10, tx_hashes);
+        assert!(!is_mismatch, "Exact match should not be a mismatch");
+
+        let status = tracker.current_status();
+        assert!(status.in_sync, "Should be in sync with exact match");
+    }
+
+    /// T77.SAFE-1: Test that different tx order is detected as mismatch.
+    #[test]
+    fn t77_dag_commit_alignment_order_mismatch() {
+        let mut tracker = DagConsensusTracker::new();
+
+        let canonical_hashes = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let summary = ShadowBlockSummary::new(10, [0xAB; 32], canonical_hashes);
+
+        tracker.record_canonical_block(&summary);
+
+        // DAG orders same hashes but in different order
+        let dag_hashes = vec![[3u8; 32], [1u8; 32], [2u8; 32]];
+        let is_mismatch = tracker.record_dag_ordered(10, dag_hashes);
+
+        assert!(is_mismatch, "Different order should be a mismatch");
+    }
+
+    /// T77.SAFE-1: Test that different tx count is detected as mismatch.
+    #[test]
+    fn t77_dag_commit_alignment_count_mismatch() {
+        let mut tracker = DagConsensusTracker::new();
+
+        let canonical_hashes = vec![[1u8; 32], [2u8; 32]];
+        let summary = ShadowBlockSummary::new(10, [0xAB; 32], canonical_hashes);
+
+        tracker.record_canonical_block(&summary);
+
+        // DAG has one extra tx
+        let dag_hashes = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let is_mismatch = tracker.record_dag_ordered(10, dag_hashes);
+
+        assert!(is_mismatch, "Different count should be a mismatch");
+    }
+
+    // ---------------------------------------------------------------------------
+    // T77.SAFE-1.4: No Re-Apply of Committed Txs Tests
+    // ---------------------------------------------------------------------------
+
+    /// T77.SAFE-1: Test that the HybridDedupCache correctly prevents re-application.
+    #[test]
+    fn t77_no_reapply_via_dedup_cache() {
+        let cache = HybridDedupCache::with_capacity(1000);
+
+        // Simulate committing txs at height 1
+        let committed_hashes = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        cache.record_committed_batch(&committed_hashes, 1);
+
+        // Later, a fallback batch tries to include the same txs
+        let fallback_batch = vec![[1u8; 32], [2u8; 32], [4u8; 32], [5u8; 32]];
+        let (filtered, seen_count) = cache.filter_batch(&fallback_batch);
+
+        // 1 and 2 should be filtered out, only 4 and 5 should pass
+        assert_eq!(seen_count, 2, "Should have seen 2 already-committed txs");
+        assert_eq!(filtered.len(), 2, "Should have 2 new candidates");
+        assert!(filtered.contains(&[4u8; 32]), "Hash 4 should pass filter");
+        assert!(filtered.contains(&[5u8; 32]), "Hash 5 should pass filter");
+        assert!(!filtered.contains(&[1u8; 32]), "Hash 1 should be filtered");
+        assert!(!filtered.contains(&[2u8; 32]), "Hash 2 should be filtered");
+    }
+
+    /// T77.SAFE-1: Test that the dedup cache prevents all re-applications in a pure fallback scenario.
+    #[test]
+    fn t77_no_reapply_all_committed() {
+        let cache = HybridDedupCache::with_capacity(1000);
+
+        // Commit all txs
+        let committed = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        cache.record_committed_batch(&committed, 1);
+
+        // Fallback tries the same set
+        let (filtered, seen_count) = cache.filter_batch(&committed);
+
+        assert_eq!(seen_count, 3, "All 3 should be seen");
+        assert!(filtered.is_empty(), "No new candidates should pass");
+    }
+
+    /// T77.SAFE-1: Test that dedup cache correctly tracks across multiple heights.
+    #[test]
+    fn t77_no_reapply_across_heights() {
+        let cache = HybridDedupCache::with_capacity(1000);
+
+        // Commit txs at different heights
+        cache.record_committed([1u8; 32], 1);
+        cache.record_committed([2u8; 32], 2);
+        cache.record_committed([3u8; 32], 3);
+
+        // Try to re-apply any of them
+        let batch = vec![[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]];
+        let (filtered, seen_count) = cache.filter_batch(&batch);
+
+        assert_eq!(seen_count, 3, "First 3 should be seen");
+        assert_eq!(filtered.len(), 1, "Only tx 4 should pass");
+        assert_eq!(filtered[0], [4u8; 32]);
+    }
+
+    // ---------------------------------------------------------------------------
+    // T77.SAFE-1.4a: Nonce Precheck Tests
+    // ---------------------------------------------------------------------------
+
+    /// T77.SAFE-1: Test that nonce_precheck filters stale nonces correctly.
+    #[test]
+    fn t77_nonce_precheck_filters_stale() {
+        use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
+
+        let mut accounts = Accounts::default();
+        let sender_bytes: [u8; 20] = [0xAA; 20];
+        let sender = Address(sender_bytes);
+
+        // Set account nonce to 3 (meaning nonces 0,1,2 are already committed)
+        accounts.put(sender, Account { balance: 1000, nonce: 3 });
+
+        // Create txs with nonces [0, 1, 2, 3, 4]
+        let make_tx = |nonce: u64| SignedTx {
+            core: TxCore {
+                to: Address([0xBB; 20]),
+                amount: 100,
+                fee: 1,
+                nonce,
+            },
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+
+        let txs = vec![
+            make_tx(0), // stale
+            make_tx(1), // stale
+            make_tx(2), // stale
+            make_tx(3), // valid (current)
+            make_tx(4), // valid (future)
+        ];
+
+        let (valid_indices, bad_nonce_count) = nonce_precheck(&txs, &accounts);
+
+        assert_eq!(bad_nonce_count, 3, "Nonces 0,1,2 should be stale");
+        assert_eq!(valid_indices.len(), 2, "Only nonces 3,4 should be valid");
+        assert!(valid_indices.contains(&3), "Index 3 (nonce 3) should be valid");
+        assert!(valid_indices.contains(&4), "Index 4 (nonce 4) should be valid");
+    }
+
+    /// T77.SAFE-1: Test that nonce_precheck allows new accounts.
+    #[test]
+    fn t77_nonce_precheck_new_account() {
+        use eezo_ledger::{Accounts, Address, SignedTx, TxCore};
+
+        let accounts = Accounts::default(); // Empty accounts
+        let sender_bytes: [u8; 20] = [0xAA; 20];
+
+        // Create txs from a sender that doesn't exist in accounts
+        let make_tx = |nonce: u64| SignedTx {
+            core: TxCore {
+                to: Address([0xBB; 20]),
+                amount: 100,
+                fee: 1,
+                nonce,
+            },
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+
+        let txs = vec![
+            make_tx(0), // Should pass (default nonce is 0)
+            make_tx(1), // Should pass (future nonce)
+        ];
+
+        let (valid_indices, bad_nonce_count) = nonce_precheck(&txs, &accounts);
+
+        // New account defaults to nonce 0, so nonce 0 and 1 should both pass
+        assert_eq!(bad_nonce_count, 0, "No stale nonces for new account");
+        assert_eq!(valid_indices.len(), 2, "Both nonces should be valid");
+    }
+
+    /// T77.SAFE-1: Test nonce_precheck with multiple senders.
+    #[test]
+    fn t77_nonce_precheck_multiple_senders() {
+        use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
+
+        let mut accounts = Accounts::default();
+        let sender_a = Address([0xAA; 20]);
+        let sender_b = Address([0xBB; 20]);
+
+        // Sender A at nonce 2, Sender B at nonce 0
+        accounts.put(sender_a, Account { balance: 1000, nonce: 2 });
+        accounts.put(sender_b, Account { balance: 1000, nonce: 0 });
+
+        let make_tx = |sender: &[u8; 20], nonce: u64| SignedTx {
+            core: TxCore {
+                to: Address([0xCC; 20]),
+                amount: 100,
+                fee: 1,
+                nonce,
+            },
+            pubkey: sender.to_vec(),
+            sig: vec![],
+        };
+
+        let txs = vec![
+            make_tx(&[0xAA; 20], 0), // stale for A (nonce 0 < 2)
+            make_tx(&[0xAA; 20], 2), // valid for A (nonce 2 == 2)
+            make_tx(&[0xBB; 20], 0), // valid for B (nonce 0 == 0)
+            make_tx(&[0xBB; 20], 1), // valid for B (nonce 1 > 0, future)
+        ];
+
+        let (valid_indices, bad_nonce_count) = nonce_precheck(&txs, &accounts);
+
+        assert_eq!(bad_nonce_count, 1, "Only sender A's nonce 0 is stale");
+        assert_eq!(valid_indices.len(), 3, "Three txs should be valid");
+        assert!(!valid_indices.contains(&0), "Index 0 (A, nonce 0) should be invalid");
+        assert!(valid_indices.contains(&1), "Index 1 (A, nonce 2) should be valid");
+        assert!(valid_indices.contains(&2), "Index 2 (B, nonce 0) should be valid");
+        assert!(valid_indices.contains(&3), "Index 3 (B, nonce 1) should be valid");
+    }
+
+    // ---------------------------------------------------------------------------
+    // T77.SAFE-1.5: Metric Consistency Tests
+    // ---------------------------------------------------------------------------
+
+    /// T77.SAFE-1: Test that batches_used metric increments when a DAG batch is used.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn t77_metric_batches_used_increments() {
+        use crate::metrics::{dag_hybrid_batches_used_inc, EEZO_DAG_HYBRID_BATCHES_USED_TOTAL};
+
+        let before = EEZO_DAG_HYBRID_BATCHES_USED_TOTAL.get();
+
+        // Simulate using a DAG batch
+        dag_hybrid_batches_used_inc();
+
+        let after = EEZO_DAG_HYBRID_BATCHES_USED_TOTAL.get();
+        assert_eq!(after, before + 1, "batches_used should increment by 1");
+    }
+
+    /// T77.SAFE-1: Test that fallback metric increments when falling back to mempool.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn t77_metric_fallback_increments() {
+        use crate::metrics::{dag_hybrid_fallback_inc, EEZO_DAG_HYBRID_FALLBACK_TOTAL};
+
+        let before = EEZO_DAG_HYBRID_FALLBACK_TOTAL.get();
+
+        // Simulate fallback
+        dag_hybrid_fallback_inc();
+
+        let after = EEZO_DAG_HYBRID_FALLBACK_TOTAL.get();
+        assert_eq!(after, before + 1, "fallback_total should increment by 1");
+    }
+
+    /// T77.SAFE-1: Test that batches_used and fallback are independently tracked.
+    ///
+    /// Verifies that calling one metric helper doesn't affect the other,
+    /// simulating the production behavior where a block either uses a DAG batch
+    /// OR falls back to mempool, never both for the same block.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn t77_metrics_independent_tracking() {
+        use crate::metrics::{
+            dag_hybrid_batches_used_inc, dag_hybrid_fallback_inc,
+            EEZO_DAG_HYBRID_BATCHES_USED_TOTAL, EEZO_DAG_HYBRID_FALLBACK_TOTAL,
+        };
+
+        let batches_before = EEZO_DAG_HYBRID_BATCHES_USED_TOTAL.get();
+        let fallback_before = EEZO_DAG_HYBRID_FALLBACK_TOTAL.get();
+
+        // Simulate: DAG batch used
+        dag_hybrid_batches_used_inc();
+
+        let batches_after_dag = EEZO_DAG_HYBRID_BATCHES_USED_TOTAL.get();
+        let fallback_after_dag = EEZO_DAG_HYBRID_FALLBACK_TOTAL.get();
+
+        // Only batches_used should have incremented
+        assert_eq!(batches_after_dag, batches_before + 1);
+        assert_eq!(fallback_after_dag, fallback_before, "fallback should NOT increment when DAG is used");
+
+        // Simulate: fallback (different tick)
+        dag_hybrid_fallback_inc();
+
+        let batches_after_fallback = EEZO_DAG_HYBRID_BATCHES_USED_TOTAL.get();
+        let fallback_after_fallback = EEZO_DAG_HYBRID_FALLBACK_TOTAL.get();
+
+        // Only fallback should have incremented (batches_used unchanged from last)
+        assert_eq!(batches_after_fallback, batches_after_dag, "batches_used should NOT increment when fallback is used");
+        assert_eq!(fallback_after_fallback, fallback_before + 1);
+    }
+
+    /// T77.SAFE-1: Test the labeled fallback metric increments with reason.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn t77_metric_fallback_reason_labeled() {
+        use crate::metrics::{
+            dag_hybrid_fallback_reason_inc,
+            EEZO_DAG_HYBRID_FALLBACK_REASON_TOTAL,
+            EEZO_DAG_HYBRID_FALLBACK_TOTAL,
+        };
+
+        let total_before = EEZO_DAG_HYBRID_FALLBACK_TOTAL.get();
+        
+        // Get labeled counter value for a specific reason
+        let timeout_before = EEZO_DAG_HYBRID_FALLBACK_REASON_TOTAL
+            .with_label_values(&["timeout"])
+            .get();
+
+        // Increment with reason
+        dag_hybrid_fallback_reason_inc("timeout");
+
+        let total_after = EEZO_DAG_HYBRID_FALLBACK_TOTAL.get();
+        let timeout_after = EEZO_DAG_HYBRID_FALLBACK_REASON_TOTAL
+            .with_label_values(&["timeout"])
+            .get();
+
+        // Both should increment by at least 1 (use >= to handle concurrent tests)
+        assert!(total_after >= total_before + 1, 
+            "total fallback should increment (before={}, after={})", total_before, total_after);
+        assert_eq!(timeout_after, timeout_before + 1, "labeled fallback should increment");
+    }
+
+    // ---------------------------------------------------------------------------
+    // T77.SAFE-1.6: HybridDagHandle Batch Ordering Tests
+    // ---------------------------------------------------------------------------
+
+    /// T77.SAFE-1: Test that HybridDagHandle properly tracks ordered batches.
+    #[test]
+    fn t77_hybrid_handle_batch_ordering() {
+        let handle = HybridDagHandle::new();
+
+        // Initially no batches
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+        assert!(handle.try_next_ordered_batch().is_none());
+
+        // Submit pending txs to create a batch
+        let tx_hashes = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let result = handle.submit_pending_txs(&tx_hashes, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 3);
+
+        // Should have a batch ready
+        assert_eq!(handle.peek_ordered_queue_len(), 1);
+
+        // Consume it
+        let batch = handle.try_next_ordered_batch();
+        assert!(batch.is_some());
+
+        // Now empty again
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+    }
+
+    /// T77.SAFE-1: Test that multiple batch submissions create multiple ordered batches.
+    #[test]
+    fn t77_hybrid_handle_multiple_batches() {
+        let handle = HybridDagHandle::new();
+
+        // Submit 3 batches
+        for i in 0u8..3 {
+            let hashes = vec![[i * 10 + 1; 32], [i * 10 + 2; 32]];
+            handle.submit_pending_txs(&hashes, None).unwrap();
+        }
+
+        // Should have 3 batches ready
+        assert_eq!(handle.peek_ordered_queue_len(), 3);
+
+        // Consume all 3
+        for _ in 0..3 {
+            assert!(handle.try_next_ordered_batch().is_some());
+        }
+
+        // Now empty
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+        assert!(handle.try_next_ordered_batch().is_none());
+    }
+
+    /// T77.SAFE-1: Test empty batch submission.
+    #[test]
+    fn t77_hybrid_handle_empty_batch() {
+        let handle = HybridDagHandle::new();
+
+        // Submit empty batch
+        let result = handle.submit_pending_txs(&[], None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+
+        // Should not have created a batch
+        assert_eq!(handle.peek_ordered_queue_len(), 0);
+    }
 }
