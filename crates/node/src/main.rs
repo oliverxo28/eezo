@@ -3348,7 +3348,7 @@ async fn main() -> anyhow::Result<()> {
                 let runner = CoreRunnerHandle::spawn(single, Some(persistence.clone()), tick_ms, rollback_on_error);
                 (Some(runner), None)
             }
-            ConsensusMode::Dag | ConsensusMode::DagHybrid => {
+            ConsensusMode::Dag | ConsensusMode::DagHybrid | ConsensusMode::DagPrimary => {
                 // T73.fix / T76.1: In DAG and DagHybrid modes, we need BOTH runners:
                 // - CoreRunnerHandle: for actual block production (drains mempool, executes blocks, commits to ledger)
                 // - DagRunnerHandle: for DAG vertex management and shadow block generation
@@ -3386,10 +3386,10 @@ async fn main() -> anyhow::Result<()> {
                 // It will use the DAG handle as a tx source via set_dag_runner() later
                 let runner = CoreRunnerHandle::spawn(single, Some(persistence.clone()), tick_ms, rollback_on_error);
                 
-                let mode_str = if matches!(consensus_mode, ConsensusMode::DagHybrid) {
-                    "DagHybrid"
-                } else {
-                    "DAG"
+                let mode_str = match consensus_mode {
+                    ConsensusMode::DagHybrid => "DagHybrid",
+                    ConsensusMode::DagPrimary => "DagPrimary",
+                    _ => "DAG",
                 };
                 log::info!(
                     "dag: both CoreRunnerHandle and DagRunnerHandle spawned for {} mode",
@@ -3461,7 +3461,7 @@ async fn main() -> anyhow::Result<()> {
                 let runner = CoreRunnerHandle::spawn(single, tick_ms, rollback_on_error);
                 (Some(runner), None)
             }
-            ConsensusMode::Dag | ConsensusMode::DagHybrid => {
+            ConsensusMode::Dag | ConsensusMode::DagHybrid | ConsensusMode::DagPrimary => {
                 // T73.fix / T76.1: In DAG and DagHybrid modes, we need BOTH runners:
                 // - CoreRunnerHandle: for actual block production (drains mempool, executes blocks, commits to ledger)
                 // - DagRunnerHandle: for DAG vertex management and shadow block generation
@@ -3500,10 +3500,10 @@ async fn main() -> anyhow::Result<()> {
                 // It will use the DAG handle as a tx source via set_dag_runner() later
                 let runner = CoreRunnerHandle::spawn(single, tick_ms, rollback_on_error);
                 
-                let mode_str = if matches!(consensus_mode, ConsensusMode::DagHybrid) {
-                    "DagHybrid"
-                } else {
-                    "DAG"
+                let mode_str = match consensus_mode {
+                    ConsensusMode::DagHybrid => "DagHybrid",
+                    ConsensusMode::DagPrimary => "DagPrimary",
+                    _ => "DAG",
                 };
                 log::info!(
                     "dag: both CoreRunnerHandle and DagRunnerHandle spawned for {} mode",
@@ -4882,6 +4882,19 @@ mod consensus_mode_tests {
         std::env::set_var("EEZO_CONSENSUS_MODE", "DAG_HYBRID");
         assert_eq!(env_consensus_mode(), ConsensusMode::DagHybrid);
 
+        // T78.3: Test dag-primary variants
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag-primary");
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
+
+        std::env::set_var("EEZO_CONSENSUS_MODE", "DAG-PRIMARY");
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
+
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag_primary");
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
+
+        std::env::set_var("EEZO_CONSENSUS_MODE", "DAG_PRIMARY");
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
+
         // Test unknown strings fall back to Hotstuff
         std::env::set_var("EEZO_CONSENSUS_MODE", "unknown");
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
@@ -4950,7 +4963,7 @@ mod consensus_mode_tests {
     /// T76.11: Test that consensus mode gauge values are computed correctly.
     /// This tests the ConsensusMode::gauge_value() method.
     #[test]
-    fn test_consensus_mode_gauge_value() {
+    fn test_consensus_mode_gauge_value_t78_3() {
         let _guard = ENV_LOCK.lock().unwrap();
 
         // Test Hotstuff mode always returns 0
@@ -4964,5 +4977,9 @@ mod consensus_mode_tests {
         // Test DagHybrid mode: returns 1 only when ordering is enabled, else 0
         assert_eq!(ConsensusMode::DagHybrid.gauge_value(false), 0);
         assert_eq!(ConsensusMode::DagHybrid.gauge_value(true), 1);
+
+        // T78.3: Test DagPrimary mode always returns 3
+        assert_eq!(ConsensusMode::DagPrimary.gauge_value(false), 3);
+        assert_eq!(ConsensusMode::DagPrimary.gauge_value(true), 3);
     }
 }
