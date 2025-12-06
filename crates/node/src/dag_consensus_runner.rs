@@ -1245,11 +1245,13 @@ pub fn nonce_contiguity_filter(
                 }
             }
             None => {
-                // Sender derivation failed - pass through (will fail at execution)
-                // This is rare and indicates malformed tx data
-                valid_indices.push(i);
+                // T78.SAFE: Drop txs with invalid pubkeys instead of passing through.
+                // Unlike nonce_precheck (which is best-effort), contiguity filtering
+                // requires strict per-sender ordering. A tx without a valid sender
+                // cannot participate in nonce ordering and must be dropped.
+                gap_count += 1;
                 log::warn!(
-                    "t78_nonce_contiguity: tx hash=0x{} has invalid pubkey, passing through",
+                    "t78_nonce_contiguity: tx hash=0x{} has invalid pubkey, dropping",
                     hex::encode(&tx.hash()[..4])
                 );
             }
@@ -3193,15 +3195,15 @@ mod tests {
             sig: vec![],
         };
 
-        // Out-of-order scenario: 0, 1, 2, 3, 5 (gap at 4), 4 (fills gap), 6 (continues)
+        // Out-of-order scenario: 0, 1, 2, 3, 5 (gap at 4), 4 (fills gap), 6 (gap again)
         let txs = vec![
-            make_tx(0),  // 0: pass (expected 0)
-            make_tx(1),  // 1: pass (expected 1)
-            make_tx(2),  // 2: pass (expected 2)
-            make_tx(3),  // 3: pass (expected 3)
-            make_tx(5),  // 4: GAP (expected 4, got 5)
-            make_tx(4),  // 5: pass (expected 4, got 4 - fills gap!)
-            make_tx(6),  // 6: pass (expected 5, got... wait, this is wrong. Expected is now 5 after including 4)
+            make_tx(0),  // 0: pass (expected 0 → 1)
+            make_tx(1),  // 1: pass (expected 1 → 2)
+            make_tx(2),  // 2: pass (expected 2 → 3)
+            make_tx(3),  // 3: pass (expected 3 → 4)
+            make_tx(5),  // 4: GAP (expected 4, got 5, expected stays 4)
+            make_tx(4),  // 5: pass (expected 4 → 5)
+            make_tx(6),  // 6: GAP (expected 5, got 6)
         ];
 
         let (valid_indices, bad_nonce_count, gap_count) = 

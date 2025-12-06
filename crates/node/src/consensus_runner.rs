@@ -2675,7 +2675,6 @@ impl CoreRunnerHandle {
         // T76.5: Update metrics for nonce prefilter (now includes gaps)
         crate::metrics::dag_hybrid_bad_nonce_prefilter_inc_by(bad_nonce_count as u64);
         // T78.SAFE: Track nonce gap drops separately for observability
-        #[cfg(feature = "metrics")]
         crate::metrics::dag_hybrid_nonce_gap_dropped_inc_by(gap_count as u64);
 
         // Filter txs to only include valid indices, avoiding clones by using indices
@@ -2946,7 +2945,6 @@ impl CoreRunnerHandle {
         // Update metrics for nonce prefilter
         crate::metrics::dag_hybrid_bad_nonce_prefilter_inc_by(bad_nonce_count as u64);
         // T78.SAFE: Track nonce gap drops
-        #[cfg(feature = "metrics")]
         crate::metrics::dag_hybrid_nonce_gap_dropped_inc_by(gap_count as u64);
         
         // Filter txs to only include valid indices
@@ -3289,7 +3287,6 @@ impl CoreRunnerHandle {
         // Update metrics for nonce prefilter
         crate::metrics::dag_hybrid_bad_nonce_prefilter_inc_by(bad_nonce_count as u64);
         // T78.SAFE: Track nonce gap drops
-        #[cfg(feature = "metrics")]
         crate::metrics::dag_hybrid_nonce_gap_dropped_inc_by(gap_count as u64);
         
         // Filter txs to only include valid indices
