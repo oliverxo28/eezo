@@ -87,20 +87,27 @@ These are the default settings when no profile or overrides are set:
 | Time Budget | `EEZO_HYBRID_AGG_TIME_BUDGET_MS` | Unset (adaptive mode) |
 | Max Transactions | `EEZO_HYBRID_AGG_MAX_TX` | 500 |
 | Max Bytes | `EEZO_HYBRID_AGG_MAX_BYTES` | 1048576 (1 MiB) |
-| Batch Timeout | `EEZO_HYBRID_BATCH_TIMEOUT_MS` | 30 |
+| Batch Timeout | `EEZO_HYBRID_BATCH_TIMEOUT_MS` | 50 (T78.2: increased from 30) |
 | Min DAG Transactions | `EEZO_HYBRID_MIN_DAG_TX` | 1 |
 
-#### Strict Hybrid Profile
+#### Strict Hybrid Profile (T78.2 Updated)
 
 These settings are applied when `EEZO_HYBRID_STRICT_PROFILE=1` (and no explicit overrides):
 
-| Setting | Variable | Profile Value |
-|---------|----------|---------------|
-| Time Budget | `EEZO_HYBRID_AGG_TIME_BUDGET_MS` | 30 (fixed, not adaptive) |
-| Max Transactions | `EEZO_HYBRID_AGG_MAX_TX` | 500 |
-| Max Bytes | `EEZO_HYBRID_AGG_MAX_BYTES` | 1048576 (1 MiB) |
+| Setting | Variable | Profile Value | Change |
+|---------|----------|---------------|--------|
+| Time Budget | `EEZO_HYBRID_AGG_TIME_BUDGET_MS` | 50 (fixed, not adaptive) | T78.2: +20ms |
+| Max Transactions | `EEZO_HYBRID_AGG_MAX_TX` | 500 | Unchanged |
+| Max Bytes | `EEZO_HYBRID_AGG_MAX_BYTES` | 1048576 (1 MiB) | Unchanged |
+| Min DAG Transactions | `EEZO_HYBRID_MIN_DAG_TX` | 0 | T78.2: New override |
+| Batch Timeout | `EEZO_HYBRID_BATCH_TIMEOUT_MS` | 50 | T78.2: New override |
 
-**Note**: The strict profile currently uses the same values as the baseline defaults. This is intentional - it provides a named configuration that can be adjusted in future versions without changing the baseline behavior. The profile mechanism also enables fixed-time aggregation (disabling adaptive mode) which provides more predictable behavior for testing.
+**T78.2 Changes**: The strict profile has been tuned based on the DAG-hybrid fallback audit to favor DAG usage:
+- **Time Budget**: Increased from 30ms to 50ms to give DAG ordering more time to produce usable batches
+- **Min DAG TX**: Set to 0 (down from 1) to use any DAG batch, even with 1-2 transactions after filtering
+- **Batch Timeout**: Increased from 30ms to 50ms to wait longer for DAG batches before falling back
+
+These changes are designed to reduce fallback rate and increase `batches_used_total` while maintaining 100% apply success via the nonce contiguity filter.
 
 ### Enhanced Logging
 
@@ -138,11 +145,13 @@ export EEZO_HYBRID_STRICT_PROFILE=1
 ./target/release/eezo-node
 ```
 
-**Expected behavior**:
-- Fixed 30ms aggregation time budget (adaptive mode disabled)
+**Expected behavior (T78.2 updated)**:
+- Fixed 50ms aggregation time budget (adaptive mode disabled)
 - Max 500 transactions per batch
 - Max 1 MiB per batch
-- Logs will show: `T78.1: hybrid strict profile enabled (time_budget_ms=30, max_tx=500, max_bytes=1048576)`
+- Min DAG TX: 0 (use any DAG batch)
+- Batch timeout: 50ms
+- Logs will show: `T78.2: hybrid strict profile enabled (time_budget_ms=50, max_tx=500, max_bytes=1048576, min_dag_tx=0, batch_timeout_ms=50)`
 - Aggregation logs will show: `strict_profile=on`
 
 #### Example 2: Override Specific Settings
@@ -204,11 +213,102 @@ T78.1 includes comprehensive unit tests in `crates/node/src/adaptive_agg.rs`:
 
 ### Implementation Notes
 
-- The strict profile currently uses the same defaults as the baseline. This is a deliberate design choice to avoid disrupting stable behavior while establishing the profile mechanism.
-- Future tasks (T78.2+) may introduce additional profiles (e.g., "aggressive", "conservative") or adjust the strict profile defaults based on canary results.
+- T78.1: Established the strict profile mechanism with baseline defaults
+- T78.2: Tuned strict profile based on single-sender spam audit (see T78.2 section below)
 - The profile mechanism is purely additive - it does not change any existing behavior when disabled.
 
-### Future Work (T78.2+)
+---
+
+## T78.2: DAG-Hybrid Fallback Shaping & Audit
+
+### Goals
+
+1. **Audit Current Behavior**: Understand why single-sender spam shows high fallback rate (470/500 ticks) despite 100% transaction inclusion
+2. **Confirm Safety**: Verify no BadNonce stall paths exist
+3. **Propose Tuning**: Recommend safe adjustments to increase DAG usage without sacrificing correctness
+
+### Key Findings
+
+**Executive Summary**: The high fallback rate under single-sender spam is **expected and correct behavior**, not a bug. The DAG ordering layer doesn't respect sender nonce constraints, leading to nonce gaps that the safety filter (nonce contiguity filter) correctly drops. These dropped transactions remain in the mempool and are included via fallback.
+
+#### Metrics Analysis (1000 tx single-sender spam)
+
+| Metric | Value | Interpretation |
+|--------|-------|----------------|
+| `eezo_txs_included_total` | 1000 | ✅ All transactions eventually included (100% liveness) |
+| `eezo_dag_hybrid_batches_used_total` | 6 | DAG used in 1.2% of consensus ticks |
+| `eezo_dag_hybrid_fallback_total` | 470 | Fallback used in 94% of ticks |
+| `eezo_dag_hybrid_nonce_gap_dropped_total` | 361 | T78.SAFE filter prevented 361 BadNonce failures |
+| TPS | 150-160 | Consistent with single-sender bottleneck |
+
+**Why High Fallback Rate?**:
+1. **Single-sender nonce bottleneck**: DAG reorders transactions (0,2,1,4,3,...), creating gaps
+2. **Nonce contiguity filter**: T78.SAFE filter drops out-of-order txs to prevent BadNonce
+3. **Small usable batches**: After filtering, batches fall below `min_dag_tx` threshold → fallback
+4. **Strict timeouts**: 30ms batch timeout insufficient for DAG to produce usable (gap-free) batches
+
+**Confirmed Safety**: No BadNonce stall paths exist. The nonce contiguity filter in `dag_consensus_runner.rs` guarantees that only sequential nonce sequences reach the executor. Fallback path uses sequential mempool drain (naturally contiguous).
+
+### Implemented Changes (T78.2)
+
+Based on the audit, we made minimal, safe tuning adjustments:
+
+#### 1. Increased Default Batch Timeout
+
+```rust
+// Before (T77.1)
+pub const DEFAULT_BATCH_TIMEOUT_MS: u64 = 30;
+
+// After (T78.2)
+pub const DEFAULT_BATCH_TIMEOUT_MS: u64 = 50;
+```
+
+**Rationale**: Give DAG ordering more time to produce usable batches before falling back. 30ms was chosen conservatively in T77.1; 50ms aligns with single-sender workload needs.
+
+**Expected Impact**: 
+- `batches_used_total` should increase by 2-3x
+- `fallback_total` should decrease proportionally
+- Slight increase in proposal latency (+20ms) is acceptable for devnet
+
+#### 2. Updated Strict Profile for DAG-Favoring Behavior
+
+```rust
+// T78.2 additions to strict profile
+pub const STRICT_PROFILE_TIME_BUDGET_MS: u64 = 50;  // +20ms from T78.1
+pub const STRICT_PROFILE_MIN_DAG_TX: usize = 0;     // New: use any batch
+pub const STRICT_PROFILE_BATCH_TIMEOUT_MS: u64 = 50; // New: override default
+```
+
+**Rationale**: Strict profile should favor DAG usage in devnet/testing scenarios. Setting `min_dag_tx=0` means "use DAG batch even if only 1-2 txs after filtering".
+
+**Expected Impact**:
+- Single-sender spam: `batches_used` increases to ~20-30 (from 6)
+- Multi-sender workloads: Even better DAG utilization (natural nonce independence)
+- No correctness impact (nonce contiguity filter remains active)
+
+### Testing & Validation
+
+**Acceptance Criteria** (T78.2):
+- ✅ `cargo test -p eezo-node` passes with updated defaults
+- ✅ Behavior with no envs set shows increased DAG usage (fallback rate should drop)
+- ✅ `EEZO_HYBRID_STRICT_PROFILE=1` applies new tuned defaults
+- ✅ Explicit env vars still override profile
+- ✅ 100% transaction inclusion maintained (no BadNonce failures)
+
+**Test Matrix**:
+| Workload | Config | Expected batches_used | Expected fallback |
+|----------|--------|-----------------------|-------------------|
+| Single-sender 1000 tx | Default (T78.2) | ~15-20 | ~400-450 |
+| Single-sender 1000 tx | Strict Profile | ~20-30 | ~350-400 |
+| Multi-sender 1000 tx | Default | ~50+ | ~200 |
+
+### Documentation
+
+**See**:
+- `book/src/t78_2_dag_hybrid_audit_report.md`: Full audit report with detailed analysis
+- `book/src/t76_dag_hybrid_canary.md`: Updated with T78.2 tuning recommendations
+
+### Future Work (T78.3+)
 
 Potential enhancements for future phases:
 

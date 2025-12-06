@@ -68,12 +68,13 @@ export EEZO_HYBRID_AGG_MAX_BYTES=$((1 * 1024 * 1024))  # 1 MiB
 # Enable adaptive aggregation (adjusts budget based on load)
 export EEZO_HYBRID_AGG_ADAPTIVE=1
 
-# T77.1: Batch timeout — how long to wait for DAG batches before fallback (ms)
-# Default is 30ms; increase if DAG ordering latency is high under load
-# export EEZO_HYBRID_BATCH_TIMEOUT_MS=30
+# T78.2: Batch timeout — how long to wait for DAG batches before fallback (ms)
+# Default is 50ms (increased from 30ms based on audit); increase further if needed
+# export EEZO_HYBRID_BATCH_TIMEOUT_MS=50
 
-# T78.1: Strict Hybrid Profile — optional preset configuration
-# When set to 1, applies recommended defaults for strict hybrid/devnet mode
+# T78.2: Strict Hybrid Profile — optional preset configuration
+# When set to 1, applies tuned defaults for devnet (favors DAG usage)
+# Profile includes: time_budget_ms=50, min_dag_tx=0, batch_timeout_ms=50
 # See t78_dag_only_devnet.md for details
 # export EEZO_HYBRID_STRICT_PROFILE=1
 
