@@ -2382,7 +2382,7 @@ impl CoreRunnerHandle {
     /// Helper: Drain transactions from mempool with byte budget and max_tx cap.
     fn collect_from_mempool(guard: &mut SingleNode, block_max_tx: usize) -> Vec<SignedTx> {
         let block_byte_budget = guard.cfg.block_byte_budget;
-        let mut txs = guard.mempool.drain_for_block(block_byte_budget);
+        let mut txs = guard.mempool.drain_for_block(block_byte_budget, &guard.accounts);
 
         // Apply max_tx cap if configured, re-enqueue overflow
         if block_max_tx < usize::MAX && txs.len() > block_max_tx {
