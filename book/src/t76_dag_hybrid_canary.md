@@ -27,6 +27,7 @@ The DAG-Hybrid mode (`EEZO_CONSENSUS_MODE=dag-hybrid`) introduces a DAG-based tr
 | **T76.11** | Current: DAG hybrid aggregation, STM executor, adaptive caps |
 | **T76.12** | This task: Canary runbook and SLO scripts |
 | **T77.x** | Future: Flip default to DAG, eventually remove Hotstuff |
+| **T78.1** | Strict Hybrid DAG Tuning - See [T78 documentation](t78_dag_only_devnet.md) |
 
 ---
 
@@ -70,6 +71,11 @@ export EEZO_HYBRID_AGG_ADAPTIVE=1
 # T77.1: Batch timeout — how long to wait for DAG batches before fallback (ms)
 # Default is 30ms; increase if DAG ordering latency is high under load
 # export EEZO_HYBRID_BATCH_TIMEOUT_MS=30
+
+# T78.1: Strict Hybrid Profile — optional preset configuration
+# When set to 1, applies recommended defaults for strict hybrid/devnet mode
+# See t78_dag_only_devnet.md for details
+# export EEZO_HYBRID_STRICT_PROFILE=1
 
 # --- Fast Decode Pool (T76.9) ---
 # Enable zero-copy decode pool for improved tx processing
