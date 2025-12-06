@@ -1153,6 +1153,122 @@ pub fn nonce_precheck(
     (valid_indices, bad_nonce_count)
 }
 
+/// T78.SAFE: Enforce nonce contiguity for DAG-hybrid batch filtering.
+///
+/// This function ensures that only transactions forming a contiguous nonce
+/// sequence per sender (starting from the ledger nonce) are included in the block.
+/// This prevents `BadNonce` execution failures caused by nonce gaps in DAG-ordered
+/// batches.
+///
+/// ## Algorithm
+///
+/// For each transaction in order:
+/// 1. Derive sender from pubkey
+/// 2. Get expected nonce for sender (from account state or tracked state)
+/// 3. Only include tx if `tx.nonce == expected_nonce`
+/// 4. Increment expected nonce when tx is included
+/// 5. Skip tx if `tx.nonce != expected_nonce` (gap or out-of-order)
+///
+/// ## Properties
+///
+/// - **Safety**: Guarantees executor never sees `BadNonce` from nonce gaps
+/// - **Liveness**: Preserves progress by including contiguous prefixes
+/// - **Fairness**: Respects DAG ordering for the subset that passes contiguity
+///
+/// ## Returns
+///
+/// - `valid_indices`: indices of transactions that form contiguous sequences
+/// - `bad_nonce_count`: number of stale nonces (< account.nonce)
+/// - `gap_count`: number of transactions dropped due to nonce gaps
+///
+/// ## Example
+///
+/// ```text
+/// Input batch (sender A): nonces [0, 1, 2, 3, 5, 4, 6, 7]
+/// Account nonce: 0
+/// Output indices: [0, 1, 2, 3] (stops at gap before 5)
+/// gap_count: 4 (nonces 5, 4, 6, 7 were skipped due to gap at 4)
+/// ```
+pub fn nonce_contiguity_filter(
+    txs: &[eezo_ledger::SignedTx],
+    accounts: &eezo_ledger::Accounts,
+) -> (Vec<usize>, usize, usize) {
+    use eezo_ledger::sender_from_pubkey_first20;
+    use std::collections::HashMap;
+
+    let mut valid_indices = Vec::with_capacity(txs.len());
+    let mut bad_nonce_count = 0;
+    let mut gap_count = 0;
+    
+    // Track the next expected nonce for each sender.
+    // Start with ledger nonce, increment as we include txs.
+    let mut expected_nonce: HashMap<eezo_ledger::Address, u64> = HashMap::new();
+
+    for (i, tx) in txs.iter().enumerate() {
+        // Derive sender from pubkey (first 20 bytes)
+        match sender_from_pubkey_first20(tx) {
+            Some(sender) => {
+                // Get or initialize expected nonce for this sender
+                let exp_nonce = *expected_nonce.entry(sender).or_insert_with(|| {
+                    accounts.get(&sender).nonce
+                });
+
+                if tx.core.nonce < exp_nonce {
+                    // Stale nonce (already committed)
+                    bad_nonce_count += 1;
+                    log::debug!(
+                        "t78_nonce_contiguity: tx hash=0x{} has stale nonce {} < expected {}",
+                        hex::encode(&tx.hash()[..4]),
+                        tx.core.nonce,
+                        exp_nonce
+                    );
+                } else if tx.core.nonce == exp_nonce {
+                    // Perfect match - include and advance
+                    valid_indices.push(i);
+                    expected_nonce.insert(sender, exp_nonce + 1);
+                    log::trace!(
+                        "t78_nonce_contiguity: tx hash=0x{} included (nonce={}, sender={:?})",
+                        hex::encode(&tx.hash()[..4]),
+                        tx.core.nonce,
+                        sender
+                    );
+                } else {
+                    // Gap detected (tx.nonce > exp_nonce)
+                    gap_count += 1;
+                    log::debug!(
+                        "t78_nonce_contiguity: tx hash=0x{} skipped due to gap (nonce={}, expected={}, sender={:?})",
+                        hex::encode(&tx.hash()[..4]),
+                        tx.core.nonce,
+                        exp_nonce,
+                        sender
+                    );
+                }
+            }
+            None => {
+                // T78.SAFE: Drop txs with invalid pubkeys instead of passing through.
+                // Unlike nonce_precheck (which is best-effort), contiguity filtering
+                // requires strict per-sender ordering. A tx without a valid sender
+                // cannot participate in nonce ordering and must be dropped.
+                gap_count += 1;
+                log::warn!(
+                    "t78_nonce_contiguity: tx hash=0x{} has invalid pubkey, dropping",
+                    hex::encode(&tx.hash()[..4])
+                );
+            }
+        }
+    }
+
+    log::info!(
+        "t78_nonce_contiguity: filtered {} txs -> {} valid, {} stale, {} gaps",
+        txs.len(),
+        valid_indices.len(),
+        bad_nonce_count,
+        gap_count
+    );
+
+    (valid_indices, bad_nonce_count, gap_count)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3008,5 +3124,344 @@ mod tests {
 
         // Should not have created a batch
         assert_eq!(handle.peek_ordered_queue_len(), 0);
+    }
+
+    // =========================================================================
+    // T78.SAFE: Nonce Contiguity Filter Tests
+    // =========================================================================
+    //
+    // These tests verify that the DAG-hybrid path correctly enforces nonce
+    // contiguity, preventing `BadNonce` execution failures.
+
+    /// T78.SAFE-1: Test basic contiguous sequence (happy path).
+    /// Input: nonces [0, 1, 2, 3] from same sender, account nonce = 0
+    /// Output: all 4 txs pass (contiguous from 0)
+    #[test]
+    fn t78_nonce_contiguity_basic_sequence() {
+        use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
+
+        let mut accounts = Accounts::default();
+        let sender_bytes: [u8; 20] = [0xAA; 20];
+        let sender = Address(sender_bytes);
+
+        // Account at nonce 0
+        accounts.put(sender, Account { balance: 10000, nonce: 0 });
+
+        let make_tx = |nonce: u64| SignedTx {
+            core: TxCore {
+                to: Address([0xBB; 20]),
+                amount: 100,
+                fee: 1,
+                nonce,
+            },
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+
+        // Perfect sequence: 0, 1, 2, 3
+        let txs = vec![make_tx(0), make_tx(1), make_tx(2), make_tx(3)];
+
+        let (valid_indices, bad_nonce_count, gap_count) = 
+            nonce_contiguity_filter(&txs, &accounts);
+
+        assert_eq!(bad_nonce_count, 0, "No stale nonces");
+        assert_eq!(gap_count, 0, "No gaps");
+        assert_eq!(valid_indices.len(), 4, "All 4 txs should pass");
+        assert_eq!(valid_indices, vec![0, 1, 2, 3]);
+    }
+
+    /// T78.SAFE-2: Test nonce gap (out-of-order) recovery.
+    /// Input: nonces [0, 1, 2, 3, 5, 4, 6] from same sender, account nonce = 0
+    /// Output: When 5 arrives (expected 4), it's a gap. But when 4 arrives later, it fills the gap
+    ///         and resumes the sequence. So: [0,1,2,3,4,6] pass, only [5] is dropped.
+    #[test]
+    fn t78_nonce_contiguity_gap_after_sequence() {
+        use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
+
+        let mut accounts = Accounts::default();
+        let sender_bytes: [u8; 20] = [0xAA; 20];
+        let sender = Address(sender_bytes);
+
+        accounts.put(sender, Account { balance: 10000, nonce: 0 });
+
+        let make_tx = |nonce: u64| SignedTx {
+            core: TxCore {
+                to: Address([0xBB; 20]),
+                amount: 100,
+                fee: 1,
+                nonce,
+            },
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+
+        // Out-of-order scenario: 0, 1, 2, 3, 5 (gap at 4), 4 (fills gap), 6 (gap again)
+        let txs = vec![
+            make_tx(0),  // 0: pass (expected 0 → 1)
+            make_tx(1),  // 1: pass (expected 1 → 2)
+            make_tx(2),  // 2: pass (expected 2 → 3)
+            make_tx(3),  // 3: pass (expected 3 → 4)
+            make_tx(5),  // 4: GAP (expected 4, got 5, expected stays 4)
+            make_tx(4),  // 5: pass (expected 4 → 5)
+            make_tx(6),  // 6: GAP (expected 5, got 6)
+        ];
+
+        let (valid_indices, bad_nonce_count, gap_count) = 
+            nonce_contiguity_filter(&txs, &accounts);
+
+        assert_eq!(bad_nonce_count, 0, "No stale nonces");
+        // Actually: nonce 5 is a gap (expected 4), then nonce 4 passes (expected 4),
+        // expected becomes 5, then nonce 6 is a gap (expected 5).
+        // So only nonce 5 and 6 are gaps = 2 gaps.
+        assert_eq!(gap_count, 2, "Nonces 5 and 6 are gaps");
+        assert_eq!(valid_indices.len(), 5, "[0,1,2,3,4] should pass");
+        assert_eq!(valid_indices, vec![0, 1, 2, 3, 5]);
+    }
+
+    /// T78.SAFE-3: Test all nonces are gaps (no match with account nonce).
+    /// Input: nonces [10, 11, 12] from same sender, account nonce = 0
+    /// Output: all dropped as gaps
+    #[test]
+    fn t78_nonce_contiguity_all_gaps() {
+        use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
+
+        let mut accounts = Accounts::default();
+        let sender_bytes: [u8; 20] = [0xAA; 20];
+        let sender = Address(sender_bytes);
+
+        accounts.put(sender, Account { balance: 10000, nonce: 0 });
+
+        let make_tx = |nonce: u64| SignedTx {
+            core: TxCore {
+                to: Address([0xBB; 20]),
+                amount: 100,
+                fee: 1,
+                nonce,
+            },
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+
+        // All nonces are way ahead
+        let txs = vec![make_tx(10), make_tx(11), make_tx(12)];
+
+        let (valid_indices, bad_nonce_count, gap_count) = 
+            nonce_contiguity_filter(&txs, &accounts);
+
+        assert_eq!(bad_nonce_count, 0, "No stale nonces");
+        assert_eq!(gap_count, 3, "All 3 txs are gaps");
+        assert!(valid_indices.is_empty(), "No txs should pass");
+    }
+
+    /// T78.SAFE-4: Test stale nonces are correctly filtered.
+    /// Input: nonces [0, 1, 2, 5, 6] from same sender, account nonce = 3
+    /// Output: [0, 1, 2] stale, [5, 6] gaps (expected 3), none pass
+    #[test]
+    fn t78_nonce_contiguity_stale_and_gaps() {
+        use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
+
+        let mut accounts = Accounts::default();
+        let sender_bytes: [u8; 20] = [0xAA; 20];
+        let sender = Address(sender_bytes);
+
+        // Account already at nonce 3
+        accounts.put(sender, Account { balance: 10000, nonce: 3 });
+
+        let make_tx = |nonce: u64| SignedTx {
+            core: TxCore {
+                to: Address([0xBB; 20]),
+                amount: 100,
+                fee: 1,
+                nonce,
+            },
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+
+        let txs = vec![
+            make_tx(0), // stale
+            make_tx(1), // stale
+            make_tx(2), // stale
+            make_tx(5), // gap (expected 3)
+            make_tx(6), // gap (expected 3)
+        ];
+
+        let (valid_indices, bad_nonce_count, gap_count) = 
+            nonce_contiguity_filter(&txs, &accounts);
+
+        assert_eq!(bad_nonce_count, 3, "Nonces 0,1,2 are stale");
+        assert_eq!(gap_count, 2, "Nonces 5,6 are gaps");
+        assert!(valid_indices.is_empty(), "No txs should pass");
+    }
+
+    /// T78.SAFE-5: Test multi-sender interleaved nonces.
+    /// Input: Sender A [0, 2, 1], Sender B [0, 1, 3, 2]
+    /// Output: A gets [0, 1], B gets [0, 1, 2] (contiguous for each)
+    #[test]
+    fn t78_nonce_contiguity_multi_sender() {
+        use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
+
+        let mut accounts = Accounts::default();
+        
+        let sender_a_bytes: [u8; 20] = [0xAA; 20];
+        let sender_a = Address(sender_a_bytes);
+        let sender_b_bytes: [u8; 20] = [0xBB; 20];
+        let sender_b = Address(sender_b_bytes);
+
+        accounts.put(sender_a, Account { balance: 10000, nonce: 0 });
+        accounts.put(sender_b, Account { balance: 10000, nonce: 0 });
+
+        let make_tx = |sender_bytes: [u8; 20], nonce: u64| SignedTx {
+            core: TxCore {
+                to: Address([0xCC; 20]),
+                amount: 100,
+                fee: 1,
+                nonce,
+            },
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+
+        // Interleaved: A0, A2 (gap), B0, A1, B1, B3 (gap), B2
+        let txs = vec![
+            make_tx(sender_a_bytes, 0), // 0: A nonce 0 → pass
+            make_tx(sender_a_bytes, 2), // 1: A nonce 2 → gap (expected 1)
+            make_tx(sender_b_bytes, 0), // 2: B nonce 0 → pass
+            make_tx(sender_a_bytes, 1), // 3: A nonce 1 → pass (continues from 0)
+            make_tx(sender_b_bytes, 1), // 4: B nonce 1 → pass (continues from 0)
+            make_tx(sender_b_bytes, 3), // 5: B nonce 3 → gap (expected 2)
+            make_tx(sender_b_bytes, 2), // 6: B nonce 2 → pass (continues from 1)
+        ];
+
+        let (valid_indices, bad_nonce_count, gap_count) = 
+            nonce_contiguity_filter(&txs, &accounts);
+
+        assert_eq!(bad_nonce_count, 0, "No stale nonces");
+        assert_eq!(gap_count, 2, "Two gaps: A@2 and B@3");
+        // Expected valid: indices [0, 2, 3, 4, 6]
+        // A: 0 (nonce 0), 3 (nonce 1)
+        // B: 2 (nonce 0), 4 (nonce 1), 6 (nonce 2)
+        assert_eq!(valid_indices.len(), 5);
+        assert_eq!(valid_indices, vec![0, 2, 3, 4, 6]);
+    }
+
+    /// T78.SAFE-6: Test account nonce starting at non-zero value.
+    /// Input: nonces [5, 6, 7] from sender, account nonce = 5
+    /// Output: all pass (contiguous from 5)
+    #[test]
+    fn t78_nonce_contiguity_nonzero_start() {
+        use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
+
+        let mut accounts = Accounts::default();
+        let sender_bytes: [u8; 20] = [0xAA; 20];
+        let sender = Address(sender_bytes);
+
+        // Account starts at nonce 5
+        accounts.put(sender, Account { balance: 10000, nonce: 5 });
+
+        let make_tx = |nonce: u64| SignedTx {
+            core: TxCore {
+                to: Address([0xBB; 20]),
+                amount: 100,
+                fee: 1,
+                nonce,
+            },
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+
+        let txs = vec![make_tx(5), make_tx(6), make_tx(7)];
+
+        let (valid_indices, bad_nonce_count, gap_count) = 
+            nonce_contiguity_filter(&txs, &accounts);
+
+        assert_eq!(bad_nonce_count, 0);
+        assert_eq!(gap_count, 0);
+        assert_eq!(valid_indices.len(), 3);
+        assert_eq!(valid_indices, vec![0, 1, 2]);
+    }
+
+    /// T78.SAFE-7: Test empty transaction list.
+    #[test]
+    fn t78_nonce_contiguity_empty() {
+        use eezo_ledger::Accounts;
+
+        let accounts = Accounts::default();
+        let txs = vec![];
+
+        let (valid_indices, bad_nonce_count, gap_count) = 
+            nonce_contiguity_filter(&txs, &accounts);
+
+        assert_eq!(bad_nonce_count, 0);
+        assert_eq!(gap_count, 0);
+        assert!(valid_indices.is_empty());
+    }
+
+    /// T78.SAFE-8: Test new account (account nonce = 0 by default).
+    /// Input: nonces [0, 1, 2] from sender not in accounts
+    /// Output: all pass (contiguous from default nonce 0)
+    #[test]
+    fn t78_nonce_contiguity_new_account() {
+        use eezo_ledger::{Accounts, SignedTx, TxCore, Address};
+
+        let accounts = Accounts::default(); // No accounts
+        let sender_bytes: [u8; 20] = [0xAA; 20];
+
+        let make_tx = |nonce: u64| SignedTx {
+            core: TxCore {
+                to: Address([0xBB; 20]),
+                amount: 100,
+                fee: 1,
+                nonce,
+            },
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+
+        let txs = vec![make_tx(0), make_tx(1), make_tx(2)];
+
+        let (valid_indices, bad_nonce_count, gap_count) = 
+            nonce_contiguity_filter(&txs, &accounts);
+
+        assert_eq!(bad_nonce_count, 0);
+        assert_eq!(gap_count, 0);
+        assert_eq!(valid_indices.len(), 3);
+        assert_eq!(valid_indices, vec![0, 1, 2]);
+    }
+
+    /// T78.SAFE-9: Test that a single gap stops progression.
+    /// Input: nonces [0, 1, 3, 4, 5] (missing 2)
+    /// Output: [0, 1] pass, [3, 4, 5] dropped as gaps
+    #[test]
+    fn t78_nonce_contiguity_single_gap_stops_progression() {
+        use eezo_ledger::{Accounts, Account, Address, SignedTx, TxCore};
+
+        let mut accounts = Accounts::default();
+        let sender_bytes: [u8; 20] = [0xAA; 20];
+        let sender = Address(sender_bytes);
+
+        accounts.put(sender, Account { balance: 10000, nonce: 0 });
+
+        let make_tx = |nonce: u64| SignedTx {
+            core: TxCore {
+                to: Address([0xBB; 20]),
+                amount: 100,
+                fee: 1,
+                nonce,
+            },
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+
+        // Missing nonce 2
+        let txs = vec![make_tx(0), make_tx(1), make_tx(3), make_tx(4), make_tx(5)];
+
+        let (valid_indices, bad_nonce_count, gap_count) = 
+            nonce_contiguity_filter(&txs, &accounts);
+
+        assert_eq!(bad_nonce_count, 0);
+        assert_eq!(gap_count, 3, "Nonces 3, 4, 5 are all gaps");
+        assert_eq!(valid_indices.len(), 2, "Only [0, 1] should pass");
+        assert_eq!(valid_indices, vec![0, 1]);
     }
 }

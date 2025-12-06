@@ -2767,6 +2767,16 @@ pub static EEZO_DAG_HYBRID_BAD_NONCE_PREFILTER_TOTAL: Lazy<IntCounter> = Lazy::n
     .unwrap()
 });
 
+/// T78.SAFE: Counter: Total transactions dropped due to nonce gaps.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_HYBRID_NONCE_GAP_DROPPED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_hybrid_nonce_gap_dropped_total",
+        "Total transactions dropped due to nonce gaps (tx.nonce != expected nonce)"
+    )
+    .unwrap()
+});
+
 /// Gauge: Current size of the de-dup LRU cache.
 #[cfg(feature = "metrics")]
 pub static EEZO_DAG_HYBRID_DEDUP_LRU_SIZE: Lazy<IntGauge> = Lazy::new(|| {
@@ -2816,6 +2826,19 @@ pub fn dag_hybrid_bad_nonce_prefilter_inc_by(count: u64) {
     }
 }
 
+/// T78.SAFE: Helper: Increment nonce_gap_dropped counter by a specific amount.
+#[inline]
+pub fn dag_hybrid_nonce_gap_dropped_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_HYBRID_NONCE_GAP_DROPPED_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
 /// Helper: Set the de-dup LRU size gauge.
 #[inline]
 pub fn dag_hybrid_dedup_lru_size_set(size: u64) {
@@ -2835,6 +2858,7 @@ pub fn register_dag_hybrid_dedup_metrics() {
     let _ = &*EEZO_DAG_HYBRID_SEEN_BEFORE_TOTAL;
     let _ = &*EEZO_DAG_HYBRID_CANDIDATE_TOTAL;
     let _ = &*EEZO_DAG_HYBRID_BAD_NONCE_PREFILTER_TOTAL;
+    let _ = &*EEZO_DAG_HYBRID_NONCE_GAP_DROPPED_TOTAL; // T78.SAFE
     let _ = &*EEZO_DAG_HYBRID_DEDUP_LRU_SIZE;
 }
 
