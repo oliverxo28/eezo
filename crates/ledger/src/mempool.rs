@@ -446,7 +446,9 @@ impl Mempool {
                 .per_sender
                 .iter()
                 .filter_map(|(sender, q)| {
-                    // Get the next expected nonce for this sender
+                    // Get the next expected nonce for this sender.
+                    // Note: or_insert_with closure is called only once per sender
+                    // (first time we see them), so accounts.get is cached efficiently.
                     let expected_nonce = *next_nonce
                         .entry(*sender)
                         .or_insert_with(|| accounts.get(sender).nonce);

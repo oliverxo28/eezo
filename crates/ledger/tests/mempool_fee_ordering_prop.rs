@@ -122,9 +122,9 @@ proptest! {
         
         // Verify nonce contiguity per sender in drained set
         use std::collections::HashMap;
+        use eezo_ledger::sender_from_pubkey_first20;
         let mut sender_nonces: HashMap<Address, Vec<u64>> = HashMap::new();
         for tx in &drained {
-            use eezo_ledger::sender_from_pubkey_first20;
             if let Some(sender) = sender_from_pubkey_first20(tx) {
                 sender_nonces.entry(sender).or_default().push(tx.core.nonce);
             }
@@ -196,9 +196,9 @@ proptest! {
         
         // 3) Verify nonce contiguity per sender in drained set
         use std::collections::HashMap;
+        use eezo_ledger::sender_from_pubkey_first20;
         let mut sender_nonces: HashMap<Address, Vec<u64>> = HashMap::new();
         for tx in &drained {
-            use eezo_ledger::sender_from_pubkey_first20;
             if let Some(sender) = sender_from_pubkey_first20(tx) {
                 sender_nonces.entry(sender).or_default().push(tx.core.nonce);
             }
