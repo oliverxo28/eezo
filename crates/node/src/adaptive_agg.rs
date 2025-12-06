@@ -56,6 +56,14 @@ pub const DEFAULT_MIN_DAG_TX: usize = 1;
 /// T77.1: Increased from 10ms to 30ms to give DAG ordering more time.
 pub const DEFAULT_BATCH_TIMEOUT_MS: u64 = 30;
 
+// T78.1: Strict hybrid profile defaults
+/// Strict profile time budget (when EEZO_HYBRID_STRICT_PROFILE=1 and no explicit override)
+pub const STRICT_PROFILE_TIME_BUDGET_MS: u64 = 30;
+/// Strict profile max transactions (when EEZO_HYBRID_STRICT_PROFILE=1 and no explicit override)
+pub const STRICT_PROFILE_MAX_TX: usize = 500;
+/// Strict profile max bytes (when EEZO_HYBRID_STRICT_PROFILE=1 and no explicit override)
+pub const STRICT_PROFILE_MAX_BYTES: usize = 1_048_576; // 1 MiB
+
 /// Size of the rolling window for executor latency samples.
 const LATENCY_WINDOW_SIZE: usize = 100;
 
@@ -201,30 +209,74 @@ pub struct AdaptiveAggConfig {
     /// How long to wait for DAG-ordered batches before fallback.
     /// 0 means "no wait" (current behavior).
     batch_timeout_ms: u64,
+    
+    /// T78.1: Whether strict hybrid profile is enabled.
+    /// Set to true when EEZO_HYBRID_STRICT_PROFILE=1 and no explicit envs are set.
+    strict_profile_enabled: bool,
 }
 
 impl AdaptiveAggConfig {
     /// Create a new adaptive aggregation config from environment variables.
     ///
     /// Reads:
+    /// - `EEZO_HYBRID_STRICT_PROFILE`: If set to 1, use strict hybrid profile defaults
     /// - `EEZO_HYBRID_AGG_TIME_BUDGET_MS`: If set, use fixed budget, disable adaptive.
     /// - `EEZO_HYBRID_AGG_MAX_TX`: Max transactions per block (default: 500).
     /// - `EEZO_HYBRID_AGG_MAX_BYTES`: Max bytes per block (default: 1MB).
     /// - `EEZO_HYBRID_MIN_DAG_TX`: Min DAG txs before fallback (default: 1).
     /// - `EEZO_HYBRID_BATCH_TIMEOUT_MS`: Timeout before fallback (default: 30ms).
+    ///
+    /// T78.1: The strict profile is a preset configuration that can be enabled
+    /// via EEZO_HYBRID_STRICT_PROFILE=1. When enabled and individual env vars
+    /// are unset, it applies recommended defaults for strict hybrid/devnet mode.
+    /// Individual env vars always take precedence over the profile.
     pub fn from_env() -> Self {
-        // Check if fixed budget is set
+        // T78.1: Check if strict hybrid profile is enabled
+        let strict_profile_env = std::env::var("EEZO_HYBRID_STRICT_PROFILE")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let strict_profile_requested = strict_profile_env == 1;
+        
+        // Check if explicit envs are set (to determine if profile is actually used)
+        let has_time_budget_override = std::env::var("EEZO_HYBRID_AGG_TIME_BUDGET_MS").is_ok();
+        let has_max_tx_override = std::env::var("EEZO_HYBRID_AGG_MAX_TX").is_ok();
+        let has_max_bytes_override = std::env::var("EEZO_HYBRID_AGG_MAX_BYTES").is_ok();
+        
+        // Profile is "active" only if requested and NO explicit overrides are set
+        let strict_profile_active = strict_profile_requested 
+            && !has_time_budget_override 
+            && !has_max_tx_override 
+            && !has_max_bytes_override;
+        
+        // Check if fixed budget is set (explicit or from profile)
         let fixed_budget_env = std::env::var("EEZO_HYBRID_AGG_TIME_BUDGET_MS")
             .ok()
-            .and_then(|v| v.parse::<u64>().ok());
+            .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| {
+                if strict_profile_active {
+                    Some(STRICT_PROFILE_TIME_BUDGET_MS)
+                } else {
+                    None
+                }
+            });
         
         let (adaptive_enabled, fixed_budget_ms) = match fixed_budget_env {
             Some(budget) => {
                 // Fixed budget set - disable adaptive mode
-                log::info!(
-                    "adaptive-agg: fixed time budget configured: {} ms (adaptive mode disabled)",
-                    budget
-                );
+                if strict_profile_active {
+                    log::info!(
+                        "T78.1: hybrid strict profile enabled (time_budget_ms={}, max_tx={}, max_bytes={})",
+                        budget,
+                        STRICT_PROFILE_MAX_TX,
+                        STRICT_PROFILE_MAX_BYTES
+                    );
+                } else {
+                    log::info!(
+                        "adaptive-agg: fixed time budget configured: {} ms (adaptive mode disabled)",
+                        budget
+                    );
+                }
                 (false, budget)
             }
             None => {
@@ -237,16 +289,30 @@ impl AdaptiveAggConfig {
             }
         };
         
-        // Parse max tx from environment
+        // Parse max tx from environment (with strict profile fallback)
         let max_tx = std::env::var("EEZO_HYBRID_AGG_MAX_TX")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
+            .or_else(|| {
+                if strict_profile_active {
+                    Some(STRICT_PROFILE_MAX_TX)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(DEFAULT_MAX_TX);
         
-        // Parse max bytes from environment
+        // Parse max bytes from environment (with strict profile fallback)
         let max_bytes = std::env::var("EEZO_HYBRID_AGG_MAX_BYTES")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
+            .or_else(|| {
+                if strict_profile_active {
+                    Some(STRICT_PROFILE_MAX_BYTES)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(DEFAULT_MAX_BYTES);
         
         // Parse block interval (for adaptive calculation)
@@ -281,12 +347,18 @@ impl AdaptiveAggConfig {
             latency_tracker: LatencyTracker::new(),
             min_dag_tx,
             batch_timeout_ms,
+            strict_profile_enabled: strict_profile_active,
         }
     }
     
     /// Check if adaptive mode is enabled.
     pub fn is_adaptive(&self) -> bool {
         self.adaptive_enabled
+    }
+    
+    /// T78.1: Check if strict hybrid profile is active.
+    pub fn is_strict_profile_enabled(&self) -> bool {
+        self.strict_profile_enabled
     }
     
     /// Get the maximum transaction count per block.
@@ -402,6 +474,12 @@ pub fn current_time_budget_ms() -> u64 {
 #[inline]
 pub fn is_adaptive_enabled() -> bool {
     ADAPTIVE_AGG_CONFIG.is_adaptive()
+}
+
+/// T78.1: Check if strict hybrid profile is enabled in the global config.
+#[inline]
+pub fn is_strict_profile_enabled() -> bool {
+    ADAPTIVE_AGG_CONFIG.is_strict_profile_enabled()
 }
 
 /// Get the max_tx from the global config.
@@ -606,5 +684,159 @@ mod tests {
             .unwrap_or(DEFAULT_BATCH_TIMEOUT_MS);
         
         assert_eq!(parsed_default, 30);
+    }
+
+    // -------------------------------------------------------------------------
+    // T78.1: Tests for Strict Hybrid Profile
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_strict_profile_constants() {
+        // Verify that strict profile constants are set correctly
+        assert_eq!(STRICT_PROFILE_TIME_BUDGET_MS, 30);
+        assert_eq!(STRICT_PROFILE_MAX_TX, 500);
+        assert_eq!(STRICT_PROFILE_MAX_BYTES, 1_048_576);
+    }
+
+    #[test]
+    fn test_strict_profile_unset_uses_defaults() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Clear all relevant env vars
+        std::env::remove_var("EEZO_HYBRID_STRICT_PROFILE");
+        std::env::remove_var("EEZO_HYBRID_AGG_TIME_BUDGET_MS");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_TX");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_BYTES");
+        
+        // Create config - should use standard defaults (not strict profile)
+        let config = AdaptiveAggConfig::from_env();
+        
+        // Should be in adaptive mode (no fixed budget set)
+        assert!(config.is_adaptive());
+        assert!(!config.is_strict_profile_enabled());
+        
+        // Should use standard defaults
+        assert_eq!(config.max_tx(), DEFAULT_MAX_TX);
+        assert_eq!(config.max_bytes(), DEFAULT_MAX_BYTES);
+    }
+
+    #[test]
+    fn test_strict_profile_enabled_without_overrides() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Enable strict profile, but don't set explicit env vars
+        std::env::set_var("EEZO_HYBRID_STRICT_PROFILE", "1");
+        std::env::remove_var("EEZO_HYBRID_AGG_TIME_BUDGET_MS");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_TX");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_BYTES");
+        
+        // Create config - should use strict profile defaults
+        let config = AdaptiveAggConfig::from_env();
+        
+        // Should be in fixed mode (strict profile sets time budget)
+        assert!(!config.is_adaptive());
+        assert!(config.is_strict_profile_enabled());
+        
+        // Should use strict profile defaults
+        assert_eq!(config.current_time_budget_ms(), STRICT_PROFILE_TIME_BUDGET_MS);
+        assert_eq!(config.max_tx(), STRICT_PROFILE_MAX_TX);
+        assert_eq!(config.max_bytes(), STRICT_PROFILE_MAX_BYTES);
+        
+        // Clean up
+        std::env::remove_var("EEZO_HYBRID_STRICT_PROFILE");
+    }
+
+    #[test]
+    fn test_strict_profile_with_explicit_overrides() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Enable strict profile AND set explicit overrides
+        std::env::set_var("EEZO_HYBRID_STRICT_PROFILE", "1");
+        std::env::set_var("EEZO_HYBRID_AGG_TIME_BUDGET_MS", "50");
+        std::env::set_var("EEZO_HYBRID_AGG_MAX_TX", "1000");
+        std::env::set_var("EEZO_HYBRID_AGG_MAX_BYTES", "2097152");
+        
+        // Create config - explicit overrides should win
+        let config = AdaptiveAggConfig::from_env();
+        
+        // Should be in fixed mode
+        assert!(!config.is_adaptive());
+        // Profile is NOT considered "active" because explicit envs are set
+        assert!(!config.is_strict_profile_enabled());
+        
+        // Should use explicit overrides, not strict profile defaults
+        assert_eq!(config.current_time_budget_ms(), 50);
+        assert_eq!(config.max_tx(), 1000);
+        assert_eq!(config.max_bytes(), 2097152);
+        
+        // Clean up
+        std::env::remove_var("EEZO_HYBRID_STRICT_PROFILE");
+        std::env::remove_var("EEZO_HYBRID_AGG_TIME_BUDGET_MS");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_TX");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_BYTES");
+    }
+
+    #[test]
+    fn test_strict_profile_with_partial_overrides() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Enable strict profile, override only time budget
+        std::env::set_var("EEZO_HYBRID_STRICT_PROFILE", "1");
+        std::env::set_var("EEZO_HYBRID_AGG_TIME_BUDGET_MS", "50");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_TX");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_BYTES");
+        
+        // Create config - partial override deactivates profile
+        let config = AdaptiveAggConfig::from_env();
+        
+        // Should be in fixed mode
+        assert!(!config.is_adaptive());
+        // Profile is NOT active because time_budget is explicitly set
+        assert!(!config.is_strict_profile_enabled());
+        
+        // time_budget should use explicit override
+        assert_eq!(config.current_time_budget_ms(), 50);
+        // max_tx and max_bytes should use standard defaults (not strict profile)
+        assert_eq!(config.max_tx(), DEFAULT_MAX_TX);
+        assert_eq!(config.max_bytes(), DEFAULT_MAX_BYTES);
+        
+        // Clean up
+        std::env::remove_var("EEZO_HYBRID_STRICT_PROFILE");
+        std::env::remove_var("EEZO_HYBRID_AGG_TIME_BUDGET_MS");
+    }
+
+    #[test]
+    fn test_strict_profile_zero_is_disabled() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Set strict profile to 0 (disabled)
+        std::env::set_var("EEZO_HYBRID_STRICT_PROFILE", "0");
+        std::env::remove_var("EEZO_HYBRID_AGG_TIME_BUDGET_MS");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_TX");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_BYTES");
+        
+        // Create config - should not use strict profile
+        let config = AdaptiveAggConfig::from_env();
+        
+        // Should be in adaptive mode
+        assert!(config.is_adaptive());
+        assert!(!config.is_strict_profile_enabled());
+        
+        // Should use standard defaults
+        assert_eq!(config.max_tx(), DEFAULT_MAX_TX);
+        assert_eq!(config.max_bytes(), DEFAULT_MAX_BYTES);
+        
+        // Clean up
+        std::env::remove_var("EEZO_HYBRID_STRICT_PROFILE");
     }
 }
