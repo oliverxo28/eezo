@@ -2666,12 +2666,17 @@ impl CoreRunnerHandle {
             }
         }
 
-        // T76.5: Step 3 - Apply nonce pre-check
-        let (valid_indices, bad_nonce_count) = 
-            crate::dag_consensus_runner::nonce_precheck(&txs, accounts);
+        // T78.SAFE: Step 3 - Apply nonce contiguity filter
+        // This replaces the old nonce_precheck with a stricter filter that enforces
+        // contiguous nonce sequences per sender, preventing BadNonce execution failures.
+        let (valid_indices, bad_nonce_count, gap_count) = 
+            crate::dag_consensus_runner::nonce_contiguity_filter(&txs, accounts);
         
-        // T76.5: Update metrics for nonce prefilter
+        // T76.5: Update metrics for nonce prefilter (now includes gaps)
         crate::metrics::dag_hybrid_bad_nonce_prefilter_inc_by(bad_nonce_count as u64);
+        // T78.SAFE: Track nonce gap drops separately for observability
+        #[cfg(feature = "metrics")]
+        crate::metrics::dag_hybrid_nonce_gap_dropped_inc_by(gap_count as u64);
 
         // Filter txs to only include valid indices, avoiding clones by using indices
         // to directly move elements from the original vector.
@@ -2934,12 +2939,15 @@ impl CoreRunnerHandle {
             }
         }
         
-        // Apply nonce pre-check
-        let (valid_indices, bad_nonce_count) = 
-            crate::dag_consensus_runner::nonce_precheck(&txs, accounts);
+        // T78.SAFE: Apply nonce contiguity filter for aggregated batches
+        let (valid_indices, bad_nonce_count, gap_count) = 
+            crate::dag_consensus_runner::nonce_contiguity_filter(&txs, accounts);
         
         // Update metrics for nonce prefilter
         crate::metrics::dag_hybrid_bad_nonce_prefilter_inc_by(bad_nonce_count as u64);
+        // T78.SAFE: Track nonce gap drops
+        #[cfg(feature = "metrics")]
+        crate::metrics::dag_hybrid_nonce_gap_dropped_inc_by(gap_count as u64);
         
         // Filter txs to only include valid indices
         let final_txs: Vec<SignedTx> = if valid_indices.len() == txs.len() {
@@ -2956,8 +2964,8 @@ impl CoreRunnerHandle {
         };
         
         log::info!(
-            "hybrid-agg: aggregated {} batches, total_n={}, filtered_seen={}, candidates={}, used={}",
-            batches_consumed, total_n, filtered_seen, candidate, bytes_used
+            "hybrid-agg: aggregated {} batches, total_n={}, filtered_seen={}, candidates={}, used={}, gaps={}",
+            batches_consumed, total_n, filtered_seen, candidate, bytes_used, gap_count
         );
         
         // Emit aggregation metrics
@@ -3274,12 +3282,15 @@ impl CoreRunnerHandle {
             }
         }
         
-        // Apply nonce pre-check
-        let (valid_indices, bad_nonce_count) = 
-            crate::dag_consensus_runner::nonce_precheck(&txs, accounts);
+        // T78.SAFE: Apply nonce contiguity filter with caps
+        let (valid_indices, bad_nonce_count, gap_count) = 
+            crate::dag_consensus_runner::nonce_contiguity_filter(&txs, accounts);
         
         // Update metrics for nonce prefilter
         crate::metrics::dag_hybrid_bad_nonce_prefilter_inc_by(bad_nonce_count as u64);
+        // T78.SAFE: Track nonce gap drops
+        #[cfg(feature = "metrics")]
+        crate::metrics::dag_hybrid_nonce_gap_dropped_inc_by(gap_count as u64);
         
         // Filter txs to only include valid indices
         let final_txs: Vec<SignedTx> = if valid_indices.len() == txs.len() {
@@ -3296,8 +3307,8 @@ impl CoreRunnerHandle {
         };
         
         log::info!(
-            "hybrid-agg: aggregated {} batches, total_n={}, filtered_seen={}, candidates={}, used={}, cap_reason={}",
-            batches_consumed, total_n, filtered_seen, candidate, bytes_used, cap_reason.as_str()
+            "hybrid-agg: aggregated {} batches, total_n={}, filtered_seen={}, candidates={}, used={}, gaps={}, cap_reason={}",
+            batches_consumed, total_n, filtered_seen, candidate, bytes_used, gap_count, cap_reason.as_str()
         );
         
         // Emit aggregation metrics
