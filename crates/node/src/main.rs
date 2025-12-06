@@ -407,6 +407,7 @@ async fn dag_status_handler(State(state): State<AppState>) -> Json<DagStatusView
         ConsensusMode::Hotstuff => "hotstuff".to_string(),
         ConsensusMode::Dag => "dag".to_string(),
         ConsensusMode::DagHybrid => "dag-hybrid".to_string(),
+        ConsensusMode::DagPrimary => "dag-primary".to_string(),
     };
 
     // Inspect the optional DAG runner handle in AppState
@@ -1076,16 +1077,20 @@ enum ConsensusMode {
     /// T76.1: Hybrid mode: DAG provides ordered batches as primary tx source,
     /// but Hotstuff/CoreRunnerHandle still performs the canonical commit.
     DagHybrid,
+    /// T78.3: DAG-primary mode: DAG is the only source of tx ordering for committed blocks.
+    /// No mempool fallback on the main path. HotStuff/legacy path runs as shadow checker only.
+    DagPrimary,
 }
 
 impl ConsensusMode {
-    /// T76.11: Compute the gauge value for the consensus mode metric.
+    /// T76.11/T78.3: Compute the gauge value for the consensus mode metric.
     ///
     /// Returns:
     /// - 0 for Hotstuff (default mode)
     /// - 1 for DagHybrid mode with DAG ordering enabled
     /// - 0 for DagHybrid mode with DAG ordering disabled (effectively hotstuff)
     /// - 2 for full DAG mode
+    /// - 3 for DagPrimary mode (DAG-only with shadow HotStuff)
     fn gauge_value(&self, dag_ordering_enabled: bool) -> i64 {
         match self {
             ConsensusMode::Hotstuff => 0,
@@ -1093,6 +1098,7 @@ impl ConsensusMode {
                 if dag_ordering_enabled { 1 } else { 0 }
             }
             ConsensusMode::Dag => 2,
+            ConsensusMode::DagPrimary => 3,
         }
     }
 }
@@ -1103,6 +1109,7 @@ impl ConsensusMode {
 /// - `""`, `"hotstuff"`, `"hs"` → Hotstuff (default)
 /// - `"dag"` → Dag
 /// - `"dag-hybrid"`, `"dag_hybrid"` → DagHybrid
+/// - `"dag-primary"`, `"dag_primary"` → DagPrimary (T78.3)
 /// - Unknown strings log a warning and fall back to Hotstuff.
 fn env_consensus_mode() -> ConsensusMode {
     match env::var("EEZO_CONSENSUS_MODE") {
@@ -1112,6 +1119,7 @@ fn env_consensus_mode() -> ConsensusMode {
                 "" | "hotstuff" | "hs" => ConsensusMode::Hotstuff,
                 "dag" => ConsensusMode::Dag,
                 "dag-hybrid" | "dag_hybrid" => ConsensusMode::DagHybrid,
+                "dag-primary" | "dag_primary" => ConsensusMode::DagPrimary,
                 unknown => {
                     log::warn!(
                         "consensus: unknown EEZO_CONSENSUS_MODE='{}', falling back to hotstuff",

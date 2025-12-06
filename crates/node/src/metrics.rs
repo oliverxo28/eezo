@@ -2185,13 +2185,13 @@ pub fn register_dag_shadow_metrics() {
 // T76.1 — DAG Hybrid mode metrics
 // -----------------------------------------------------------------------------
 
-/// Gauge: Active consensus mode (0=hotstuff, 1=hybrid, 2=dag).
+/// Gauge: Active consensus mode (0=hotstuff, 1=hybrid, 2=dag, 3=dag-primary).
 /// Set at startup based on EEZO_CONSENSUS_MODE environment variable.
 #[cfg(feature = "metrics")]
 pub static EEZO_CONSENSUS_MODE_ACTIVE: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(
         "eezo_consensus_mode_active",
-        "Active consensus mode: 0=hotstuff, 1=hybrid, 2=dag"
+        "Active consensus mode: 0=hotstuff, 1=hybrid, 2=dag, 3=dag-primary"
     )
     .unwrap()
 });
@@ -2200,6 +2200,7 @@ pub static EEZO_CONSENSUS_MODE_ACTIVE: Lazy<IntGauge> = Lazy::new(|| {
 /// - 0 = Hotstuff (default)
 /// - 1 = Hybrid (dag-hybrid mode with DAG ordering enabled)
 /// - 2 = DAG (full DAG mode)
+/// - 3 = DagPrimary (T78.3: DAG-only with shadow HotStuff)
 #[inline]
 pub fn consensus_mode_active_set(mode: i64) {
     #[cfg(feature = "metrics")]
@@ -2866,6 +2867,37 @@ pub fn register_dag_hybrid_dedup_metrics() {
 #[cfg(not(feature = "metrics"))]
 pub fn register_dag_hybrid_dedup_metrics() {
     // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
+// T78.3 — DAG-primary mode shadow checker metrics
+// -----------------------------------------------------------------------------
+
+/// Counter: Total shadow checks performed in dag-primary mode.
+/// Incremented each time the shadow HotStuff/legacy path runs.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_PRIMARY_SHADOW_CHECKS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_primary_shadow_checks_total",
+        "Total shadow HotStuff checks performed in dag-primary mode"
+    )
+    .unwrap()
+});
+
+/// Helper: Increment shadow checks counter.
+#[inline]
+pub fn dag_primary_shadow_checks_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_PRIMARY_SHADOW_CHECKS_TOTAL.inc();
+    }
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+#[inline]
+pub fn dag_primary_shadow_checks_inc() {
+    // No-op when metrics disabled
 }
 
 // -----------------------------------------------------------------------------
