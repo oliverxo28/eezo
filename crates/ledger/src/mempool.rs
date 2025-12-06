@@ -375,6 +375,7 @@ impl Mempool {
     /// considered ready at any given time. Higher nonces remain in the
     /// per-sender queue as futures and will be considered once the lower
     /// nonces have been removed by inclusion.
+
     /// Maximum number of iterations in drain_for_block loop to prevent liveness issues.
     /// This acts as a safety valve when there are many small txs or complex sender patterns.
     /// With typical 500 tx blocks, this limit should never be hit.
@@ -1092,12 +1093,18 @@ mod tests {
         let mut mp = test_mempool();
 
         // Create many senders with one tx each (worst case for the loop)
+        // Each sender has exactly one tx at nonce 0
         let num_senders = 500;
         for i in 0..num_senders {
             let sender_byte = (i % 256) as u8;
-            let (tx, sender) = test_tx(sender_byte, i as u64);
+            // Create tx with nonce=0 for each sender
+            let (tx, sender) = test_tx(sender_byte, 0);
             let q = mp.per_sender.entry(sender).or_default();
-            q.pending.insert(0, make_entry_now(tx, 100));
+            // Only insert if this sender doesn't already have a pending tx
+            // (since sender_byte wraps at 256, some senders may already exist)
+            if q.pending.is_empty() {
+                q.pending.insert(0, make_entry_now(tx, 100));
+            }
         }
 
         assert_eq!(mp.per_sender.len(), 256); // 256 unique senders (limited by sender_byte)
