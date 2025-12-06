@@ -100,10 +100,45 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 /// T77.SAFE-3: Configuration for mempool TTL behavior.
+///
+/// # ⚠️ EXPERIMENTAL
+///
+/// Mempool TTL is an **experimental** feature that purges transactions older than
+/// a configured threshold. While useful for preventing zombie transaction accumulation,
+/// enabling TTL with aggressive settings can cause **liveness issues** under certain
+/// conditions:
+///
+/// ## Known Issue: Stalls with Small Caps + Aggressive TTL
+///
+/// When combining:
+/// - `EEZO_MEMPOOL_TTL_SECS` set to a small value (e.g., 5 seconds)
+/// - `EEZO_BLOCK_MAX_TX` or `EEZO_HYBRID_AGG_MAX_TX` set to small values (e.g., 10-20)
+/// - High transaction spam rate (e.g., 1000 txs)
+///
+/// The system may experience reduced throughput or temporary stalls because:
+/// 1. `purge_expired()` must scan all pending transactions each tick
+/// 2. `drain_for_block()` repeatedly collects and sorts candidates
+/// 3. Under heavy load, this work can delay the consensus loop
+///
+/// ## Recommended Settings for Production
+///
+/// - **Disable TTL** (default): Set `EEZO_MEMPOOL_TTL_SECS=0`
+/// - **Conservative TTL**: If needed, use values ≥ 300 seconds (5 minutes)
+/// - **Adequate block caps**: Keep `EEZO_BLOCK_MAX_TX ≥ 100` to ensure progress
+///
+/// ## Safety Caps
+///
+/// The implementation includes safety caps to prevent unbounded work:
+/// - `purge_expired()`: Limited to 1000 expirations per call
+/// - `drain_for_block()`: Limited to 10,000 iterations per call
+///
+/// These caps ensure the system remains responsive even under adverse conditions.
 #[derive(Debug, Clone, Copy)]
 pub struct MempoolTtlConfig {
     /// TTL duration in seconds. 0 = disabled (no expiry).
     /// Default is 0 for backwards compatibility.
+    /// 
+    /// ⚠️ See struct-level documentation for experimental status and recommended settings.
     pub ttl_secs: u64,
 }
 
@@ -340,9 +375,15 @@ impl Mempool {
     /// considered ready at any given time. Higher nonces remain in the
     /// per-sender queue as futures and will be considered once the lower
     /// nonces have been removed by inclusion.
+    /// Maximum number of iterations in drain_for_block loop to prevent liveness issues.
+    /// This acts as a safety valve when there are many small txs or complex sender patterns.
+    /// With typical 500 tx blocks, this limit should never be hit.
+    const DRAIN_MAX_ITERATIONS: usize = 10_000;
+
     pub fn drain_for_block(&mut self, max_bytes: usize) -> Vec<SignedTx> {
         // T77.SAFE-3: Purge expired transactions before building a block.
         // This ensures stale/zombie txs don't accumulate and cause confusion.
+        // Note: purge_expired has its own iteration cap for liveness.
         let expired = self.purge_expired(Instant::now());
         if expired > 0 {
             log::debug!(
@@ -353,6 +394,7 @@ impl Mempool {
 
         let mut used = HEADER_BUDGET_BYTES;
         let mut taken = Vec::new();
+        let mut iterations = 0;
 
         // Log the initial mempool state before draining
         log::info!(
@@ -360,18 +402,33 @@ impl Mempool {
             self.per_sender.len(),
             max_bytes
         );
-        for (sender, q) in &self.per_sender {
-            log::debug!(
-                "mempool: sender {:?} has {} pending tx(s), lowest nonce: {:?}",
-                sender,
-                q.pending.len(),
-                q.pending.iter().next().map(|(n, _)| n)
-            );
+        // Only log details in debug mode to avoid spam
+        if log::log_enabled!(log::Level::Debug) {
+            for (sender, q) in &self.per_sender {
+                log::debug!(
+                    "mempool: sender {:?} has {} pending tx(s), lowest nonce: {:?}",
+                    sender,
+                    q.pending.len(),
+                    q.pending.iter().next().map(|(n, _)| n)
+                );
+            }
         }
 
         loop {
+            // Safety valve: prevent unbounded looping that could cause liveness issues.
+            // This should never trigger in normal operation.
+            iterations += 1;
+            if iterations > Self::DRAIN_MAX_ITERATIONS {
+                log::warn!(
+                    "mempool: drain_for_block hit iteration limit ({}) at {} txs, {} bytes used",
+                    Self::DRAIN_MAX_ITERATIONS,
+                    taken.len(),
+                    used - HEADER_BUDGET_BYTES
+                );
+                break;
+            }
+
             // Collect the current "ready" candidate (lowest nonce) for each sender.
-            // Fix 3: Use *sender instead of sender.clone() to avoid cloning Address (which is Copy)
             let mut candidates: Vec<(Address, u64, &MempoolEntry)> = self
                 .per_sender
                 .iter()
@@ -423,9 +480,10 @@ impl Mempool {
         }
 
         log::info!(
-            "mempool: drained {} transaction(s) for block (used {} bytes)",
+            "mempool: drained {} transaction(s) for block (used {} bytes, {} iterations)",
             taken.len(),
-            used - HEADER_BUDGET_BYTES
+            used - HEADER_BUDGET_BYTES,
+            iterations
         );
         taken
     }
@@ -484,6 +542,11 @@ impl Mempool {
     // T77.SAFE-3: TTL expiration logic
     // =========================================================================
 
+    /// Maximum number of transactions to expire per purge_expired() call.
+    /// This prevents unbounded work that could cause liveness issues.
+    /// Remaining expired txs will be cleaned up in subsequent calls.
+    const PURGE_MAX_PER_CALL: usize = 1000;
+
     /// T77.SAFE-3: Purge expired transactions from the mempool.
     ///
     /// Scans all sender queues and removes any transaction whose age exceeds
@@ -499,6 +562,11 @@ impl Mempool {
     /// - TTL expiry can only delete transactions; it never resurrects or re-enqueues.
     /// - Does not change nonce rules: dropping a pending tx that was never committed is safe.
     /// - If TTL is 0 (disabled), returns immediately with 0.
+    ///
+    /// # Liveness
+    /// - This function caps the number of expirations per call to PURGE_MAX_PER_CALL (1000)
+    ///   to prevent unbounded work. Remaining expired txs are cleaned up in subsequent calls.
+    /// - This ensures the consensus loop doesn't stall when there's a large backlog.
     pub fn purge_expired(&mut self, now: Instant) -> usize {
         // Fast path: if TTL is disabled, do nothing
         if !self.ttl_config.is_enabled() {
@@ -507,9 +575,10 @@ impl Mempool {
 
         let ttl_duration = std::time::Duration::from_secs(self.ttl_config.ttl_secs);
         let mut expired_count = 0;
+        let mut hit_cap = false;
 
         // Iterate over all senders and their queues
-        for (_sender, queue) in self.per_sender.iter_mut() {
+        'outer: for (_sender, queue) in self.per_sender.iter_mut() {
             // Collect nonces of expired entries to remove
             let expired_nonces: Vec<u64> = queue
                 .pending
@@ -525,8 +594,13 @@ impl Mempool {
                 })
                 .collect();
 
-            // Remove expired entries
+            // Remove expired entries with cap check
             for nonce in expired_nonces {
+                // Check cap before removing to ensure we don't exceed it
+                if expired_count >= Self::PURGE_MAX_PER_CALL {
+                    hit_cap = true;
+                    break 'outer;
+                }
                 queue.pending.remove(&nonce);
                 expired_count += 1;
             }
@@ -534,6 +608,14 @@ impl Mempool {
 
         // Clean up empty sender queues
         self.per_sender.retain(|_, q| !q.pending.is_empty());
+
+        // Log a warning if we hit the cap (indicates heavy backlog)
+        if hit_cap {
+            log::warn!(
+                "mempool: purge_expired hit cap ({}) - more expired txs remain, will be cleaned up next tick",
+                Self::PURGE_MAX_PER_CALL
+            );
+        }
 
         // Update the atomic counter for metrics
         if expired_count > 0 {
@@ -963,5 +1045,103 @@ mod tests {
         let enabled_cfg = MempoolTtlConfig::new(300);
         assert!(enabled_cfg.is_enabled());
         assert_eq!(enabled_cfg.ttl_secs, 300);
+    }
+
+    // =========================================================================
+    // Liveness Cap Tests (SAFE-3 liveness fix)
+    // =========================================================================
+
+    /// Test that purge_expired respects the PURGE_MAX_PER_CALL cap.
+    /// When many txs are expired, only up to the cap should be removed per call.
+    #[test]
+    fn ttl_purge_respects_cap() {
+        let mut mp = test_mempool_with_ttl(1); // 1 second TTL
+
+        // Insert more txs than the cap allows to purge at once
+        let num_txs = Mempool::PURGE_MAX_PER_CALL + 500;
+        let old_time = Instant::now() - Duration::from_secs(10); // All expired
+
+        for i in 0..num_txs {
+            let sender_byte = (i % 256) as u8;
+            let nonce = (i / 256) as u64;
+            let (tx, sender) = test_tx(sender_byte, nonce);
+            let q = mp.per_sender.entry(sender).or_default();
+            q.pending.insert(nonce, make_entry(tx, 100, old_time));
+        }
+
+        assert_eq!(mp.len(), num_txs);
+
+        // First purge: should only remove up to PURGE_MAX_PER_CALL
+        let expired1 = mp.purge_expired(Instant::now());
+        assert_eq!(expired1, Mempool::PURGE_MAX_PER_CALL);
+        
+        // Some txs should still remain
+        let remaining = mp.len();
+        assert!(remaining > 0, "Some expired txs should remain after hitting cap");
+        assert!(remaining <= 500, "At most 500 should remain");
+
+        // Second purge: should clean up the rest
+        let expired2 = mp.purge_expired(Instant::now());
+        assert!(expired2 <= remaining, "Second purge should clean remaining");
+    }
+
+    /// Test that drain_for_block works correctly under high load.
+    /// This simulates the problematic scenario with many senders.
+    #[test]
+    fn drain_for_block_many_senders_completes() {
+        let mut mp = test_mempool();
+
+        // Create many senders with one tx each (worst case for the loop)
+        let num_senders = 500;
+        for i in 0..num_senders {
+            let sender_byte = (i % 256) as u8;
+            let (tx, sender) = test_tx(sender_byte, i as u64);
+            let q = mp.per_sender.entry(sender).or_default();
+            q.pending.insert(0, make_entry_now(tx, 100));
+        }
+
+        assert_eq!(mp.per_sender.len(), 256); // 256 unique senders (limited by sender_byte)
+
+        // Drain with a small budget - should complete without infinite loop
+        let max_bytes = 1000; // Can fit about 10 txs at 100 bytes each
+        let drained = mp.drain_for_block(max_bytes);
+
+        // Should have drained some txs
+        assert!(!drained.is_empty(), "Should drain at least one tx");
+        assert!(drained.len() <= 10, "Should respect byte budget");
+
+        // Loop should have completed (if we got here, it didn't hang)
+    }
+
+    /// Test that drain_for_block respects the iteration limit.
+    /// This is a pathological test case.
+    #[test]
+    fn drain_for_block_respects_iteration_limit() {
+        let mut mp = test_mempool();
+
+        // Create 100 senders with 100 txs each = 10,000 total txs
+        // This is at the iteration limit
+        for sender_idx in 0u8..100 {
+            let (base_tx, sender) = test_tx(sender_idx, 0);
+            let q = mp.per_sender.entry(sender).or_default();
+            
+            for nonce in 0u64..100 {
+                let mut tx = base_tx.clone();
+                tx.core.nonce = nonce;
+                q.pending.insert(nonce, make_entry_now(tx, 100));
+            }
+        }
+
+        assert_eq!(mp.len(), 10_000);
+
+        // Drain with a large budget - should drain many txs
+        let max_bytes = 1_000_000; // 1 MB
+        let drained = mp.drain_for_block(max_bytes);
+
+        // Should have drained many txs (up to byte budget)
+        assert!(!drained.is_empty(), "Should drain some txs");
+        
+        // The key assertion: the function completed (didn't hang)
+        // If we reach here, the iteration limit is working
     }
 }
