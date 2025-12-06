@@ -1440,12 +1440,21 @@ impl CoreRunnerHandle {
                                         let ordering_latency_secs = wait_start.elapsed().as_secs_f64();
                                         crate::metrics::observe_dag_ordering_latency_seconds(ordering_latency_secs);
                                         
-                                        log::debug!(
-                                            "hybrid-agg: successfully aggregated {} batches with {} txs (cap_reason={}, latency_ms={:.2})",
+                                        // T78.1: Enhanced logging for hybrid aggregation with strict profile status
+                                        let strict_profile_str = if crate::adaptive_agg::is_strict_profile_enabled() {
+                                            "strict_profile=on"
+                                        } else {
+                                            "strict_profile=off"
+                                        };
+                                        
+                                        log::info!(
+                                            "T78.1 hybrid-agg: time_budget_ms={} batches={} candidates={} used={} cap_reason={} {}",
+                                            agg_time_budget_ms,
                                             hybrid_aggregated_stats.as_ref().map(|s| s.agg_batches).unwrap_or(0),
+                                            hybrid_aggregated_stats.as_ref().map(|s| s.agg_candidates).unwrap_or(0),
                                             hybrid_aggregated_txs.len(),
                                             cap_reason.as_str(),
-                                            ordering_latency_secs * 1000.0
+                                            strict_profile_str
                                         );
                                     } else {
                                         // Batches consumed but no valid txs - store stats for logging
