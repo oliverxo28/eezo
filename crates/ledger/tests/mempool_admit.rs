@@ -75,7 +75,7 @@ impl Mempool {
         // Placeholder
     }
 
-    pub fn drain_for_block(&mut self, _max_bytes: usize) -> Vec<SignedTx> {
+    pub fn drain_for_block(&mut self, _max_bytes: usize, _accounts: &Accounts) -> Vec<SignedTx> {
         // Placeholder
         let _ = HEADER_BUDGET_BYTES; // keep import “used”
         let _ = self._chain_id;      // keep field “used”
@@ -196,7 +196,8 @@ mod tests {
         let mut mp = Mempool::new(chain_id, certs);
 
         // Placeholder stub → drains empty
-        let drained = mp.drain_for_block(1024);
+        let accounts = Accounts::default();
+        let drained = mp.drain_for_block(1024, &accounts);
         assert!(drained.is_empty(), "placeholder mempool should drain empty");
     }
 }
