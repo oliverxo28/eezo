@@ -7,12 +7,12 @@ pub struct MlDsa44;
 
 use super::{AlgoId, SignatureScheme, PkBytes, SkBytes, SigBytes};
 
-// Backend only when pq44-runtime is enabled.
-#[cfg(feature = "pq44-runtime")]
+// Backend only when mldsa is enabled.
+#[cfg(feature = "mldsa")]
 use pqcrypto_mldsa::mldsa44::{
     keypair, detached_sign, verify_detached_signature, PublicKey, SecretKey, DetachedSignature,
 };
-#[cfg(feature = "pq44-runtime")]
+#[cfg(feature = "mldsa")]
 use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _, DetachedSignature as _};
 
 impl SignatureScheme for MlDsa44 {
@@ -27,19 +27,19 @@ impl SignatureScheme for MlDsa44 {
     type Signature = SigBytes;
 
     fn keypair() -> (Self::PublicKey, Self::SecretKey) {
-        #[cfg(feature = "pq44-runtime")]
+        #[cfg(feature = "mldsa")]
         {
             let (pk, sk) = keypair();
             (PkBytes(pk.as_bytes().to_vec()), SkBytes(sk.as_bytes().to_vec()))
         }
-        #[cfg(not(feature = "pq44-runtime"))]
+        #[cfg(not(feature = "mldsa"))]
         {
             (PkBytes(vec![0u8; Self::PK_LEN]), SkBytes(vec![0u8; Self::SK_LEN]))
         }
     }
 
     fn sign(_sk: &Self::SecretKey, _msg: &[u8]) -> Self::Signature {
-        #[cfg(feature = "pq44-runtime")]
+        #[cfg(feature = "mldsa")]
         {
             if let Ok(sk) = SecretKey::from_bytes(&_sk.0) {
                 let sig = detached_sign(_msg, &sk);
@@ -47,14 +47,14 @@ impl SignatureScheme for MlDsa44 {
             }
             SigBytes(Vec::new())
         }
-        #[cfg(not(feature = "pq44-runtime"))]
+        #[cfg(not(feature = "mldsa"))]
         {
             SigBytes(Vec::new())
         }
     }
 
     fn verify(_pk: &Self::PublicKey, _msg: &[u8], _sig: &Self::Signature) -> bool {
-        #[cfg(feature = "pq44-runtime")]
+        #[cfg(feature = "mldsa")]
         {
             if let (Ok(pk), Ok(sig)) = (
                 PublicKey::from_bytes(&_pk.0),
@@ -64,7 +64,7 @@ impl SignatureScheme for MlDsa44 {
             }
             false
         }
-        #[cfg(not(feature = "pq44-runtime"))]
+        #[cfg(not(feature = "mldsa"))]
         {
             false
         }
@@ -81,37 +81,37 @@ impl SignatureScheme for MlDsa44 {
 // These are convenient for wallet / keystore flows.
 // ---------------------------------------------------------------------------
 
-/// Try to construct a `PkBytes` from raw bytes. When `pq44-runtime` is enabled we
+/// Try to construct a `PkBytes` from raw bytes. When `mldsa` is enabled we
 /// validate with the backend's `PublicKey::from_bytes`; otherwise return `None`.
-#[cfg(feature = "pq44-runtime")]
+#[cfg(feature = "mldsa")]
 pub fn pk_from_bytes(b: &[u8]) -> Option<PkBytes> {
     use pqcrypto_traits::sign::PublicKey as _;
     pqcrypto_mldsa::mldsa44::PublicKey::from_bytes(b).ok()?;
     Some(PkBytes(b.to_vec()))
 }
-#[cfg(not(feature = "pq44-runtime"))]
+#[cfg(not(feature = "mldsa"))]
 pub fn pk_from_bytes(_b: &[u8]) -> Option<PkBytes> { None }
 
-/// Try to construct an `SkBytes` from raw bytes. When `pq44-runtime` is enabled we
+/// Try to construct an `SkBytes` from raw bytes. When `mldsa` is enabled we
 /// validate with the backend's `SecretKey::from_bytes`; otherwise return `None`.
-#[cfg(feature = "pq44-runtime")]
+#[cfg(feature = "mldsa")]
 pub fn sk_from_bytes(b: &[u8]) -> Option<SkBytes> {
     use pqcrypto_traits::sign::SecretKey as _;
     pqcrypto_mldsa::mldsa44::SecretKey::from_bytes(b).ok()?;
     Some(SkBytes(b.to_vec()))
 }
-#[cfg(not(feature = "pq44-runtime"))]
+#[cfg(not(feature = "mldsa"))]
 pub fn sk_from_bytes(_b: &[u8]) -> Option<SkBytes> { None }
 
-/// Try to construct a `SigBytes` from raw bytes. When `pq44-runtime` is enabled we
+/// Try to construct a `SigBytes` from raw bytes. When `mldsa` is enabled we
 /// validate with the backend's `DetachedSignature::from_bytes`; otherwise `None`.
-#[cfg(feature = "pq44-runtime")]
+#[cfg(feature = "mldsa")]
 pub fn sig_from_bytes(b: &[u8]) -> Option<SigBytes> {
     use pqcrypto_traits::sign::DetachedSignature as _;
     pqcrypto_mldsa::mldsa44::DetachedSignature::from_bytes(b).ok()?;
     Some(SigBytes(b.to_vec()))
 }
-#[cfg(not(feature = "pq44-runtime"))]
+#[cfg(not(feature = "mldsa"))]
 pub fn sig_from_bytes(_b: &[u8]) -> Option<SigBytes> { None }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ pub fn sig_from_bytes(_b: &[u8]) -> Option<SigBytes> { None }
 
 /// Verify one ML-DSA-44 signature. Returns Ok(()) if valid, Err otherwise.
 pub fn verify_single(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<()> {
-    #[cfg(feature = "pq44-runtime")]
+    #[cfg(feature = "mldsa")]
     {
         use pqcrypto_mldsa::mldsa44::{PublicKey, DetachedSignature};
         use pqcrypto_traits::sign::{PublicKey as _, DetachedSignature as _};
@@ -135,7 +135,7 @@ pub fn verify_single(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<()> {
         }
     }
 
-    #[cfg(not(feature = "pq44-runtime"))]
+    #[cfg(not(feature = "mldsa"))]
     {
         let _ = (pk, msg, sig);
         Ok(())
@@ -152,7 +152,7 @@ pub fn verify_single(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<()> {
 /// wrapper on success. Callers are expected to supply the same message
 /// bytes that the ledger uses when constructing `SignedTx` digests.
 pub fn sign_single(sk: &[u8], msg: &[u8]) -> Result<SigBytes> {
-    #[cfg(feature = "pq44-runtime")]
+    #[cfg(feature = "mldsa")]
     {
         use pqcrypto_mldsa::mldsa44::SecretKey;
         use pqcrypto_traits::sign::SecretKey as _;
@@ -162,7 +162,7 @@ pub fn sign_single(sk: &[u8], msg: &[u8]) -> Result<SigBytes> {
         Ok(SigBytes(sig.as_bytes().to_vec()))
     }
 
-    #[cfg(not(feature = "pq44-runtime"))]
+    #[cfg(not(feature = "mldsa"))]
     {
         let _ = (sk, msg);
         Ok(SigBytes(Vec::new()))
