@@ -54,15 +54,22 @@ pub const DEFAULT_MIN_DAG_TX: usize = 1;
 /// How long to wait for DAG-ordered batches before fallback.
 /// 0 means "no wait" (current behavior), 30 is a good default for production.
 /// T77.1: Increased from 10ms to 30ms to give DAG ordering more time.
-pub const DEFAULT_BATCH_TIMEOUT_MS: u64 = 30;
+/// T78.2: Increased from 30ms to 50ms based on single-sender spam audit.
+pub const DEFAULT_BATCH_TIMEOUT_MS: u64 = 50;
 
 // T78.1: Strict hybrid profile defaults
 /// Strict profile time budget (when EEZO_HYBRID_STRICT_PROFILE=1 and no explicit override)
-pub const STRICT_PROFILE_TIME_BUDGET_MS: u64 = 30;
+/// T78.2: Increased from 30ms to 50ms to favor DAG usage in devnet
+pub const STRICT_PROFILE_TIME_BUDGET_MS: u64 = 50;
 /// Strict profile max transactions (when EEZO_HYBRID_STRICT_PROFILE=1 and no explicit override)
 pub const STRICT_PROFILE_MAX_TX: usize = 500;
 /// Strict profile max bytes (when EEZO_HYBRID_STRICT_PROFILE=1 and no explicit override)
 pub const STRICT_PROFILE_MAX_BYTES: usize = 1_048_576; // 1 MiB
+/// T78.2: Strict profile min DAG transactions before fallback
+/// Set to 0 to use any DAG batch (even with 1-2 txs after filtering)
+pub const STRICT_PROFILE_MIN_DAG_TX: usize = 0;
+/// T78.2: Strict profile batch timeout (overrides DEFAULT_BATCH_TIMEOUT_MS)
+pub const STRICT_PROFILE_BATCH_TIMEOUT_MS: u64 = 50;
 
 /// Size of the rolling window for executor latency samples.
 const LATENCY_WINDOW_SIZE: usize = 100;
@@ -266,10 +273,12 @@ impl AdaptiveAggConfig {
                 // Fixed budget set - disable adaptive mode
                 if strict_profile_active {
                     log::info!(
-                        "T78.1: hybrid strict profile enabled (time_budget_ms={}, max_tx={}, max_bytes={})",
+                        "T78.2: hybrid strict profile enabled (time_budget_ms={}, max_tx={}, max_bytes={}, min_dag_tx={}, batch_timeout_ms={})",
                         budget,
                         STRICT_PROFILE_MAX_TX,
-                        STRICT_PROFILE_MAX_BYTES
+                        STRICT_PROFILE_MAX_BYTES,
+                        STRICT_PROFILE_MIN_DAG_TX,
+                        STRICT_PROFILE_BATCH_TIMEOUT_MS
                     );
                 } else {
                     log::info!(
@@ -321,16 +330,30 @@ impl AdaptiveAggConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_BLOCK_INTERVAL_MS);
         
-        // T76.12: Parse min DAG tx threshold
+        // T78.2: Parse min DAG tx threshold (with strict profile fallback)
         let min_dag_tx = std::env::var("EEZO_HYBRID_MIN_DAG_TX")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
+            .or_else(|| {
+                if strict_profile_active {
+                    Some(STRICT_PROFILE_MIN_DAG_TX)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(DEFAULT_MIN_DAG_TX);
         
-        // T76.12: Parse batch timeout
+        // T78.2: Parse batch timeout (with strict profile fallback)
         let batch_timeout_ms = std::env::var("EEZO_HYBRID_BATCH_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| {
+                if strict_profile_active {
+                    Some(STRICT_PROFILE_BATCH_TIMEOUT_MS)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(DEFAULT_BATCH_TIMEOUT_MS);
         
         log::info!(
@@ -635,8 +658,8 @@ mod tests {
         assert_eq!(DEFAULT_MAX_BYTES, 1_048_576);
         // T76.12: Check new defaults
         assert_eq!(DEFAULT_MIN_DAG_TX, 1);
-        // T77.1: Updated from 10ms to 30ms
-        assert_eq!(DEFAULT_BATCH_TIMEOUT_MS, 30);
+        // T78.2: Updated from 30ms to 50ms based on audit
+        assert_eq!(DEFAULT_BATCH_TIMEOUT_MS, 50);
     }
 
     // -------------------------------------------------------------------------
@@ -644,15 +667,15 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_batch_timeout_default_30ms_when_unset() {
+    fn test_batch_timeout_default_50ms_when_unset() {
         // Clear the env var to test default behavior
         std::env::remove_var("EEZO_HYBRID_BATCH_TIMEOUT_MS");
         
-        // The default constant should be 30ms
-        assert_eq!(DEFAULT_BATCH_TIMEOUT_MS, 30);
+        // T78.2: The default constant should be 50ms (increased from 30ms)
+        assert_eq!(DEFAULT_BATCH_TIMEOUT_MS, 50);
         
         // When we create a fresh config (without the env var set), 
-        // it should use the default value of 30ms.
+        // it should use the default value of 50ms.
         // Note: We can't easily test from_env() in isolation because it reads
         // global env vars that may be set by other tests. So we test the constant.
     }
@@ -677,13 +700,13 @@ mod tests {
         // Clean up
         std::env::remove_var("EEZO_HYBRID_BATCH_TIMEOUT_MS");
         
-        // After removal, should return default
+        // After removal, should return default (T78.2: 50ms)
         let parsed_default = std::env::var("EEZO_HYBRID_BATCH_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_BATCH_TIMEOUT_MS);
         
-        assert_eq!(parsed_default, 30);
+        assert_eq!(parsed_default, 50);
     }
 
     // -------------------------------------------------------------------------
@@ -838,5 +861,94 @@ mod tests {
         
         // Clean up
         std::env::remove_var("EEZO_HYBRID_STRICT_PROFILE");
+    }
+
+    // -------------------------------------------------------------------------
+    // T78.2: Tests for strict profile DAG tuning overrides
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_strict_profile_constants() {
+        // T78.2: Verify strict profile constants are set correctly
+        assert_eq!(STRICT_PROFILE_TIME_BUDGET_MS, 50);
+        assert_eq!(STRICT_PROFILE_MAX_TX, 500);
+        assert_eq!(STRICT_PROFILE_MAX_BYTES, 1_048_576);
+        assert_eq!(STRICT_PROFILE_MIN_DAG_TX, 0);
+        assert_eq!(STRICT_PROFILE_BATCH_TIMEOUT_MS, 50);
+    }
+
+    #[test]
+    fn test_strict_profile_overrides_min_dag_tx() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Enable strict profile, don't set explicit min_dag_tx
+        std::env::set_var("EEZO_HYBRID_STRICT_PROFILE", "1");
+        std::env::remove_var("EEZO_HYBRID_AGG_TIME_BUDGET_MS");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_TX");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_BYTES");
+        std::env::remove_var("EEZO_HYBRID_MIN_DAG_TX");
+        std::env::remove_var("EEZO_HYBRID_BATCH_TIMEOUT_MS");
+        
+        // Create config - should use strict profile defaults
+        let config = AdaptiveAggConfig::from_env();
+        
+        // Should use strict profile value for min_dag_tx (0)
+        assert_eq!(config.min_dag_tx(), STRICT_PROFILE_MIN_DAG_TX);
+        assert_eq!(config.min_dag_tx(), 0);
+        
+        // Clean up
+        std::env::remove_var("EEZO_HYBRID_STRICT_PROFILE");
+    }
+
+    #[test]
+    fn test_strict_profile_overrides_batch_timeout() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Enable strict profile, don't set explicit batch_timeout
+        std::env::set_var("EEZO_HYBRID_STRICT_PROFILE", "1");
+        std::env::remove_var("EEZO_HYBRID_AGG_TIME_BUDGET_MS");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_TX");
+        std::env::remove_var("EEZO_HYBRID_AGG_MAX_BYTES");
+        std::env::remove_var("EEZO_HYBRID_MIN_DAG_TX");
+        std::env::remove_var("EEZO_HYBRID_BATCH_TIMEOUT_MS");
+        
+        // Create config - should use strict profile defaults
+        let config = AdaptiveAggConfig::from_env();
+        
+        // Should use strict profile value for batch_timeout (50ms)
+        assert_eq!(config.batch_timeout_ms(), STRICT_PROFILE_BATCH_TIMEOUT_MS);
+        assert_eq!(config.batch_timeout_ms(), 50);
+        
+        // Clean up
+        std::env::remove_var("EEZO_HYBRID_STRICT_PROFILE");
+    }
+
+    #[test]
+    fn test_explicit_env_overrides_strict_profile_dag_params() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        
+        // Enable strict profile but override min_dag_tx and batch_timeout
+        std::env::set_var("EEZO_HYBRID_STRICT_PROFILE", "1");
+        std::env::remove_var("EEZO_HYBRID_AGG_TIME_BUDGET_MS");
+        std::env::set_var("EEZO_HYBRID_MIN_DAG_TX", "10");
+        std::env::set_var("EEZO_HYBRID_BATCH_TIMEOUT_MS", "100");
+        
+        // Create config - explicit overrides should win
+        let config = AdaptiveAggConfig::from_env();
+        
+        // Should use explicit overrides, not strict profile values
+        assert_eq!(config.min_dag_tx(), 10);
+        assert_eq!(config.batch_timeout_ms(), 100);
+        
+        // Clean up
+        std::env::remove_var("EEZO_HYBRID_STRICT_PROFILE");
+        std::env::remove_var("EEZO_HYBRID_MIN_DAG_TX");
+        std::env::remove_var("EEZO_HYBRID_BATCH_TIMEOUT_MS");
     }
 }
