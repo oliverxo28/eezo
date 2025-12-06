@@ -618,10 +618,10 @@ impl SingleNode {
         let ts_ms = now_ms();
 
         // Drain fee/byte-ordered candidates under the byte budget
-        // 2a) Change to use 'let mut'
+        // Pass accounts for nonce validation to ensure contiguous sequences
         let mut candidates = self
             .mempool
-            .drain_for_block(self.cfg.block_byte_budget);
+            .drain_for_block(self.cfg.block_byte_budget, &self.accounts);
 
         // PATCH 3 (optional): log drained candidate count
         log::info!(

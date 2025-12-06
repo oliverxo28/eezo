@@ -371,17 +371,23 @@ impl Mempool {
     /// Global order across all *ready* txs:
     ///   fee desc -> nonce asc.
     ///
-    /// For each sender, only the transaction with the smallest nonce is
-    /// considered ready at any given time. Higher nonces remain in the
-    /// per-sender queue as futures and will be considered once the lower
-    /// nonces have been removed by inclusion.
+    /// For each sender, only transactions forming a contiguous nonce sequence
+    /// starting from the current ledger nonce are considered. Transactions with
+    /// nonce gaps are kept in the mempool for future blocks.
+    ///
+    /// # Arguments
+    /// * `max_bytes` - Maximum byte budget for the block
+    /// * `accounts` - Current account state for nonce validation
+    ///
+    /// # Returns
+    /// Vector of transactions that passed nonce validation and fit within budget
 
     /// Maximum number of iterations in drain_for_block loop to prevent liveness issues.
     /// This acts as a safety valve when there are many small txs or complex sender patterns.
     /// With typical 500 tx blocks, this limit should never be hit.
     const DRAIN_MAX_ITERATIONS: usize = 10_000;
 
-    pub fn drain_for_block(&mut self, max_bytes: usize) -> Vec<SignedTx> {
+    pub fn drain_for_block(&mut self, max_bytes: usize, accounts: &Accounts) -> Vec<SignedTx> {
         // T77.SAFE-3: Purge expired transactions before building a block.
         // This ensures stale/zombie txs don't accumulate and cause confusion.
         // Note: purge_expired has its own iteration cap for liveness.
@@ -396,6 +402,11 @@ impl Mempool {
         let mut used = HEADER_BUDGET_BYTES;
         let mut taken = Vec::new();
         let mut iterations = 0;
+        
+        // Track the next expected nonce for each sender in this block.
+        // Start with the ledger nonce, increment as we include txs.
+        use std::collections::HashMap;
+        let mut next_nonce: HashMap<Address, u64> = HashMap::new();
 
         // Log the initial mempool state before draining
         log::info!(
@@ -430,14 +441,34 @@ impl Mempool {
             }
 
             // Collect the current "ready" candidate (lowest nonce) for each sender.
+            // Only include txs that match the expected nonce for that sender.
             let mut candidates: Vec<(Address, u64, &MempoolEntry)> = self
                 .per_sender
                 .iter()
                 .filter_map(|(sender, q)| {
-                    q.pending
-                        .iter()
-                        .next()
-                        .map(|(nonce, entry)| (*sender, *nonce, entry))
+                    // Get the next expected nonce for this sender.
+                    // Note: or_insert_with closure is called only once per sender
+                    // (first time we see them), so accounts.get is cached efficiently.
+                    let expected_nonce = *next_nonce
+                        .entry(*sender)
+                        .or_insert_with(|| accounts.get(sender).nonce);
+                    
+                    // Find the lowest nonce tx in the queue
+                    if let Some((nonce, entry)) = q.pending.iter().next() {
+                        // Only include if nonce matches expected (contiguous sequence)
+                        if *nonce == expected_nonce {
+                            return Some((*sender, *nonce, entry));
+                        } else {
+                            // Log nonce gap for debugging
+                            log::debug!(
+                                "mempool: skipping tx from sender {:?} with nonce {} (expected {})",
+                                sender,
+                                nonce,
+                                expected_nonce
+                            );
+                        }
+                    }
+                    None
                 })
                 .collect();
 
@@ -473,6 +504,8 @@ impl Mempool {
                 if let Some(entry) = q.pending.remove(&nonce) {
                     used += entry.size_bytes;
                     taken.push(entry.tx);
+                    // Update next expected nonce for this sender
+                    next_nonce.insert(sender, nonce + 1);
                 }
             }
 
@@ -1111,7 +1144,8 @@ mod tests {
 
         // Drain with a small budget - should complete without infinite loop
         let max_bytes = 1000; // Can fit about 10 txs at 100 bytes each
-        let drained = mp.drain_for_block(max_bytes);
+        let accounts = Accounts::default();
+        let drained = mp.drain_for_block(max_bytes, &accounts);
 
         // Should have drained some txs
         assert!(!drained.is_empty(), "Should drain at least one tx");
@@ -1143,12 +1177,130 @@ mod tests {
 
         // Drain with a large budget - should drain many txs
         let max_bytes = 1_000_000; // 1 MB
-        let drained = mp.drain_for_block(max_bytes);
+        let accounts = Accounts::default();
+        let drained = mp.drain_for_block(max_bytes, &accounts);
 
         // Should have drained many txs (up to byte budget)
         assert!(!drained.is_empty(), "Should drain some txs");
         
         // The key assertion: the function completed (didn't hang)
         // If we reach here, the iteration limit is working
+    }
+
+    /// Test nonce gap handling: mempool should only drain contiguous nonce sequences.
+    /// This is the main fix for the issue described in the problem statement.
+    #[test]
+    fn drain_for_block_handles_nonce_gaps() {
+        let mut mp = test_mempool();
+        let mut accounts = Accounts::default();
+        
+        // Create a sender with some balance
+        let (_tx0, sender) = test_tx(0xAA, 0);
+        accounts.credit(sender, 10_000);
+        
+        // Enqueue txs with nonces [0-7] first (contiguous)
+        let q = mp.per_sender.entry(sender).or_default();
+        for nonce in 0..=7 {
+            q.pending.insert(nonce, make_entry_now(test_tx(0xAA, nonce).0, 100));
+        }
+        
+        assert_eq!(mp.len(), 8);
+        
+        // First drain: should get [0-7] (contiguous from ledger nonce 0)
+        let max_bytes = 10_000;
+        let drained = mp.drain_for_block(max_bytes, &accounts);
+        assert_eq!(drained.len(), 8, "Should drain [0-7]");
+        for (i, tx) in drained.iter().enumerate() {
+            assert_eq!(tx.core.nonce, i as u64, "Nonce should match index");
+        }
+        
+        // Apply the drained txs to update account nonce
+        for tx in &drained {
+            let sender = sender_from_pubkey_first20(tx).unwrap();
+            let mut acc = accounts.get(&sender);
+            acc.nonce += 1;
+            acc.balance = acc.balance.saturating_sub(tx.core.amount + tx.core.fee);
+            accounts.put(sender, acc);
+        }
+        
+        // Now ledger nonce is 8, mempool is empty
+        assert_eq!(mp.len(), 0);
+        assert_eq!(accounts.get(&sender).nonce, 8);
+        
+        // Enqueue more txs with nonces [8, 9, 10, 11] (all contiguous from 8)
+        let q = mp.per_sender.entry(sender).or_default();
+        q.pending.insert(8, make_entry_now(test_tx(0xAA, 8).0, 100));
+        q.pending.insert(9, make_entry_now(test_tx(0xAA, 9).0, 100));
+        q.pending.insert(10, make_entry_now(test_tx(0xAA, 10).0, 100));
+        q.pending.insert(11, make_entry_now(test_tx(0xAA, 11).0, 100));
+        
+        // Second drain: should get [8, 9, 10, 11] (all contiguous from nonce 8)
+        let drained2 = mp.drain_for_block(max_bytes, &accounts);
+        assert_eq!(drained2.len(), 4, "Should drain [8-11]");
+        assert_eq!(drained2[0].core.nonce, 8);
+        assert_eq!(drained2[1].core.nonce, 9);
+        assert_eq!(drained2[2].core.nonce, 10);
+        assert_eq!(drained2[3].core.nonce, 11);
+        
+        // Mempool should now be empty
+        assert_eq!(mp.len(), 0);
+    }
+
+    /// Test that nonce gaps prevent block building correctly.
+    /// If mempool has [0-7, 10, 11] (missing 8-9), only [0-7] should be drained.
+    #[test]
+    fn drain_for_block_stops_at_nonce_gap() {
+        let mut mp = test_mempool();
+        let mut accounts = Accounts::default();
+        
+        let (_, sender) = test_tx(0xBB, 0);
+        accounts.credit(sender, 10_000);
+        
+        // Enqueue txs with nonces [0-7, 10, 11] (gap at 8-9)
+        let q = mp.per_sender.entry(sender).or_default();
+        for nonce in 0..=7 {
+            q.pending.insert(nonce, make_entry_now(test_tx(0xBB, nonce).0, 100));
+        }
+        q.pending.insert(10, make_entry_now(test_tx(0xBB, 10).0, 100));
+        q.pending.insert(11, make_entry_now(test_tx(0xBB, 11).0, 100));
+        
+        assert_eq!(mp.len(), 10);
+        
+        // Drain should get [0-7], stop at gap
+        let drained = mp.drain_for_block(10_000, &accounts);
+        assert_eq!(drained.len(), 8, "Should drain only [0-7], stop at gap");
+        for (i, tx) in drained.iter().enumerate() {
+            assert_eq!(tx.core.nonce, i as u64);
+        }
+        
+        // Mempool should still have [10, 11]
+        assert_eq!(mp.len(), 2);
+        
+        // Simulate applying [0-7] to ledger
+        let mut acc = accounts.get(&sender);
+        acc.nonce = 8;
+        accounts.put(sender, acc);
+        
+        // Try to drain again - should get nothing (nonces 10, 11 don't match expected 8)
+        let drained2 = mp.drain_for_block(10_000, &accounts);
+        assert_eq!(drained2.len(), 0, "Should drain nothing due to gap at nonce 8");
+        
+        // Mempool should still have [10, 11]
+        assert_eq!(mp.len(), 2);
+        
+        // Now add nonce 8 and 9
+        let q = mp.per_sender.get_mut(&sender).unwrap();
+        q.pending.insert(8, make_entry_now(test_tx(0xBB, 8).0, 100));
+        q.pending.insert(9, make_entry_now(test_tx(0xBB, 9).0, 100));
+        
+        // Drain should now get [8, 9, 10, 11]
+        let drained3 = mp.drain_for_block(10_000, &accounts);
+        assert_eq!(drained3.len(), 4, "Should drain [8-11] after filling gap");
+        assert_eq!(drained3[0].core.nonce, 8);
+        assert_eq!(drained3[1].core.nonce, 9);
+        assert_eq!(drained3[2].core.nonce, 10);
+        assert_eq!(drained3[3].core.nonce, 11);
+        
+        assert_eq!(mp.len(), 0);
     }
 }
