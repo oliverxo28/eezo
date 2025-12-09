@@ -395,6 +395,30 @@ enum HybridModeConfig {
     DagPrimary,
 }
 
+/// T78.7: Helper to check if DAG ordering is enabled from environment.
+/// Respects the devnet-safe feature for default value.
+/// This is used for logging purposes in consensus_runner.
+#[inline]
+fn dag_ordering_enabled_from_env() -> bool {
+    // T78.7: Default depends on build profile
+    #[cfg(feature = "devnet-safe")]
+    let default_enabled = true;
+    #[cfg(not(feature = "devnet-safe"))]
+    let default_enabled = false;
+
+    match std::env::var("EEZO_DAG_ORDERING_ENABLED") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            match s.as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                _ => default_enabled,
+            }
+        }
+        Err(_) => default_enabled,
+    }
+}
+
 impl HybridModeConfig {
     /// Parse hybrid mode configuration from environment.
     fn from_env() -> Self {
@@ -408,14 +432,15 @@ impl HybridModeConfig {
             return HybridModeConfig::DagPrimary;
         }
         
+        // T78.7: In devnet-safe builds with empty/unset mode, default to DagPrimary
+        #[cfg(feature = "devnet-safe")]
+        if mode.is_empty() {
+            return HybridModeConfig::DagPrimary;
+        }
+        
         let is_dag_hybrid = mode == "dag-hybrid" || mode == "dag_hybrid";
         
-        let ordering_enabled = std::env::var("EEZO_DAG_ORDERING_ENABLED")
-            .map(|v| {
-                let s = v.trim().to_ascii_lowercase();
-                matches!(s.as_str(), "1" | "true" | "yes" | "on")
-            })
-            .unwrap_or(false);
+        let ordering_enabled = dag_ordering_enabled_from_env();
         
         if is_dag_hybrid && ordering_enabled {
             HybridModeConfig::HybridEnabled
@@ -539,7 +564,8 @@ impl CoreRunnerHandle {
             // T78.5: Create shadow HotStuff checker if dag-primary mode and shadow enabled.
             // This checker runs after each committed block to verify invariants.
             // (non-persistence variant)
-            #[cfg(feature = "dag-consensus")]
+            // T78.7: Shadow checker only compiled when hotstuff-shadow feature is enabled
+            #[cfg(all(feature = "dag-consensus", feature = "hotstuff-shadow"))]
             let mut shadow_checker: Option<crate::shadow_hotstuff::ShadowHotstuffChecker> = {
                 // Check if shadow checker is enabled via env
                 let shadow_enabled = std::env::var("EEZO_DAG_PRIMARY_SHADOW_ENABLED")
@@ -566,6 +592,15 @@ impl CoreRunnerHandle {
                     None
                 }
             };
+            // T78.7: When hotstuff-shadow feature is not enabled, shadow checker is unavailable
+            #[cfg(all(feature = "dag-consensus", not(feature = "hotstuff-shadow")))]
+            {
+                let dag_ordering_enabled = dag_ordering_enabled_from_env();
+                log::info!(
+                    "consensus: mode={:?}, dag_ordering_enabled={}, shadow_hotstuff=not-compiled (non-persistence)",
+                    hybrid_mode_cfg, dag_ordering_enabled
+                );
+            }
             // Suppress unused variable warning when dag-consensus feature is off
             #[cfg(not(feature = "dag-consensus"))]
             let _ = hybrid_mode_cfg;
@@ -1337,9 +1372,10 @@ impl CoreRunnerHandle {
                 crate::metrics::register_t77_dag_ordering_latency_metrics();
             }
             
-            // T78.5: Create shadow HotStuff checker if dag-primary mode and shadow enabled.
+            // T78.5/T78.7: Create shadow HotStuff checker if dag-primary mode and shadow enabled.
             // This checker runs after each committed block to verify invariants.
-            #[cfg(feature = "dag-consensus")]
+            // T78.7: Shadow checker only compiled when hotstuff-shadow feature is enabled
+            #[cfg(all(feature = "dag-consensus", feature = "hotstuff-shadow"))]
             let mut shadow_checker: Option<crate::shadow_hotstuff::ShadowHotstuffChecker> = {
                 // Check if shadow checker is enabled via env
                 let shadow_enabled = std::env::var("EEZO_DAG_PRIMARY_SHADOW_ENABLED")
@@ -1366,6 +1402,15 @@ impl CoreRunnerHandle {
                     None
                 }
             };
+            // T78.7: When hotstuff-shadow feature is not enabled, shadow checker is unavailable
+            #[cfg(all(feature = "dag-consensus", not(feature = "hotstuff-shadow")))]
+            {
+                let dag_ordering_enabled = dag_ordering_enabled_from_env();
+                log::info!(
+                    "consensus: mode={:?}, dag_ordering_enabled={}, shadow_hotstuff=not-compiled",
+                    hybrid_mode_cfg, dag_ordering_enabled
+                );
+            }
             
             // dev/test knobs
             let log_every: u64 = env::var("EEZO_LOG_COMMIT_EVERY").ok().and_then(|s| s.parse().ok()).unwrap_or(50);
@@ -1944,11 +1989,12 @@ impl CoreRunnerHandle {
                                         }
                                     }
 
-                                    // T78.5: Run shadow HotStuff checker in dag-primary mode (real checker)
+                                    // T78.5/T78.7: Run shadow HotStuff checker in dag-primary mode (real checker)
                                     // NOTE: The checker runs on EVERY committed block in dag-primary mode,
                                     // not just when hybrid batches are used. This ensures invariant checking
                                     // for all blocks regardless of tx source.
-                                    #[cfg(feature = "dag-consensus")]
+                                    // T78.7: Only compiled when hotstuff-shadow feature is enabled
+                                    #[cfg(all(feature = "dag-consensus", feature = "hotstuff-shadow"))]
                                     if let Some(ref mut checker) = shadow_checker {
                                         // Convert txs to DecodedTx for the checker
                                         let decoded_txs: Vec<std::sync::Arc<crate::tx_decode_pool::DecodedTx>> = 
