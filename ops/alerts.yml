@@ -148,3 +148,67 @@ groups:
       annotations:
         summary: "Adaptive aggregation budget changed"
         description: "Time budget is now {{ $value }}ms. Adaptive mode adjusting to load."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T78.6: DAG-Primary Canary SLO Alerts
+# ─────────────────────────────────────────────────────────────────────────────
+- name: eezo-dag-primary
+  rules:
+    # Critical: Any shadow mismatch is a critical bug
+    - alert: DagPrimaryShadowMismatch
+      expr: increase(eezo_dag_primary_shadow_mismatch_total[5m]) > 0
+      for: 1m
+      labels: { severity: page }
+      annotations:
+        summary: "DAG-primary shadow mismatch detected"
+        description: "{{ $value }} mismatches between DAG ordering and shadow HotStuff. Critical divergence bug. Stop canary immediately."
+
+    # Warning: Shadow checker not running while blocks are applying
+    - alert: DagPrimaryShadowNotRunning
+      expr: |
+        (increase(block_applied_total[5m]) > 0)
+        and (increase(eezo_dag_primary_shadow_checks_total[5m]) == 0)
+      for: 5m
+      labels: { severity: warn }
+      annotations:
+        summary: "DAG-primary shadow checker not running"
+        description: "Blocks are being applied but shadow checker is not running. Check EEZO_DAG_PRIMARY_SHADOW_ENABLED."
+
+    # Warning: Unexpected consensus mode when dag-primary canary expected
+    - alert: DagPrimaryModeNotActive
+      expr: eezo_consensus_mode_active != 3
+      for: 5m
+      labels: { severity: warn }
+      annotations:
+        summary: "Node not running in dag-primary mode"
+        description: "Consensus mode is {{ $value }} (expected: 3=dag-primary). Check EEZO_CONSENSUS_MODE."
+
+    # Warning: No shadow checks at all (shadow checker may be disabled)
+    - alert: DagPrimaryShadowChecksZero
+      expr: eezo_dag_primary_shadow_checks_total == 0 and eezo_consensus_mode_active == 3
+      for: 10m
+      labels: { severity: warn }
+      annotations:
+        summary: "No DAG-primary shadow checks performed"
+        description: "Node is in dag-primary mode but no shadow checks have been performed. Check shadow checker configuration."
+
+    # Info: Transaction liveness stall (mempool has load but no inclusion)
+    - alert: DagPrimaryLivenessStall
+      expr: |
+        (increase(eezo_txs_included_total[5m]) == 0)
+        and (eezo_mempool_len > 10)
+        and (eezo_consensus_mode_active == 3)
+      for: 5m
+      labels: { severity: warn }
+      annotations:
+        summary: "DAG-primary transaction liveness stall"
+        description: "Mempool has {{ $value }} pending transactions but no transactions included in last 5m. Check DAG ordering health."
+
+    # Info: Shadow mismatch reason breakdown (for debugging)
+    - alert: DagPrimaryShadowMismatchReason
+      expr: increase(eezo_dag_primary_shadow_mismatch_reason_total[5m]) > 0
+      for: 1m
+      labels: { severity: info }
+      annotations:
+        summary: "DAG-primary shadow mismatch reason"
+        description: "Mismatch reason '{{ $labels.reason }}' occurred {{ $value }} times. See logs for details."
