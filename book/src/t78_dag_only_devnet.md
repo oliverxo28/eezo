@@ -589,8 +589,46 @@ curl -s http://localhost:3030/metrics | grep eezo_consensus_mode_active
 
 ---
 
+## T78.8: Devnet-Safe Profile & Guardrails
+
+T78.8 enhances the devnet-safe profile with additional guardrails and documentation:
+
+### What's New in T78.8
+
+1. **Enhanced startup logging**: The node now logs the build profile at startup
+2. **Clear guardrails**: Setting `EEZO_DEV_ALLOW_UNSIGNED_TX=1` on a devnet-safe build logs a loud warning
+3. **Profiles matrix**: See [Dev Unsafe Modes - Build Profiles Matrix](dev_unsafe_modes.md#t788-build-profiles-matrix) for a comprehensive comparison
+
+### Startup Log Examples
+
+**Devnet-safe build:**
+```
+[T78.8] Build profile: devnet-safe
+[T78.8] Safe build profile active. Unsigned transactions are disabled.
+```
+
+**Devnet-safe build with `EEZO_DEV_ALLOW_UNSIGNED_TX=1` set (warning):**
+```
+[T78.8] EEZO_DEV_ALLOW_UNSIGNED_TX is set but this is a SAFE BUILD.
+[T78.8] The env var has NO EFFECT. Unsigned txs will be REJECTED.
+[T78.8] Build profile: devnet-safe
+```
+
+**Dev-unsafe build:**
+```
+[T78.8] Build profile: dev-unsafe (benchmark profile)
+[DEV-UNSAFE] This build has dev-unsafe mode ENABLED.
+[DEV-UNSAFE] Signature verification bypass is available.
+```
+
+### For Full Build Profiles Matrix
+
+See the comprehensive profiles matrix in [Dev Unsafe Modes - Build Profiles Matrix](dev_unsafe_modes.md#t788-build-profiles-matrix).
+
+---
+
 ## References
 
 - [T78.6: DAG-Primary Canary & SLO Runbook](t78_dag_primary_canary.md)
 - [T76: DAG-Hybrid Canary & SLO Runbook](t76_dag_hybrid_canary.md)
-- [Dev Unsafe Modes](dev_unsafe_modes.md)
+- [Dev Unsafe Modes & Build Profiles Matrix](dev_unsafe_modes.md)

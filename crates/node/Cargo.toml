@@ -158,14 +158,15 @@ dag-consensus = ["consensus-dag", "consensus-dag/metrics"]
 # Requires dag-consensus feature for the shadow checker to function.
 hotstuff-shadow = ["dag-consensus"]
 
-# T78.7: Devnet-safe build profile.
+# T78.7/T78.8: Devnet-safe build profile.
 # When enabled:
 # - Default consensus mode is dag-primary (when EEZO_CONSENSUS_MODE is unset)
 # - DAG ordering is enabled by default (effective EEZO_DAG_ORDERING_ENABLED=1)
 # - Does NOT include dev-unsafe (no unsigned tx support)
 # - HotStuff runs as shadow only (when hotstuff-shadow is also enabled)
+# - T78.8: Build profile detection for startup logging and guardrails
 # Use for "official devnet" deployments. For local benchmarks, use dev-unsafe instead.
-devnet-safe = ["pq44-runtime", "metrics", "checkpoints", "dag-consensus", "stm-exec"]
+devnet-safe = ["pq44-runtime", "metrics", "checkpoints", "dag-consensus", "stm-exec", "eezo-ledger/devnet-safe"]
 
 [dev-dependencies]
 tempfile = "3.10"
