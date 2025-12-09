@@ -61,6 +61,15 @@ testing = []
 # Optional enforcement flag
 qc-sidecar-v2-enforce = []
 
+# T78.8: Devnet-safe build profile.
+# When enabled:
+# - Default consensus mode is dag-primary (when EEZO_CONSENSUS_MODE is unset)
+# - DAG ordering is enabled by default (effective EEZO_DAG_ORDERING_ENABLED=1)
+# - Does NOT include dev-unsafe (no unsigned tx support)
+# - T78.8: Build profile detection for startup logging and guardrails
+# Use for "official devnet" deployments. For local benchmarks, use dev-unsafe instead.
+devnet-safe = []
+
 [dependencies]
 # Don’t pull crypto defaults; select schemes via features above
 eezo-crypto = { path = "../crypto", version = "0.1.0", default-features = false }
