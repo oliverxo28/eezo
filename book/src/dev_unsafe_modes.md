@@ -247,6 +247,110 @@ cargo build -p eezo-node --features "devnet-safe,hotstuff-shadow"
 
 The warning log in devnet-safe builds looks like:
 ```
-[T78.7] EEZO_DEV_ALLOW_UNSIGNED_TX is set but dev-unsafe feature is NOT compiled.
-[T78.7] The env var has NO EFFECT in this build. Unsigned txs will be REJECTED.
+[T78.8] EEZO_DEV_ALLOW_UNSIGNED_TX is set but this is a SAFE BUILD.
+[T78.8] The env var has NO EFFECT. Unsigned txs will be REJECTED.
 ```
+
+---
+
+## T78.8: Build Profiles Matrix
+
+This section provides a comprehensive matrix of EEZO build profiles for different deployment scenarios.
+
+### Profiles Summary
+
+| Profile | Features | Example Use | Unsigned TX Allowed? | Default Consensus Mode | DAG Ordering Default |
+|---------|----------|-------------|---------------------|----------------------|---------------------|
+| **dev-unsafe** | `dev-unsafe` + others | Local TPS benchmarks | Yes (env-gated) | configurable | configurable |
+| **devnet-safe** | `devnet-safe` | Official devnet | **No** | dag-primary | true |
+| **generic** | without dev-unsafe | General/CI builds | **No** | hotstuff | false |
+| **testnet** (future) | TBD | Public testnet | **No** | dag-primary | true |
+| **mainnet** (future) | TBD | Production | **No** | dag-primary | true |
+
+### Build Commands
+
+#### Devnet-Safe Build (Recommended for Devnet Deployments)
+
+This is the recommended build profile for day-to-day devnet deployments:
+
+```bash
+# Option 1: Using the devnet-safe meta-feature (recommended)
+cargo build --release -p eezo-node --features "devnet-safe"
+
+# Option 2: With explicit features
+cargo build --release -p eezo-node \
+  --features "pq44-runtime,persistence,checkpoints,metrics,stm-exec,dag-consensus,devnet-safe"
+
+# Option 3: With HotStuff shadow checker for additional observability
+cargo build --release -p eezo-node --features "devnet-safe,hotstuff-shadow"
+```
+
+**Behavior in devnet-safe build:**
+- `EEZO_CONSENSUS_MODE` defaults to `dag-primary` when unset
+- `EEZO_DAG_ORDERING_ENABLED` defaults to `true` when unset
+- `EEZO_DEV_ALLOW_UNSIGNED_TX` has **no effect** (warning logged if set)
+- Shadow HotStuff checker available with `hotstuff-shadow` feature
+
+**Run command (minimal config needed):**
+```bash
+# Defaults are already correct for dag-primary
+./target/release/eezo-node
+```
+
+#### Dev-Unsafe Build (Local TPS Benchmarks Only)
+
+This build profile is for local development and benchmarking only. **NEVER deploy to any network.**
+
+```bash
+# Build with dev-unsafe feature
+cargo build -p eezo-node \
+  --features "pq44-runtime,persistence,checkpoints,metrics,stm-exec,dag-consensus,dev-unsafe"
+```
+
+**Behavior in dev-unsafe build:**
+- `EEZO_DEV_ALLOW_UNSIGNED_TX=1` enables unsigned tx acceptance
+- Prominent `[DEV-UNSAFE]` warnings printed at startup
+- All signature verification can be bypassed
+- Should only be used for local spam testing
+
+**Run command:**
+```bash
+export EEZO_DEV_ALLOW_UNSIGNED_TX=1
+export EEZO_CONSENSUS_MODE=dag-primary
+export EEZO_DAG_ORDERING_ENABLED=1
+./target/debug/eezo-node
+```
+
+### Verification Commands
+
+To verify which build profile you are running:
+
+```bash
+# Check the startup log for build profile
+./target/release/eezo-node 2>&1 | grep "T78.8"
+# Expected: [T78.8] Build profile: devnet-safe
+
+# Check consensus mode metric
+curl -s http://localhost:3030/metrics | grep eezo_consensus_mode_active
+# Expected: eezo_consensus_mode_active 3  (3 = dag-primary)
+```
+
+### Safety Guarantees
+
+| Feature | dev-unsafe | devnet-safe | generic |
+|---------|-----------|-------------|---------|
+| `EEZO_DEV_ALLOW_UNSIGNED_TX` works | ✅ Yes | ❌ No | ❌ No |
+| Unsigned tx accepted | ✅ With env var | ❌ Never | ❌ Never |
+| Signature bypass available | ✅ Yes | ❌ No | ❌ No |
+| Safe for devnet | ❌ No | ✅ Yes | ⚠️ Limited |
+| Safe for testnet/mainnet | ❌ No | ✅ Yes | ✅ Yes |
+
+### Key Takeaways
+
+1. **Default devnet deployments** should use `--features devnet-safe`
+2. **Never deploy** a `dev-unsafe` build to any network
+3. **If you see `[DEV-UNSAFE]` warnings** in your logs, you have the wrong build for network deployment
+4. **Setting `EEZO_DEV_ALLOW_UNSIGNED_TX=1`** on a devnet-safe build will:
+   - Log a loud warning at startup
+   - Have **no effect** on transaction processing
+   - Unsigned transactions will still be rejected

@@ -15,6 +15,12 @@ default = ["pq44-runtime", "checkpoints"]
 # NEVER use in production, testnet, or mainnet builds.
 dev-unsafe = ["eezo-crypto/dev-unsafe"]
 
+# T78.8: Devnet-safe build profile marker.
+# This feature is used for build profile detection in dev_unsafe.rs.
+# It does not enable any additional functionality but allows the crate
+# to detect if it was built as part of a devnet-safe profile.
+devnet-safe = []
+
 # Public features used in code and/or tests
 # T77.SAFE-2: skip-sig-verify now requires dev-unsafe
 skip-sig-verify = ["dev-unsafe", "eezo-crypto/skip-sig-verify"]
