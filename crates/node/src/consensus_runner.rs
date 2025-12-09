@@ -191,6 +191,35 @@ fn compute_block_body_hash_with_gpu(blk_opt: &Option<Block>, height: u64) -> Opt
     Some(digest)
 }
 
+/// T78.3 — Shadow HotStuff/legacy checker (stub for dag-primary mode).
+///
+/// This function runs the HotStuff/legacy path as a shadow checker without
+/// affecting block production. It's only active in dag-primary mode.
+///
+/// For T78.3, this is a minimal stub that:
+/// - Increments the shadow check counter metric
+/// - Logs that a shadow check was performed
+/// - Does NOT build or commit a shadow block
+///
+/// Future tasks (T78.4/T78.5) will expand this to:
+/// - Build a shadow block from mempool
+/// - Compare shadow block with DAG block
+/// - Expose divergence metrics
+#[cfg(feature = "dag-consensus")]
+fn run_shadow_hotstuff_check(_height: u64, _dag_block_txs: &[SignedTx]) {
+    // T78.3: Stub implementation - just increment the metric
+    crate::metrics::dag_primary_shadow_checks_inc();
+    
+    log::debug!(
+        "dag-primary: shadow HotStuff check performed at height={} (stub)",
+        _height
+    );
+    
+    // TODO(T78.4): Build shadow block from mempool
+    // TODO(T78.5): Compare shadow block with DAG block
+    // TODO(T78.5): Emit divergence metrics
+}
+
 // --- T54 executor wiring ---
 use crate::executor::{Executor, ExecInput};
 use crate::executor::{SingleExecutor};
@@ -356,7 +385,7 @@ fn qc_sidecar_enforce_on() -> bool {
     { false }
 }
 
-/// T76.1: Consensus mode enum for determining tx source behavior.
+/// T76.1/T78.3: Consensus mode enum for determining tx source behavior.
 /// This is separate from the top-level ConsensusMode in main.rs.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum HybridModeConfig {
@@ -364,15 +393,22 @@ enum HybridModeConfig {
     Standard,
     /// Hybrid mode with DAG ordering enabled: try DAG batches first
     HybridEnabled,
+    /// T78.3: DAG-primary mode: DAG is the only source, no mempool fallback
+    DagPrimary,
 }
 
 impl HybridModeConfig {
     /// Parse hybrid mode configuration from environment.
     fn from_env() -> Self {
-        // Check if we're in dag-hybrid mode with ordering enabled
+        // Check consensus mode
         let mode = std::env::var("EEZO_CONSENSUS_MODE")
             .unwrap_or_default()
             .to_ascii_lowercase();
+        
+        // T78.3: Check for dag-primary mode first
+        if mode == "dag-primary" || mode == "dag_primary" {
+            return HybridModeConfig::DagPrimary;
+        }
         
         let is_dag_hybrid = mode == "dag-hybrid" || mode == "dag_hybrid";
         
@@ -482,10 +518,18 @@ impl CoreRunnerHandle {
         #[cfg(feature = "dag-consensus")]
         let shadow_dag_c = Arc::clone(&shadow_dag_sender);
         
-        // T76.1: Parse hybrid mode configuration (non-persistence variant)
+        // T76.1/T78.3: Parse hybrid mode configuration (non-persistence variant)
         let hybrid_mode_cfg = HybridModeConfig::from_env();
-        if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
-            log::info!("consensus: hybrid mode enabled with DAG ordering (non-persistence variant)");
+        match hybrid_mode_cfg {
+            HybridModeConfig::HybridEnabled => {
+                log::info!("consensus: hybrid mode enabled with DAG ordering (non-persistence variant)");
+            }
+            HybridModeConfig::DagPrimary => {
+                log::info!("consensus: dag-primary mode enabled (DAG-only, no mempool fallback)");
+            }
+            HybridModeConfig::Standard => {
+                // No special logging for standard mode
+            }
         }
 
         let join = tokio::spawn(async move {
@@ -1212,14 +1256,22 @@ impl CoreRunnerHandle {
         #[cfg(feature = "dag-consensus")]
         let shadow_dag_c = Arc::clone(&shadow_dag_sender);
         
-        // T76.1: Parse hybrid mode configuration and create hybrid_dag handle container
+        // T76.1/T78.3: Parse hybrid mode configuration and create hybrid_dag handle container
         let hybrid_mode_cfg = HybridModeConfig::from_env();
         #[cfg(feature = "dag-consensus")]
         let hybrid_dag_store: Arc<Mutex<Option<Arc<HybridDagHandle>>>> = Arc::new(Mutex::new(None));
         #[cfg(feature = "dag-consensus")]
         let hybrid_dag_c = Arc::clone(&hybrid_dag_store);
-        if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
-            log::info!("consensus: hybrid mode enabled with DAG ordering");
+        match hybrid_mode_cfg {
+            HybridModeConfig::HybridEnabled => {
+                log::info!("consensus: hybrid mode enabled with DAG ordering");
+            }
+            HybridModeConfig::DagPrimary => {
+                log::info!("consensus: dag-primary mode enabled (DAG-only, no mempool fallback)");
+            }
+            HybridModeConfig::Standard => {
+                // No special logging for standard mode
+            }
         }
 
         // T76.5: Create the de-dup LRU cache for filtering already-committed tx hashes.
@@ -1232,10 +1284,10 @@ impl CoreRunnerHandle {
             log::info!("consensus: hybrid de-dup LRU cache initialized (capacity={})", cache_size);
         }
 
-        // T76.6: Set node_start_round watermark for stale batch detection.
+        // T76.6/T78.3: Set node_start_round watermark for stale batch detection.
         // initial_committed_height was captured before the node was wrapped in Arc<Mutex<_>>.
         #[cfg(feature = "dag-consensus")]
-        if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
+        if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled | HybridModeConfig::DagPrimary) {
             // Set node_start_round to the committed height at startup.
             // Any DAG batch with round <= this value is considered stale.
             hybrid_dedup_cache.set_node_start_round(initial_committed_height);
@@ -1246,9 +1298,9 @@ impl CoreRunnerHandle {
 			// expose T36.6 bridge metrics on /metrics immediately
 			#[cfg(feature = "metrics")]
 			register_t36_bridge_metrics();
-            // T77.1: Register DAG ordering latency metrics for hybrid mode
+            // T77.1/T78.3: Register DAG ordering latency metrics for hybrid and dag-primary modes
             #[cfg(all(feature = "metrics", feature = "dag-consensus"))]
-            if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
+            if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled | HybridModeConfig::DagPrimary) {
                 crate::metrics::register_t77_dag_ordering_latency_metrics();
             }
             // dev/test knobs
@@ -1274,7 +1326,7 @@ impl CoreRunnerHandle {
                 // This is the key fix: submit pending txs at the START of each tick,
                 // so that the DAG can order them and provide batches for block building.
                 #[cfg(feature = "dag-consensus")]
-                if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
+                if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled | HybridModeConfig::DagPrimary) {
                     let hybrid_opt: Option<Arc<HybridDagHandle>> = hybrid_dag_c.lock().await.clone();
                     if let Some(hybrid_handle) = hybrid_opt {
                         // Get DAG runner handle for mempool access
@@ -1328,8 +1380,8 @@ impl CoreRunnerHandle {
                 #[cfg(feature = "dag-consensus")]
                 let mut hybrid_bad_nonce_prefilter: usize = 0;
                 #[cfg(feature = "dag-consensus")]
-                if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) {
-                    // T76.10: Use adaptive aggregation config for time budget and soft caps.
+                if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled | HybridModeConfig::DagPrimary) {
+                    // T76.10/T78.3: Use adaptive aggregation config for time budget and soft caps.
                     // If EEZO_HYBRID_AGG_TIME_BUDGET_MS is set, use fixed budget.
                     // Otherwise, use adaptive calculation based on executor latency.
                     let agg_config = crate::adaptive_agg::adaptive_agg_config();
@@ -1608,6 +1660,9 @@ impl CoreRunnerHandle {
                             // Batches were consumed but no valid txs - fallback logic
                             hybrid_stats_opt = hybrid_aggregated_stats.clone();
                             
+                            // T78.3: In DagPrimary mode, never fall back to mempool
+                            let is_dag_primary = matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary);
+                            
                             if let Some(ref stats) = hybrid_stats_opt {
                                 // T76.6: Determine the reason for empty candidates and log appropriately
                                 crate::metrics::dag_hybrid_empty_candidates_inc();
@@ -1617,8 +1672,13 @@ impl CoreRunnerHandle {
                                         "hybrid-agg: aggregation failed with decode errors (reason=decode-errors, n={} decode_err={})",
                                         stats.n, stats.decode_err
                                     );
-                                    crate::metrics::dag_hybrid_fallback_inc();
-                                    Self::collect_from_mempool(&mut guard, block_max_tx)
+                                    if is_dag_primary {
+                                        log::info!("dag-primary: no fallback to mempool, continuing with empty block");
+                                        Vec::new()
+                                    } else {
+                                        crate::metrics::dag_hybrid_fallback_inc();
+                                        Self::collect_from_mempool(&mut guard, block_max_tx)
+                                    }
                                 } else if stats.filtered_seen == stats.n && stats.n > 0 {
                                     log::info!(
                                         "hybrid-agg: all batches filtered (reason=dedup-all, n={} filtered_seen={})",
@@ -1626,7 +1686,7 @@ impl CoreRunnerHandle {
                                     );
                                     crate::metrics::dag_hybrid_all_filtered_inc();
                                     let mempool_len = guard.mempool.len();
-                                    if mempool_len == 0 {
+                                    if mempool_len == 0 || is_dag_primary {
                                         log::info!("hybrid-agg: no-candidates-mempool-empty, continuing without fallback");
                                         Vec::new()
                                     } else {
@@ -1635,9 +1695,10 @@ impl CoreRunnerHandle {
                                     }
                                 } else {
                                     let mempool_len = guard.mempool.len();
-                                    if mempool_len == 0 {
+                                    if mempool_len == 0 || is_dag_primary {
                                         log::info!(
-                                            "hybrid-agg: no candidates (reason=no-candidates-mempool-empty, n={} filtered={} bad_nonce={})",
+                                            "hybrid-agg: no candidates (reason={}, n={} filtered={} bad_nonce={})",
+                                            if is_dag_primary { "dag-primary-no-fallback" } else { "no-candidates-mempool-empty" },
                                             stats.n, stats.filtered_seen, stats.bad_nonce_pref
                                         );
                                         Vec::new()
@@ -1651,8 +1712,13 @@ impl CoreRunnerHandle {
                                     }
                                 }
                             } else {
-                                // No stats available - shouldn't happen but fallback anyway
-                                Self::collect_from_mempool(&mut guard, block_max_tx)
+                                // No stats available - shouldn't happen but fallback anyway (unless dag-primary)
+                                if is_dag_primary {
+                                    log::warn!("dag-primary: no stats available, continuing with empty block");
+                                    Vec::new()
+                                } else {
+                                    Self::collect_from_mempool(&mut guard, block_max_tx)
+                                }
                             }
                         }
                     } else {
@@ -1797,6 +1863,12 @@ impl CoreRunnerHandle {
                                                 );
                                             }
                                         }
+                                    }
+
+                                    // T78.3: Run shadow HotStuff checker in dag-primary mode
+                                    #[cfg(feature = "dag-consensus")]
+                                    if matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary) && hybrid_batch_used {
+                                        run_shadow_hotstuff_check(blk.header.height, &blk.txs);
                                     }
 
                                     Ok(SlotOutcome::Committed { height: blk.header.height })

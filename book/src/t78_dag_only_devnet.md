@@ -17,8 +17,9 @@ Building on the stable DAG-hybrid implementation validated in T76.12 (~150 TPS i
 |-------|-------------|--------|
 | **T78.0** | Design documentation & stable baseline validation | ✅ Complete |
 | **T78.1** | Strict Hybrid DAG Tuning (Phase 1) | ✅ Implemented |
-| **T78.2** | Advanced tuning profiles | 🔜 Future |
-| **T78.3** | DAG-only mode (no fallback) | 🔜 Future |
+| **T78.2** | Advanced tuning profiles | ✅ Implemented |
+| **T78.3** | DAG-primary mode (no fallback, shadow HotStuff) | ✅ Implemented |
+| **T78.4** | Future: Expand shadow checker with block comparison | 🔜 Future |
 
 ---
 
@@ -308,22 +309,206 @@ pub const STRICT_PROFILE_BATCH_TIMEOUT_MS: u64 = 50; // New: override default
 - `book/src/t78_2_dag_hybrid_audit_report.md`: Full audit report with detailed analysis
 - `book/src/t76_dag_hybrid_canary.md`: Updated with T78.2 tuning recommendations
 
-### Future Work (T78.3+)
+---
 
-Potential enhancements for future phases:
+## T78.3: DAG-Primary Mode (DAG-Only with Shadow HotStuff)
 
-1. **Additional Profiles**: 
-   - `EEZO_HYBRID_AGGRESSIVE_PROFILE`: Higher time budget, larger batches
-   - `EEZO_HYBRID_CONSERVATIVE_PROFILE`: Lower time budget, smaller batches
+### Overview
 
-2. **Profile-Specific Tuning**:
-   - Adjust strict profile defaults based on canary performance data
-   - Add profile-specific min_dag_tx and batch_timeout settings
+T78.3 introduces a new `dag-primary` consensus mode that:
+- Uses DAG as the **only** source of transaction ordering for committed blocks
+- Does **not** use mempool fallback on the main path
+- Keeps HotStuff/legacy path alive as a "shadow checker" only (no effect on block production)
 
-3. **DAG-Only Mode**:
-   - Remove fallback to mempool entirely
-   - Pure DAG-based transaction ordering
-   - Remove legacy Hotstuff code paths
+This is a devnet-only stepping stone toward eventual "dag-only" mode, allowing us to validate pure DAG ordering behavior while maintaining the HotStuff code for future divergence detection.
+
+### Key Differences from dag-hybrid Mode
+
+| Feature | dag-hybrid | dag-primary |
+|---------|-----------|-------------|
+| TX Source | DAG batches + mempool fallback | DAG batches only |
+| Mempool Fallback | Yes (when DAG queue empty or filtered) | No (empty block if no DAG txs) |
+| HotStuff/Legacy Path | Main commit authority | Shadow checker only (no commit) |
+| Safety Checks | Nonce contiguity filter | Same nonce contiguity filter |
+| Use Case | Production canary mode | Devnet/testing pure DAG behavior |
+
+### Configuration
+
+#### Environment Variables
+
+**Enable dag-primary mode**:
+```bash
+export EEZO_CONSENSUS_MODE=dag-primary
+export EEZO_DAG_ORDERING_ENABLED=1  # Required for DAG runner
+```
+
+**All other DAG/hybrid config vars apply**:
+```bash
+# Optional: tuning (same as dag-hybrid)
+export EEZO_HYBRID_STRICT_PROFILE=1          # Recommended for dag-primary
+export EEZO_HYBRID_AGG_TIME_BUDGET_MS=50     # Aggregation time budget
+export EEZO_HYBRID_AGG_MAX_TX=500            # Max transactions per batch
+export EEZO_HYBRID_AGG_MAX_BYTES=1048576     # Max batch size (1 MiB)
+export EEZO_HYBRID_MIN_DAG_TX=0              # Use any DAG batch (even 1-2 txs)
+export EEZO_HYBRID_BATCH_TIMEOUT_MS=50       # Wait for DAG batches
+```
+
+### Behavior
+
+#### Block Building
+
+In `dag-primary` mode, the consensus runner:
+
+1. **Waits for DAG batches** (respects `EEZO_HYBRID_BATCH_TIMEOUT_MS`)
+2. **Applies nonce contiguity filter** (same safety as hybrid mode)
+3. **Builds block from DAG txs only**
+4. **Never falls back to mempool** (commits empty block if no valid DAG txs)
+
+**Empty blocks**: If DAG queue is empty or all txs are filtered, dag-primary commits an **empty block** instead of falling back to mempool. This is expected behavior and validates pure DAG ordering.
+
+#### Shadow HotStuff Checker (Stub)
+
+T78.3 includes a **stub shadow checker** that:
+- Runs after each successful DAG block commit
+- Increments `eezo_dag_primary_shadow_checks_total` metric
+- Logs that a shadow check was performed
+- Does **not** affect block production (no-op for T78.3)
+
+**Future work** (T78.4/T78.5):
+- Build shadow block from mempool
+- Compare shadow block with DAG block
+- Expose divergence metrics
+
+### Metrics
+
+#### Mode Detection
+
+**Gauge: `eezo_consensus_mode_active`**
+- `0` = hotstuff (default)
+- `1` = dag-hybrid (with ordering enabled)
+- `2` = dag (full DAG mode)
+- `3` = dag-primary (**NEW**)
+
+```bash
+# Check current mode
+curl -s http://localhost:3030/metrics | grep eezo_consensus_mode_active
+# Expected: eezo_consensus_mode_active 3
+```
+
+#### Shadow Checker
+
+**Counter: `eezo_dag_primary_shadow_checks_total`**
+- Increments each time the shadow HotStuff checker runs
+- Only active in dag-primary mode
+- Should match committed block count
+
+```bash
+# Verify shadow checker is running
+curl -s http://localhost:3030/metrics | grep eezo_dag_primary_shadow_checks_total
+```
+
+#### No Fallback Validation
+
+**Counter: `eezo_dag_hybrid_fallback_total`**
+- Should **not** increment in dag-primary mode
+- If it increments, it indicates a bug (fallback should never occur)
+
+```bash
+# Verify no fallback happened
+curl -s http://localhost:3030/metrics | grep eezo_dag_hybrid_fallback_total
+# Expected: 0 (no fallback in dag-primary)
+```
+
+### Usage Example
+
+```bash
+# 1. Enable dag-primary mode
+export EEZO_CONSENSUS_MODE=dag-primary
+export EEZO_DAG_ORDERING_ENABLED=1
+export EEZO_HYBRID_STRICT_PROFILE=1
+
+# 2. Run the node
+./target/release/eezo-node
+
+# 3. Verify mode is active
+curl -s http://localhost:3030/metrics | grep eezo_consensus_mode_active
+# Expected: eezo_consensus_mode_active 3
+
+# 4. Check that no fallback occurs
+curl -s http://localhost:3030/metrics | grep eezo_dag_hybrid_fallback_total
+# Expected: eezo_dag_hybrid_fallback_total 0
+
+# 5. Verify shadow checker is running
+curl -s http://localhost:3030/metrics | grep eezo_dag_primary_shadow_checks_total
+# Expected: Increments with each committed block
+```
+
+### Logs
+
+**Startup**:
+```
+consensus: dag-primary mode enabled (DAG-only, no mempool fallback)
+```
+
+**Empty block (expected)**:
+```
+hybrid-agg: no candidates (reason=dag-primary-no-fallback, n=0 filtered=0 bad_nonce=0)
+```
+
+**Shadow checker**:
+```
+dag-primary: shadow HotStuff check performed at height=123 (stub)
+```
+
+### Testing & Validation
+
+**Manual Validation**:
+1. Start node in dag-primary mode
+2. Send transactions via `/submit_tx`
+3. Verify:
+   - Transactions are included (check `eezo_txs_included_total`)
+   - No fallback occurs (`eezo_dag_hybrid_fallback_total` stays 0)
+   - Shadow checks run (`eezo_dag_primary_shadow_checks_total` increments)
+   - Consensus mode gauge shows 3
+
+**Expected Behavior**:
+- **With tx load**: Blocks built from DAG batches only
+- **Without tx load**: Empty blocks (no fallback to mempool)
+- **Single-sender spam**: Higher `batches_used` than hybrid mode (no fallback to skip)
+
+### Safety & Compatibility
+
+**Safety Checks** (unchanged from hybrid mode):
+- Nonce contiguity filter remains active
+- No BadNonce stalls (DAG ordering does not affect nonce validation)
+- All SAFE guards from T78.2 audit apply
+
+**Compatibility**:
+- dag-primary is **opt-in** via `EEZO_CONSENSUS_MODE=dag-primary`
+- Default behavior (env unset) remains unchanged (hotstuff mode)
+- dag-hybrid and hotstuff modes are unaffected by this change
+
+**Dev-Unsafe Guards**:
+- Same dev-unsafe guards as hybrid mode
+- Recommended only for devnet/testing
+
+### Future Work (T78.4+)
+
+1. **Expand Shadow Checker** (T78.4):
+   - Build shadow block from mempool
+   - Compare tx count, tx hashes, block hash
+
+2. **Divergence Metrics** (T78.5):
+   - `eezo_dag_primary_divergence_total`: Mismatches between DAG and shadow
+   - Histogram of divergence magnitude
+
+3. **Emergency Rollback** (T78.6):
+   - If divergence detected, trigger rollback to hybrid mode
+   - Manual override via env var
+
+4. **Remove HotStuff** (T78.7):
+   - Once shadow checker validates pure DAG behavior
+   - Transition to final "dag-only" mode
 
 ---
 
