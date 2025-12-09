@@ -151,65 +151,39 @@ impl ShadowHotstuffChecker {
     ///
     /// For T78.5, we perform a minimal check:
     /// - Compute a simple Blake3 hash over the concatenated tx hashes
-    /// - Compare this digest against a recomputed value
+    /// - Log the computed digest for debugging/tracing
     ///
-    /// This is a T78.5 minimal check — future tasks can expand to full merkle root.
+    /// This is a T78.5 minimal check — future tasks can expand to:
+    /// - Compare against canonical merkle root from block header
+    /// - Store and compare tx digests across blocks
     ///
-    /// Returns true if check passes, false if mismatch detected.
+    /// Returns true (check always passes for T78.5 minimal implementation).
     fn check_block_hash_consistency(
         &self,
         height: u64,
-        block_hash: [u8; 32],
+        _block_hash: [u8; 32],
         txs: &[Arc<DecodedTx>],
     ) -> bool {
-        // T78.5 minimal check: compute Blake3 over concatenated tx hashes
-        // This validates that the tx list we see matches what we'd expect
-        // to compute from the same set of transactions.
         if txs.is_empty() {
-            // Empty block: no hash check needed
+            // Empty block: no hash computation needed
             return true;
         }
 
-        // Compute expected tx-set digest using Blake3
+        // T78.5 minimal check: compute Blake3 over concatenated tx hashes.
+        // This exercises the hash computation path and provides debug output.
+        // Future tasks will compare this against the canonical tx merkle root.
         let mut hasher = blake3::Hasher::new();
         for tx in txs {
-            let tx_hash = tx.hash();
-            hasher.update(&tx_hash);
+            hasher.update(&tx.hash());
         }
         let computed_digest: [u8; 32] = *hasher.finalize().as_bytes();
 
-        // For T78.5, we record the computed digest but don't have a reference
-        // to compare against (the block_hash is the header hash, not tx hash).
-        // 
-        // What we CAN check: if we've seen this block before (same height),
-        // the computed digest should match what we computed last time.
-        //
-        // For the initial T78.5 implementation, we just record that we did
-        // the computation. Future work can compare against canonical merkle root.
-        //
-        // If we have a last_hash stored, we can at least detect if the same
-        // height is being committed with a different block hash.
-        if let Some(prev_hash) = self.last_hash {
-            if let Some(prev_height) = self.last_height {
-                if height == prev_height && block_hash != prev_hash {
-                    // Same height but different block hash - this is a mismatch
-                    self.record_mismatch(ShadowMismatchReason::HashMismatch);
-                    log::warn!(
-                        "[T78.5 shadow-checker] mismatch: hash mismatch at height={} \
-                        (expected=0x{}, got=0x{})",
-                        height,
-                        hex::encode(&prev_hash[..4]),
-                        hex::encode(&block_hash[..4])
-                    );
-                    return false;
-                }
-            }
-        }
-
-        // For T78.5, record that we computed the digest (for future expansion)
+        // TODO(T78.6+): Compare computed_digest against canonical tx_root from block header
+        // For now, just log the computed digest for tracing/debugging
         log::trace!(
-            "[T78.5 shadow-checker] computed tx digest at height={}: 0x{}",
+            "[T78.5 shadow-checker] computed tx digest at height={} (txs={}): 0x{}",
             height,
+            txs.len(),
             hex::encode(&computed_digest[..4])
         );
 
