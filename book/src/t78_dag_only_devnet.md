@@ -514,5 +514,6 @@ dag-primary: shadow HotStuff check performed at height=123 (stub)
 
 ## References
 
+- [T78.6: DAG-Primary Canary & SLO Runbook](t78_dag_primary_canary.md)
 - [T76: DAG-Hybrid Canary & SLO Runbook](t76_dag_hybrid_canary.md)
 - [Dev Unsafe Modes](dev_unsafe_modes.md)
