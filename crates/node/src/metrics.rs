@@ -2298,6 +2298,8 @@ pub fn register_dag_hybrid_metrics() {
     let _ = &*EEZO_DAG_HYBRID_FALLBACK_REASON_TOTAL;
     // T78.4: Register dag-primary shadow checker metric
     let _ = &*EEZO_DAG_PRIMARY_SHADOW_CHECKS_TOTAL;
+    // T78.5: Register shadow mismatch metrics
+    register_t78_shadow_mismatch_metrics();
     // T76.3: Also register the bytes-level metrics
     register_dag_hybrid_bytes_metrics();
     // T76.4: Also register the apply-level metrics
@@ -2900,6 +2902,75 @@ pub fn dag_primary_shadow_checks_inc() {
 #[inline]
 pub fn dag_primary_shadow_checks_inc() {
     // No-op when metrics disabled
+}
+
+// -----------------------------------------------------------------------------
+// T78.5 — DAG-primary shadow checker mismatch metrics
+// -----------------------------------------------------------------------------
+
+/// Counter: Total mismatches detected by the shadow checker in dag-primary mode.
+/// Incremented when any invariant violation is detected (height regress, duplicate, hash mismatch).
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_PRIMARY_SHADOW_MISMATCH_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_primary_shadow_mismatch_total",
+        "Total mismatches detected by shadow checker in dag-primary mode"
+    )
+    .unwrap()
+});
+
+/// Counter with labels for mismatch reasons (T78.5).
+/// Labels:
+/// - reason="height_regress" — height went backwards
+/// - reason="height_equal" — duplicate height detected
+/// - reason="hash_mismatch" — block hash or tx-set mismatch
+/// - reason="other" — any other unexpected issue
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_PRIMARY_SHADOW_MISMATCH_REASON_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "eezo_dag_primary_shadow_mismatch_reason_total",
+        "Shadow checker mismatches (labeled by reason)",
+        &["reason"]
+    )
+    .expect("metric registered")
+});
+
+/// Helper: Increment total mismatch counter.
+#[inline]
+pub fn dag_primary_shadow_mismatch_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_PRIMARY_SHADOW_MISMATCH_TOTAL.inc();
+    }
+}
+
+/// T78.5: Increment mismatch counter with a specific reason label.
+/// Valid reasons: "height_regress", "height_equal", "hash_mismatch", "other"
+#[inline]
+pub fn dag_primary_shadow_mismatch_reason_inc(reason: &str) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_PRIMARY_SHADOW_MISMATCH_REASON_TOTAL
+            .with_label_values(&[reason])
+            .inc();
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = reason;
+    }
+}
+
+/// Eagerly register T78.5 shadow checker mismatch metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t78_shadow_mismatch_metrics() {
+    let _ = &*EEZO_DAG_PRIMARY_SHADOW_MISMATCH_TOTAL;
+    let _ = &*EEZO_DAG_PRIMARY_SHADOW_MISMATCH_REASON_TOTAL;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t78_shadow_mismatch_metrics() {
+    // No metrics to register when the feature is off.
 }
 
 // -----------------------------------------------------------------------------
