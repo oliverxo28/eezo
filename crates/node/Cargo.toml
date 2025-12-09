@@ -151,6 +151,22 @@ stm-exec = ["dashmap"]
 # Env: EEZO_DAG_CONSENSUS_MODE=off|shadow (default: off)
 dag-consensus = ["consensus-dag", "consensus-dag/metrics"]
 
+# T78.7: HotStuff shadow checker feature gate.
+# When enabled, the shadow HotStuff checker is available in dag-primary mode.
+# When disabled, HotStuff shadow code is not compiled, reducing binary size.
+# Only effective in dag-primary mode. Has no effect in other consensus modes.
+# Requires dag-consensus feature for the shadow checker to function.
+hotstuff-shadow = ["dag-consensus"]
+
+# T78.7: Devnet-safe build profile.
+# When enabled:
+# - Default consensus mode is dag-primary (when EEZO_CONSENSUS_MODE is unset)
+# - DAG ordering is enabled by default (effective EEZO_DAG_ORDERING_ENABLED=1)
+# - Does NOT include dev-unsafe (no unsigned tx support)
+# - HotStuff runs as shadow only (when hotstuff-shadow is also enabled)
+# Use for "official devnet" deployments. For local benchmarks, use dev-unsafe instead.
+devnet-safe = ["pq44-runtime", "metrics", "checkpoints", "dag-consensus", "stm-exec"]
+
 [dev-dependencies]
 tempfile = "3.10"
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }

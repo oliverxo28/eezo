@@ -161,3 +161,92 @@ The function returns `false` at compile time if `dev-unsafe` is not enabled.
 | Dev-unsafe build | ✅ Yes | not set | ❌ No |
 
 **Key takeaway**: Production/release/testnet/mainnet builds should **never** include the `dev-unsafe` feature. It is only for local development benchmarks.
+
+---
+
+## T78.7: Benchmark vs Devnet-Safe Build Profiles
+
+T78.7 introduces two explicit build profiles for clarity:
+
+### 1. Benchmark Build (Dev-Unsafe)
+
+Use this for **local TPS testing** and **development benchmarks**. This build:
+- Includes `dev-unsafe` feature
+- Allows `EEZO_DEV_ALLOW_UNSIGNED_TX=1` to accept unsigned transactions
+- Shows prominent DEV-UNSAFE warnings in logs
+- Should **NEVER** be deployed to any network
+
+**Build command:**
+```bash
+# Benchmark build with dev-unsafe for local spam testing
+cargo build -p eezo-node --features "pq44-runtime,checkpoints,metrics,dev-unsafe,stm-exec,dag-consensus"
+```
+
+**Run command:**
+```bash
+export EEZO_DEV_ALLOW_UNSIGNED_TX=1
+export EEZO_CONSENSUS_MODE=dag-primary
+export EEZO_DAG_ORDERING_ENABLED=1
+./target/debug/eezo-node
+```
+
+### 2. Devnet-Safe Build
+
+Use this for **official devnet deployments**. This build:
+- Does **NOT** include `dev-unsafe` feature
+- Setting `EEZO_DEV_ALLOW_UNSIGNED_TX=1` has **no effect** (with a warning log)
+- Defaults to `dag-primary` consensus mode when `EEZO_CONSENSUS_MODE` is unset
+- Defaults to `EEZO_DAG_ORDERING_ENABLED=1` behavior when unset
+- Includes STM executor and DAG consensus
+- HotStuff shadow checker only available with `hotstuff-shadow` feature
+
+**Build command (minimal devnet-safe):**
+```bash
+# Devnet-safe build (no unsigned tx support)
+cargo build -p eezo-node --features "pq44-runtime,checkpoints,metrics,stm-exec,dag-consensus"
+```
+
+**Build command (using devnet-safe meta-feature):**
+```bash
+# Using the devnet-safe feature which bundles recommended features
+cargo build -p eezo-node --features "devnet-safe"
+```
+
+**Build command (with HotStuff shadow checker):**
+```bash
+# Devnet-safe with shadow HotStuff for observability
+cargo build -p eezo-node --features "devnet-safe,hotstuff-shadow"
+```
+
+**Run command:**
+```bash
+# No env vars needed - defaults are correct for dag-primary
+./target/release/eezo-node
+```
+
+### Feature Comparison
+
+| Feature | Benchmark Build | Devnet-Safe Build |
+|---------|-----------------|-------------------|
+| `dev-unsafe` | ✅ Included | ❌ NOT included |
+| `dag-consensus` | ✅ Included | ✅ Included |
+| `stm-exec` | ✅ Included | ✅ Included |
+| `hotstuff-shadow` | Optional | Optional |
+| Default consensus mode | Hotstuff | DagPrimary |
+| Unsigned tx accepted? | Only with env var | **Never** |
+| Suitable for network? | ❌ No | ✅ Yes |
+
+### EEZO_DEV_ALLOW_UNSIGNED_TX Behavior by Build
+
+| Build Profile | Env Var Set | Effect |
+|--------------|-------------|--------|
+| Dev-unsafe build | `=1` | Unsigned txs accepted |
+| Dev-unsafe build | not set | Unsigned txs rejected |
+| Devnet-safe build | `=1` | **No effect** + warning log |
+| Devnet-safe build | not set | Unsigned txs rejected |
+
+The warning log in devnet-safe builds looks like:
+```
+[T78.7] EEZO_DEV_ALLOW_UNSIGNED_TX is set but dev-unsafe feature is NOT compiled.
+[T78.7] The env var has NO EFFECT in this build. Unsigned txs will be REJECTED.
+```

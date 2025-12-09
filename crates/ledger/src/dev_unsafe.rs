@@ -66,6 +66,7 @@ pub fn allow_unsigned_tx() -> bool {
 /// This should be called once at node startup. It will:
 /// - Log a prominent warning if `dev-unsafe` feature is compiled in
 /// - Log an additional warning if `EEZO_DEV_ALLOW_UNSIGNED_TX` is set
+/// - T78.7: Log a warning if env var is set but feature is not compiled
 /// - Only log once (subsequent calls are no-ops)
 pub fn log_startup_warning() {
     // Only log once
@@ -90,7 +91,17 @@ pub fn log_startup_warning() {
 
     #[cfg(not(feature = "dev-unsafe"))]
     {
-        // In safe builds, log nothing - this is the expected production state
+        // T78.7: In safe builds, check if EEZO_DEV_ALLOW_UNSIGNED_TX is set and log a warning
+        // This helps users understand why their env var is being ignored
+        if let Ok(v) = std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {
+            if !v.is_empty() && v != "0" && v.to_ascii_lowercase() != "false" {
+                log::warn!("===============================================================================");
+                log::warn!("[T78.7] EEZO_DEV_ALLOW_UNSIGNED_TX is set but dev-unsafe feature is NOT compiled.");
+                log::warn!("[T78.7] The env var has NO EFFECT in this build. Unsigned txs will be REJECTED.");
+                log::warn!("[T78.7] To enable unsigned tx support, rebuild with: --features dev-unsafe");
+                log::warn!("===============================================================================");
+            }
+        }
     }
 }
 
