@@ -5131,7 +5131,7 @@ mod consensus_mode_tests {
     #[cfg(feature = "devnet-safe")]
     #[test]
     fn test_devnet_safe_default_consensus_mode_dag_primary() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().expect("T78.9: failed to acquire env lock");
         
         // Unset the consensus mode env var to test default behavior
         std::env::remove_var("EEZO_CONSENSUS_MODE");
@@ -5149,7 +5149,7 @@ mod consensus_mode_tests {
     #[cfg(feature = "devnet-safe")]
     #[test]
     fn test_devnet_safe_default_dag_ordering_enabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().expect("T78.9: failed to acquire env lock");
         
         // Unset the ordering env var to test default behavior
         std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
@@ -5166,7 +5166,7 @@ mod consensus_mode_tests {
     #[cfg(feature = "devnet-safe")]
     #[test]
     fn test_devnet_safe_explicit_mode_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().expect("T78.9: failed to acquire env lock");
         
         // Explicitly set hotstuff mode - should override devnet-safe default
         std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
@@ -5192,7 +5192,7 @@ mod consensus_mode_tests {
     #[cfg(feature = "devnet-safe")]
     #[test]
     fn test_devnet_safe_explicit_ordering_disabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().expect("T78.9: failed to acquire env lock");
         
         // Explicitly disable ordering - should override devnet-safe default
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "0");

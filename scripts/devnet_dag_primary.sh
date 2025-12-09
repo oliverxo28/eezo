@@ -52,6 +52,10 @@ export EEZO_DATADIR="${EEZO_DATADIR:-/tmp/eezo-devnet}"
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Network Bindings
+# NOTE: Defaults to localhost (127.0.0.1) for local development.
+# For external access (e.g., devnet deployment), override with:
+#   export EEZO_LISTEN=0.0.0.0:8080
+#   export EEZO_METRICS_BIND=0.0.0.0:9898
 # ───────────────────────────────────────────────────────────────────────────────
 export EEZO_LISTEN="${EEZO_LISTEN:-127.0.0.1:8080}"
 export EEZO_METRICS_BIND="${EEZO_METRICS_BIND:-127.0.0.1:9898}"
