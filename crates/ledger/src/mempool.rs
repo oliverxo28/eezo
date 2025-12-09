@@ -482,13 +482,13 @@ impl Mempool {
                             let expected = next_nonce.get(sender)
                                 .copied()
                                 .unwrap_or_else(|| accounts.get(sender).nonce);
-                            q.pending.iter().next().map(|(lowest_nonce, _)| {
+                            q.pending.iter().next().and_then(|(lowest_nonce, _)| {
                                 if *lowest_nonce != expected {
                                     Some((*sender, *lowest_nonce, expected))
                                 } else {
                                     None
                                 }
-                            }).flatten()
+                            })
                         })
                         .collect();
                     
