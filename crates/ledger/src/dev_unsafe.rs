@@ -38,6 +38,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // Track whether we've already logged the startup warning
 static STARTUP_WARNING_LOGGED: AtomicBool = AtomicBool::new(false);
 
+/// T78.8: Helper function to parse an environment variable as a boolean "truthy" value.
+///
+/// Returns `true` if the env var is set to "1", "true", or "yes" (case insensitive).
+/// Returns `false` if the env var is not set or has any other value.
+#[inline]
+fn parse_env_var_truthy(var_name: &str) -> bool {
+    match std::env::var(var_name) {
+        Ok(v) => {
+            let v = v.to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        }
+        Err(_) => false,
+    }
+}
+
 /// T77.SAFE-2: Compile-time check - is dev-unsafe mode enabled in this build?
 ///
 /// Returns `true` only when built with the `dev-unsafe` feature.
@@ -65,13 +80,7 @@ pub fn allow_unsigned_tx() -> bool {
 
     #[cfg(feature = "dev-unsafe")]
     {
-        match std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {
-            Ok(v) => {
-                let v = v.to_ascii_lowercase();
-                v == "1" || v == "true" || v == "yes"
-            }
-            Err(_) => false,
-        }
+        parse_env_var_truthy("EEZO_DEV_ALLOW_UNSIGNED_TX")
     }
 }
 
@@ -144,17 +153,11 @@ pub const fn is_skip_sig_verify_build() -> bool {
 /// Unlike `allow_unsigned_tx()`, this function does NOT check the compile-time feature.
 #[inline]
 pub fn env_var_unsigned_tx_is_set() -> bool {
-    match std::env::var("EEZO_DEV_ALLOW_UNSIGNED_TX") {
-        Ok(v) => {
-            let v = v.to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        }
-        Err(_) => false,
-    }
+    parse_env_var_truthy("EEZO_DEV_ALLOW_UNSIGNED_TX")
 }
 
 /// T78.8: Check if we should fail fast because `EEZO_DEV_ALLOW_UNSIGNED_TX` is set
-/// in a non–dev-unsafe build.
+/// in a non-dev-unsafe build.
 ///
 /// Returns `true` if:
 /// - The `dev-unsafe` feature is NOT compiled in, AND
@@ -307,7 +310,7 @@ mod tests {
     }
 
     /// T78.8: Test that `should_warn_unsigned_tx_env_var_ignored()` works correctly
-    /// in non–dev-unsafe builds.
+    /// in non-dev-unsafe builds.
     #[cfg(not(feature = "dev-unsafe"))]
     #[test]
     fn test_should_warn_unsigned_tx_env_var_ignored_safe_build() {
