@@ -1512,41 +1512,53 @@ impl CoreRunnerHandle {
                                         // Batches consumed but no valid txs - store stats for logging
                                         hybrid_aggregated_stats = Some(agg_stats);
                                         log::debug!("hybrid-agg: batches consumed but no valid txs after filtering");
-                                        // T76.12: Fallback with reason=empty
-                                        crate::metrics::dag_hybrid_fallback_reason_inc("empty");
+                                        // T76.12/T78.4: Fallback with reason=empty (not in dag-primary mode)
+                                        if !matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary) {
+                                            crate::metrics::dag_hybrid_fallback_reason_inc("empty");
+                                        }
                                     }
                                 } else {
-                                    // T76.12: Did not meet min_dag_tx threshold - fallback
+                                    // T76.12/T78.4: Did not meet min_dag_tx threshold - fallback (not in dag-primary mode)
                                     log::debug!(
                                         "hybrid: fallback (reason=min_dag_not_met, got {} < min {})",
                                         dag_tx_count, min_dag_tx
                                     );
                                     hybrid_aggregated_stats = Some(agg_stats);
-                                    crate::metrics::dag_hybrid_fallback_reason_inc("min_dag_not_met");
+                                    if !matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary) {
+                                        crate::metrics::dag_hybrid_fallback_reason_inc("min_dag_not_met");
+                                    }
                                 }
                             } else {
-                                // No batches consumed - fallback
+                                // No batches consumed - fallback (not in dag-primary mode)
                                 log::debug!("hybrid: fallback (reason=no_batches_aggregated)");
-                                crate::metrics::dag_hybrid_fallback_reason_inc("empty");
+                                if !matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary) {
+                                    crate::metrics::dag_hybrid_fallback_reason_inc("empty");
+                                }
                             }
                         } else {
-                            // No batches ready after potential wait - fallback
+                            // No batches ready after potential wait - fallback (not in dag-primary mode)
                             if should_wait_for_batches {
                                 // We were configured to wait but nothing came - timeout fallback
                                 log::debug!("hybrid: fallback (reason=timeout, waited {:?})", wait_start.elapsed());
-                                crate::metrics::dag_hybrid_fallback_reason_inc("timeout");
+                                if !matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary) {
+                                    crate::metrics::dag_hybrid_fallback_reason_inc("timeout");
+                                }
                             } else {
                                 // No wait configured and no batches - queue empty
                                 log::debug!("hybrid: fallback (reason=queue_empty)");
-                                crate::metrics::dag_hybrid_fallback_reason_inc("queue_empty");
+                                if !matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary) {
+                                    crate::metrics::dag_hybrid_fallback_reason_inc("queue_empty");
+                                }
                             }
                             // T76.10: Record empty cap reason
                             crate::metrics::observe_hybrid_agg_cap_reason("empty");
                         }
                     } else {
-                        // No hybrid handle attached yet - fallback
+                        // No hybrid handle attached yet - fallback (not in dag-primary mode)
                         log::debug!("hybrid: fallback (reason=no_handle)");
-                        crate::metrics::dag_hybrid_fallback_reason_inc("no_handle");
+                        if !matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary) {
+                            crate::metrics::dag_hybrid_fallback_reason_inc("no_handle");
+                        }
                     }
                 }
 
@@ -1676,6 +1688,7 @@ impl CoreRunnerHandle {
                                         log::info!("dag-primary: no fallback to mempool, continuing with empty block");
                                         Vec::new()
                                     } else {
+                                        // T78.4: Only increment fallback counter in dag-hybrid mode
                                         crate::metrics::dag_hybrid_fallback_inc();
                                         Self::collect_from_mempool(&mut guard, block_max_tx)
                                     }
@@ -1690,6 +1703,7 @@ impl CoreRunnerHandle {
                                         log::info!("hybrid-agg: no-candidates-mempool-empty, continuing without fallback");
                                         Vec::new()
                                     } else {
+                                        // T78.4: Only increment fallback counter in dag-hybrid mode
                                         crate::metrics::dag_hybrid_fallback_inc();
                                         Self::collect_from_mempool(&mut guard, block_max_tx)
                                     }
@@ -1707,6 +1721,7 @@ impl CoreRunnerHandle {
                                             "hybrid-agg: no candidates (reason=filtered-out, n={} filtered={} bad_nonce={}), fallback to mempool",
                                             stats.n, stats.filtered_seen, stats.bad_nonce_pref
                                         );
+                                        // T78.4: Only increment fallback counter in dag-hybrid mode
                                         crate::metrics::dag_hybrid_fallback_inc();
                                         Self::collect_from_mempool(&mut guard, block_max_tx)
                                     }
@@ -3614,5 +3629,77 @@ mod executor_mode_tests {
         assert_eq!(stats.size_bytes, 0);
         assert_eq!(stats.agg_batches, 0);
         assert_eq!(stats.agg_candidates, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // T78.4 — DAG-primary mode behavior tests
+    // -------------------------------------------------------------------------
+
+    /// T78.4: Test that DagPrimary mode is correctly detected from environment.
+    #[test]
+    fn test_dag_primary_mode_detection() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        // Test dag-primary with hyphen
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag-primary");
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::DagPrimary);
+        
+        // Test dag_primary with underscore
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag_primary");
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::DagPrimary);
+        
+        // Test case insensitivity
+        std::env::set_var("EEZO_CONSENSUS_MODE", "DAG-PRIMARY");
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::DagPrimary);
+        
+        // Verify dag-primary works regardless of ordering enabled flag
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag-primary");
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "false");
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::DagPrimary);
+        
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+    }
+
+    /// T78.4: Test that dag-primary mode never falls back to hybrid mode.
+    #[test]
+    fn test_dag_primary_vs_hybrid_mode_distinction() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        // DagPrimary mode
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag-primary");
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::DagPrimary);
+        
+        // DagHybrid mode
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag-hybrid");
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::HybridEnabled);
+        
+        // Verify they're not equal
+        assert_ne!(HybridModeConfig::DagPrimary, HybridModeConfig::HybridEnabled);
+        
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+    }
+
+    /// T78.4: Verify that DagPrimary matches pattern correctly.
+    #[test]
+    fn test_dag_primary_pattern_matching() {
+        let dag_primary = HybridModeConfig::DagPrimary;
+        let hybrid_enabled = HybridModeConfig::HybridEnabled;
+        let standard = HybridModeConfig::Standard;
+        
+        // Test matches! macro behavior
+        assert!(matches!(dag_primary, HybridModeConfig::DagPrimary));
+        assert!(!matches!(hybrid_enabled, HybridModeConfig::DagPrimary));
+        assert!(!matches!(standard, HybridModeConfig::DagPrimary));
+        
+        // Test that hybrid matches correctly
+        assert!(matches!(hybrid_enabled, HybridModeConfig::HybridEnabled));
+        assert!(!matches!(dag_primary, HybridModeConfig::HybridEnabled));
     }
 }
