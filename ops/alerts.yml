@@ -202,7 +202,7 @@ groups:
       labels: { severity: warn }
       annotations:
         summary: "DAG-primary transaction liveness stall"
-        description: "Mempool has {{ $value }} pending transactions but no transactions included in last 5m. Check DAG ordering health."
+        description: "Mempool has pending transactions but no transactions included in last 5m. Check DAG ordering health."
 
     # Info: Shadow mismatch reason breakdown (for debugging)
     - alert: DagPrimaryShadowMismatchReason

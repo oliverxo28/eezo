@@ -84,7 +84,7 @@ get_metric() {
   local name="$1"
   local default="${2:-0}"
   local value
-  value=$(echo "$METRICS" | rg "^${name} " | awk '{print $2}' | head -1)
+  value=$(echo "$METRICS" | grep "^${name} " | awk '{print $2}' | head -1)
   # Prometheus counters are integers, but may have .0 suffix - strip it
   value="${value%.0}"
   echo "${value:-$default}"
@@ -95,7 +95,7 @@ get_labeled_metric() {
   local pattern="$1"
   local default="${2:-0}"
   local value
-  value=$(echo "$METRICS" | rg "$pattern" | awk '{print $2}' | head -1)
+  value=$(echo "$METRICS" | grep "$pattern" | awk '{print $2}' | head -1)
   value="${value%.0}"
   echo "${value:-$default}"
 }
