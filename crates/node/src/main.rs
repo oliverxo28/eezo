@@ -1179,7 +1179,9 @@ fn env_dag_ordering_enabled() -> bool {
             match s.as_str() {
                 "1" | "true" | "yes" | "on" => true,
                 "0" | "false" | "no" | "off" => false,
-                // Empty or other strings use the default
+                // Empty string ("") or unrecognized values use the build-profile default
+                // In devnet-safe builds: default is true
+                // In generic builds: default is false
                 _ => default_enabled,
             }
         }
