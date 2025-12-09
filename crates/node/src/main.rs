@@ -104,6 +104,10 @@ mod dag_runner;
 #[cfg(feature = "dag-consensus")]
 mod dag_consensus_runner;
 
+// T78.5: Shadow HotStuff checker module (only when dag-consensus feature is enabled)
+#[cfg(feature = "dag-consensus")]
+mod shadow_hotstuff;
+
 // T76.9: Fast Decode Pool module
 #[cfg(feature = "pq44-runtime")]
 mod tx_decode_pool;
@@ -1143,6 +1147,24 @@ fn env_dag_ordering_enabled() -> bool {
             let s = raw.trim().to_ascii_lowercase();
             matches!(s.as_str(), "1" | "true" | "yes" | "on")
         }
+        Err(_) => false,
+    }
+}
+
+/// T78.5: Parse EEZO_DAG_PRIMARY_SHADOW_ENABLED environment variable.
+///
+/// Returns `true` if the env var is set to "1".
+/// Returns `false` otherwise (including when unset or set to "0").
+///
+/// This flag enables the shadow HotStuff checker in dag-primary mode.
+/// When enabled, the checker runs after each committed block and verifies:
+/// - Height monotonicity (no regress, no duplicates)
+/// - Basic consistency checks
+///
+/// Only effective when EEZO_CONSENSUS_MODE=dag-primary.
+fn env_dag_primary_shadow_enabled() -> bool {
+    match env::var("EEZO_DAG_PRIMARY_SHADOW_ENABLED") {
+        Ok(raw) => raw.trim() == "1",
         Err(_) => false,
     }
 }
