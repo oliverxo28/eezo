@@ -11,9 +11,13 @@
 //! This is a **safety oracle**, not a second consensus. It never affects block commit
 //! and never panics — all failures are surfaced via metrics + warnings only.
 //!
-//! This module is only compiled when the `dag-consensus` feature is enabled.
+//! T78.7: This module is only compiled when BOTH features are enabled:
+//! - `dag-consensus`: Required for DAG consensus infrastructure
+//! - `hotstuff-shadow`: Opt-in feature to enable shadow HotStuff checker
+//!
+//! For devnet-safe builds without hotstuff-shadow, the shadow checker is not included.
 
-#![cfg(feature = "dag-consensus")]
+#![cfg(all(feature = "dag-consensus", feature = "hotstuff-shadow"))]
 
 use crate::tx_decode_pool::DecodedTx;
 use std::sync::Arc;

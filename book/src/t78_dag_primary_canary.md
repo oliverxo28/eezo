@@ -76,17 +76,39 @@ export EEZO_DATADIR=/tmp/eezo-canary
 
 ### Feature Flags
 
-Build the node with dev-unsafe mode for benchmarking:
+**For benchmarking with dev-unsafe (local testing only):**
+
+Build the node with dev-unsafe mode for local TPS testing:
 
 ```bash
-cargo build --release -p eezo-node --features "metrics,pq44-runtime,checkpoints,dev-unsafe"
+cargo build --release -p eezo-node --features "metrics,pq44-runtime,checkpoints,dev-unsafe,stm-exec,dag-consensus"
+```
+
+> ⚠️ **WARNING**: Dev-unsafe builds should NEVER be deployed to any network.
+> They are only for local development benchmarks.
+
+**For devnet-safe deployment:**
+
+Build the node without dev-unsafe for real devnet:
+
+```bash
+# Option 1: Using devnet-safe meta-feature
+cargo build --release -p eezo-node --features "devnet-safe"
+
+# Option 2: Manual feature selection
+cargo build --release -p eezo-node --features "metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
+
+# Option 3: With HotStuff shadow checker for observability
+cargo build --release -p eezo-node --features "devnet-safe,hotstuff-shadow"
 ```
 
 ---
 
 ## Terminal Setup
 
-### Terminal 1: Start the Node
+### Terminal 1: Start the Node (Benchmark Mode)
+
+**For local benchmarking with unsigned transactions:**
 
 ```bash
 # Source environment
@@ -96,9 +118,26 @@ source devnet.env
 rm -rf /tmp/eezo-canary
 
 # Set dev-unsafe mode for unsigned tx benchmarking
+# NOTE: This only works in dev-unsafe builds!
 export EEZO_DEV_ALLOW_UNSIGNED_TX=1
 
 # Start the node
+./target/release/eezo-node
+```
+
+### Terminal 1: Start the Node (Devnet-Safe Mode)
+
+**For real devnet deployment:**
+
+```bash
+# Source environment (or use defaults)
+source devnet.env
+
+# Clear previous data (optional, for fresh start)
+rm -rf /tmp/eezo-canary
+
+# Do NOT set EEZO_DEV_ALLOW_UNSIGNED_TX - it has no effect in devnet-safe builds
+# Start the node (dag-primary is the default)
 ./target/release/eezo-node
 ```
 

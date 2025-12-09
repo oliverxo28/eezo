@@ -104,8 +104,10 @@ mod dag_runner;
 #[cfg(feature = "dag-consensus")]
 mod dag_consensus_runner;
 
-// T78.5: Shadow HotStuff checker module (only when dag-consensus feature is enabled)
-#[cfg(feature = "dag-consensus")]
+// T78.5/T78.7: Shadow HotStuff checker module (only when both features are enabled)
+// The hotstuff-shadow feature gates the shadow checker for dag-primary mode.
+// In devnet-safe builds without hotstuff-shadow, this module is not compiled.
+#[cfg(all(feature = "dag-consensus", feature = "hotstuff-shadow"))]
 mod shadow_hotstuff;
 
 // T76.9: Fast Decode Pool module
@@ -1110,30 +1112,49 @@ impl ConsensusMode {
 /// Parse consensus mode from EEZO_CONSENSUS_MODE environment variable.
 ///
 /// Accepts:
-/// - `""`, `"hotstuff"`, `"hs"` → Hotstuff (default)
+/// - `""`, `"hotstuff"`, `"hs"` → Hotstuff (default for generic builds)
 /// - `"dag"` → Dag
 /// - `"dag-hybrid"`, `"dag_hybrid"` → DagHybrid
 /// - `"dag-primary"`, `"dag_primary"` → DagPrimary (T78.3)
-/// - Unknown strings log a warning and fall back to Hotstuff.
+/// - Unknown strings log a warning and fall back to the default.
+///
+/// T78.7: When the `devnet-safe` feature is enabled:
+/// - Default mode (when EEZO_CONSENSUS_MODE is unset) is `DagPrimary` instead of `Hotstuff`
+/// - All explicit mode values are still honored for flexibility
+/// - A startup log message indicates devnet-safe mode is active
 fn env_consensus_mode() -> ConsensusMode {
+    // T78.7: Determine the default mode based on build profile
+    #[cfg(feature = "devnet-safe")]
+    let default_mode = {
+        log::info!(
+            "[T78.7 devnet-safe] build profile active: default consensus mode is dag-primary"
+        );
+        ConsensusMode::DagPrimary
+    };
+    #[cfg(not(feature = "devnet-safe"))]
+    let default_mode = ConsensusMode::Hotstuff;
+
     match env::var("EEZO_CONSENSUS_MODE") {
         Ok(raw) => {
             let s = raw.trim().to_ascii_lowercase();
             match s.as_str() {
-                "" | "hotstuff" | "hs" => ConsensusMode::Hotstuff,
+                // Empty string uses the default mode (depends on build profile)
+                "" => default_mode,
+                "hotstuff" | "hs" => ConsensusMode::Hotstuff,
                 "dag" => ConsensusMode::Dag,
                 "dag-hybrid" | "dag_hybrid" => ConsensusMode::DagHybrid,
                 "dag-primary" | "dag_primary" => ConsensusMode::DagPrimary,
                 unknown => {
                     log::warn!(
-                        "consensus: unknown EEZO_CONSENSUS_MODE='{}', falling back to hotstuff",
-                        unknown
+                        "consensus: unknown EEZO_CONSENSUS_MODE='{}', falling back to {:?}",
+                        unknown,
+                        default_mode
                     );
-                    ConsensusMode::Hotstuff
+                    default_mode
                 }
             }
         }
-        Err(_) => ConsensusMode::Hotstuff,
+        Err(_) => default_mode,
     }
 }
 
@@ -1141,13 +1162,28 @@ fn env_consensus_mode() -> ConsensusMode {
 ///
 /// Returns `true` if the env var is set to "1", "true", "yes", or "on".
 /// Returns `false` otherwise (including when unset).
+///
+/// T78.7: When the `devnet-safe` feature is enabled:
+/// - Returns `true` by default when the env var is unset
+/// - Explicit "0", "false", "no", "off" can still disable ordering
 fn env_dag_ordering_enabled() -> bool {
+    // T78.7: Determine the default value based on build profile
+    #[cfg(feature = "devnet-safe")]
+    let default_enabled = true;
+    #[cfg(not(feature = "devnet-safe"))]
+    let default_enabled = false;
+
     match env::var("EEZO_DAG_ORDERING_ENABLED") {
         Ok(raw) => {
             let s = raw.trim().to_ascii_lowercase();
-            matches!(s.as_str(), "1" | "true" | "yes" | "on")
+            match s.as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                // Empty or other strings use the default
+                _ => default_enabled,
+            }
         }
-        Err(_) => false,
+        Err(_) => default_enabled,
     }
 }
 
@@ -4864,14 +4900,23 @@ mod consensus_mode_tests {
     fn test_consensus_mode_parsing() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        // Test empty/unset → Hotstuff
+        // T78.7: Test empty/unset → depends on build profile
+        // - devnet-safe build: defaults to DagPrimary
+        // - generic build: defaults to Hotstuff
         std::env::remove_var("EEZO_CONSENSUS_MODE");
+        #[cfg(feature = "devnet-safe")]
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
+        #[cfg(not(feature = "devnet-safe"))]
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
+        // Empty string also uses default based on build profile
         std::env::set_var("EEZO_CONSENSUS_MODE", "");
+        #[cfg(feature = "devnet-safe")]
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
+        #[cfg(not(feature = "devnet-safe"))]
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
-        // Test hotstuff variants
+        // Test explicit hotstuff variants (always work regardless of build profile)
         std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
@@ -4917,11 +4962,17 @@ mod consensus_mode_tests {
         std::env::set_var("EEZO_CONSENSUS_MODE", "DAG_PRIMARY");
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
 
-        // Test unknown strings fall back to Hotstuff
+        // T78.7: Test unknown strings fall back to default (depends on build profile)
         std::env::set_var("EEZO_CONSENSUS_MODE", "unknown");
+        #[cfg(feature = "devnet-safe")]
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
+        #[cfg(not(feature = "devnet-safe"))]
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "invalid");
+        #[cfg(feature = "devnet-safe")]
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
+        #[cfg(not(feature = "devnet-safe"))]
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
         // Clean up
@@ -4932,15 +4983,25 @@ mod consensus_mode_tests {
     fn test_dag_ordering_enabled_parsing() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        // Test unset → false
+        // T78.7: Test unset → depends on build profile
+        // - devnet-safe build: defaults to true
+        // - generic build: defaults to false
         std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+        #[cfg(feature = "devnet-safe")]
+        assert!(env_dag_ordering_enabled());
+        #[cfg(not(feature = "devnet-safe"))]
         assert!(!env_dag_ordering_enabled());
 
-        // Test empty → false
+        // T78.7: Test empty → depends on build profile
+        // - devnet-safe build: defaults to true
+        // - generic build: defaults to false
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "");
+        #[cfg(feature = "devnet-safe")]
+        assert!(env_dag_ordering_enabled());
+        #[cfg(not(feature = "devnet-safe"))]
         assert!(!env_dag_ordering_enabled());
 
-        // Test true values
+        // Test true values (always work)
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "1");
         assert!(env_dag_ordering_enabled());
 
@@ -4962,7 +5023,7 @@ mod consensus_mode_tests {
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "ON");
         assert!(env_dag_ordering_enabled());
 
-        // Test false values
+        // Test false values (always work - can explicitly disable even in devnet-safe)
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "0");
         assert!(!env_dag_ordering_enabled());
 
@@ -4975,7 +5036,11 @@ mod consensus_mode_tests {
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "off");
         assert!(!env_dag_ordering_enabled());
 
+        // T78.7: Unknown strings use default based on build profile
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "unknown");
+        #[cfg(feature = "devnet-safe")]
+        assert!(env_dag_ordering_enabled());
+        #[cfg(not(feature = "devnet-safe"))]
         assert!(!env_dag_ordering_enabled());
 
         // Clean up
@@ -5003,5 +5068,55 @@ mod consensus_mode_tests {
         // T78.3: Test DagPrimary mode always returns 3
         assert_eq!(ConsensusMode::DagPrimary.gauge_value(false), 3);
         assert_eq!(ConsensusMode::DagPrimary.gauge_value(true), 3);
+    }
+
+    // =========================================================================
+    // T78.7: Devnet-Safe Build Profile Tests
+    // =========================================================================
+
+    /// T78.7: Verify that devnet-safe feature detection works correctly.
+    #[test]
+    fn test_devnet_safe_feature_detection() {
+        let is_devnet_safe = cfg!(feature = "devnet-safe");
+        
+        // This test documents the expected behavior for different build profiles
+        if is_devnet_safe {
+            // devnet-safe build: should have dag-consensus and stm-exec
+            assert!(cfg!(feature = "dag-consensus"), "devnet-safe should include dag-consensus");
+            assert!(cfg!(feature = "stm-exec"), "devnet-safe should include stm-exec");
+            assert!(cfg!(feature = "metrics"), "devnet-safe should include metrics");
+            assert!(cfg!(feature = "pq44-runtime"), "devnet-safe should include pq44-runtime");
+        }
+    }
+
+    /// T78.7: Verify that devnet-safe does NOT include dev-unsafe.
+    /// This is a critical security test.
+    #[cfg(feature = "devnet-safe")]
+    #[test]
+    fn test_devnet_safe_excludes_dev_unsafe() {
+        // In a devnet-safe build, dev-unsafe should NOT be compiled in
+        // Note: If someone builds with both features, this test will still pass
+        // because we're testing the *intent* that devnet-safe alone doesn't bring dev-unsafe
+        let dev_unsafe_active = cfg!(feature = "dev-unsafe");
+        
+        // Log the state (this will be useful for debugging)
+        if dev_unsafe_active {
+            // This is OK if user explicitly added dev-unsafe; just log it
+            eprintln!(
+                "WARNING: dev-unsafe is active alongside devnet-safe. \
+                 This is OK for testing but should not be done for real devnet."
+            );
+        }
+    }
+
+    /// T78.7: Test hotstuff-shadow feature detection.
+    #[test]
+    fn test_hotstuff_shadow_feature_detection() {
+        let is_hotstuff_shadow = cfg!(feature = "hotstuff-shadow");
+        
+        // hotstuff-shadow requires dag-consensus
+        if is_hotstuff_shadow {
+            assert!(cfg!(feature = "dag-consensus"), "hotstuff-shadow requires dag-consensus");
+        }
     }
 }

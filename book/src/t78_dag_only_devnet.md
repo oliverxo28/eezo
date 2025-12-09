@@ -506,9 +506,86 @@ dag-primary: shadow HotStuff check performed at height=123 (stub)
    - If divergence detected, trigger rollback to hybrid mode
    - Manual override via env var
 
-4. **Remove HotStuff** (T78.7):
-   - Once shadow checker validates pure DAG behavior
-   - Transition to final "dag-only" mode
+4. **HotStuff Feature-Gating** (T78.7):
+   - HotStuff shadow checker is now behind `hotstuff-shadow` feature flag
+   - Devnet-safe builds can exclude HotStuff entirely when not needed
+   - Transition to final "dag-only" mode when shadow checker validates pure DAG behavior
+
+---
+
+## T78.7: Devnet-Safe Build Profile
+
+T78.7 introduces a clean "devnet-safe" build profile optimized for DAG-primary deployments:
+
+### Overview
+
+The devnet-safe profile provides:
+- **DAG-primary as default**: When `EEZO_CONSENSUS_MODE` is unset, defaults to `dag-primary`
+- **DAG ordering enabled by default**: `EEZO_DAG_ORDERING_ENABLED` defaults to `true`
+- **No dev-unsafe compiled**: Unsigned transactions are never accepted
+- **HotStuff optional**: The shadow checker is only included with `hotstuff-shadow` feature
+
+### Build Commands
+
+**Devnet-safe build (recommended for production devnet):**
+```bash
+# Using the devnet-safe meta-feature
+cargo build --release -p eezo-node --features "devnet-safe"
+```
+
+**Devnet-safe with HotStuff shadow checker:**
+```bash
+# For observability during transition from HotStuff
+cargo build --release -p eezo-node --features "devnet-safe,hotstuff-shadow"
+```
+
+### Environment Variables
+
+With a devnet-safe build, minimal configuration is needed:
+
+```bash
+# Start a dag-primary node with defaults
+./target/release/eezo-node
+
+# Or explicitly configure
+export EEZO_CONSENSUS_MODE=dag-primary  # Already the default
+export EEZO_DAG_ORDERING_ENABLED=1      # Already the default
+export EEZO_EXECUTOR_MODE=stm           # Use STM executor
+./target/release/eezo-node
+```
+
+### Feature Flags
+
+| Feature | Description | Included in devnet-safe? |
+|---------|-------------|--------------------------|
+| `devnet-safe` | Meta-feature for DAG-primary devnet builds | ✅ Self |
+| `dag-consensus` | DAG ordering and consensus | ✅ Yes |
+| `stm-exec` | Block-STM parallel executor | ✅ Yes |
+| `hotstuff-shadow` | HotStuff shadow checker | ❌ No (opt-in) |
+| `dev-unsafe` | Unsigned tx support | ❌ No (intentionally excluded) |
+
+### Comparison: Generic vs Devnet-Safe Builds
+
+| Behavior | Generic Build | Devnet-Safe Build |
+|----------|---------------|-------------------|
+| Default `EEZO_CONSENSUS_MODE` | `hotstuff` | `dag-primary` |
+| Default `EEZO_DAG_ORDERING_ENABLED` | `false` | `true` |
+| `dev-unsafe` available? | Must be explicitly added | Never included |
+| HotStuff shadow? | With `dag-consensus` | With `hotstuff-shadow` |
+
+### Verification
+
+To verify your build is devnet-safe:
+
+```bash
+# Check the consensus mode at startup (should show dag-primary)
+./target/release/eezo-node 2>&1 | grep "devnet-safe"
+# Expected: [T78.7 devnet-safe] build profile active: default consensus mode is dag-primary
+
+# Check metrics endpoint
+curl -s http://localhost:3030/metrics | grep eezo_consensus_mode_active
+# Expected: eezo_consensus_mode_active 3  (3 = dag-primary)
+```
 
 ---
 
