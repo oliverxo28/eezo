@@ -868,7 +868,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_strict_profile_constants() {
+    fn test_strict_profile_dag_tuning_constants() {
         // T78.2: Verify strict profile constants are set correctly
         assert_eq!(STRICT_PROFILE_TIME_BUDGET_MS, 50);
         assert_eq!(STRICT_PROFILE_MAX_TX, 500);
