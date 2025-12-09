@@ -627,6 +627,79 @@ See the comprehensive profiles matrix in [Dev Unsafe Modes - Build Profiles Matr
 
 ---
 
+## T78.9: Official Devnet Profile (devnet-safe + dag-primary)
+
+T78.9 locks in `devnet-safe + dag-primary + dag-ordering-enabled` as the **official devnet profile**.
+
+### Quick Start: Run Official Devnet
+
+The canonical way to start a devnet-safe DAG-primary node is:
+
+```bash
+# Official devnet launcher (recommended)
+./scripts/devnet_dag_primary.sh
+```
+
+This script:
+1. Sets all recommended environment variables for devnet-safe + dag-primary
+2. Cleans the data directory for a fresh start
+3. Runs the node with the devnet-safe feature set
+4. Does **NOT** enable unsigned transactions (devnet-safe)
+
+### Build Commands
+
+**Official devnet build:**
+```bash
+cargo build --release -p eezo-node \
+  --features "devnet-safe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
+```
+
+### Profiles Comparison
+
+| Aspect | **devnet-safe** (Official) | dev-unsafe (Local Bench) |
+|--------|---------------------------|--------------------------|
+| Use case | Devnet deployments | Local TPS experiments |
+| Unsigned tx | ❌ Never allowed | ✅ With env var |
+| Default mode | dag-primary | hotstuff |
+| Script | `devnet_dag_primary.sh` | Manual setup |
+| Safe for network? | ✅ Yes | ❌ No |
+
+### Verification After Starting
+
+```bash
+# Check consensus mode (expect 3 = dag-primary)
+curl -s http://127.0.0.1:9898/metrics | grep eezo_consensus_mode_active
+
+# Run canary SLO check
+./scripts/t78_dag_primary_canary_check.sh http://127.0.0.1:9898/metrics --tps-window=5
+```
+
+**Expected:**
+- `eezo_consensus_mode_active = 3`
+- `eezo_dag_primary_shadow_checks_total > 0` (increasing)
+- `eezo_dag_primary_shadow_mismatch_total = 0`
+- No `[DEV-UNSAFE]` warnings
+
+### Optional: Local-Only Dev-Unsafe Benchmark Profile
+
+For local TPS experiments with unsigned transactions, use the dev-unsafe profile:
+
+```bash
+# Build with dev-unsafe
+cargo build -p eezo-node \
+  --features "dev-unsafe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
+
+# Run with unsigned tx enabled
+export EEZO_DEV_ALLOW_UNSIGNED_TX=1
+export EEZO_CONSENSUS_MODE=dag-primary
+export EEZO_DAG_ORDERING_ENABLED=1
+./target/debug/eezo-node --genesis genesis.min.json --datadir /tmp/eezo-bench
+```
+
+> ⚠️ **WARNING**: Dev-unsafe builds should **NEVER** be deployed to any network.
+
+---
+
 ## References
 
 - [T78.6: DAG-Primary Canary & SLO Runbook](t78_dag_primary_canary.md)

@@ -76,39 +76,38 @@ export EEZO_DATADIR=/tmp/eezo-canary
 
 ### Feature Flags
 
-**For benchmarking with dev-unsafe (local testing only):**
+**For devnet-safe deployment (recommended):**
 
-Build the node with dev-unsafe mode for local TPS testing:
+Build the node with devnet-safe for official devnet:
 
 ```bash
-cargo build --release -p eezo-node --features "metrics,pq44-runtime,checkpoints,dev-unsafe,stm-exec,dag-consensus"
+# Option 1: Using devnet-safe meta-feature (recommended)
+cargo build --release -p eezo-node \
+  --features "devnet-safe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
+
+# Option 2: With HotStuff shadow checker for observability
+cargo build --release -p eezo-node --features "devnet-safe,hotstuff-shadow"
 ```
 
-> ⚠️ **WARNING**: Dev-unsafe builds should NEVER be deployed to any network.
-> They are only for local development benchmarks.
-
-**For devnet-safe deployment:**
-
-Build the node without dev-unsafe for real devnet:
-
+**Run using the official launcher script:**
 ```bash
-# Option 1: Using devnet-safe meta-feature
-cargo build --release -p eezo-node --features "devnet-safe"
-
-# Option 2: Manual feature selection
-cargo build --release -p eezo-node --features "metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
-
-# Option 3: With HotStuff shadow checker for observability
-cargo build --release -p eezo-node --features "devnet-safe,hotstuff-shadow"
+./scripts/devnet_dag_primary.sh
 ```
 
 ---
 
 ## Terminal Setup
 
-### Terminal 1: Start the Node (Benchmark Mode)
+### Terminal 1: Start the Node (Devnet-Safe Mode - Recommended)
 
-**For local benchmarking with unsigned transactions:**
+**For official devnet deployment:**
+
+```bash
+# Use the official launcher script (recommended)
+./scripts/devnet_dag_primary.sh
+```
+
+Or manually:
 
 ```bash
 # Source environment
@@ -117,11 +116,8 @@ source devnet.env
 # Clear previous data (optional, for fresh start)
 rm -rf /tmp/eezo-canary
 
-# Set dev-unsafe mode for unsigned tx benchmarking
-# NOTE: This only works in dev-unsafe builds!
-export EEZO_DEV_ALLOW_UNSIGNED_TX=1
-
-# Start the node
+# Do NOT set EEZO_DEV_ALLOW_UNSIGNED_TX - it has no effect in devnet-safe builds
+# Start the node (dag-primary is the default)
 ./target/release/eezo-node
 ```
 
@@ -420,6 +416,77 @@ Exit codes:
 | `block_applied_total` | Counter | Blocks applied |
 | `eezo_block_height` | Gauge | Current block height |
 | `eezo_mempool_len` | Gauge | Mempool queue size |
+
+---
+
+## TPS Window Options for Canary Check
+
+The `scripts/t78_dag_primary_canary_check.sh` script supports a `--tps-window` option for different testing scenarios:
+
+```bash
+# Short burst (1000 tx spam test)
+scripts/t78_dag_primary_canary_check.sh http://127.0.0.1:9898/metrics --tps-window=5
+
+# Standard window (default)
+scripts/t78_dag_primary_canary_check.sh http://127.0.0.1:9898/metrics --tps-window=60
+
+# Long-running soak test
+scripts/t78_dag_primary_canary_check.sh http://127.0.0.1:9898/metrics --tps-window=300
+```
+
+| Window | Use Case | Expected TPS (dev-unsafe) |
+|--------|----------|---------------------------|
+| 5s | Short 1000-tx burst | ≥150 TPS |
+| 30s | Medium test | ≥150 TPS |
+| 60s | Standard canary (default) | ≥150 TPS |
+| 300s | Long soak test | ≥150 TPS sustained |
+
+---
+
+## Optional: Local-Only Dev-Unsafe Benchmark Profile
+
+For local TPS experiments with unsigned transactions, use the dev-unsafe profile.
+
+> ⚠️ **WARNING**: Dev-unsafe builds should **NEVER** be deployed to any network.
+> They are only for local development benchmarks.
+
+**Build with dev-unsafe:**
+```bash
+cargo build -p eezo-node \
+  --features "dev-unsafe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
+```
+
+**Run with unsigned tx enabled:**
+```bash
+# Set environment for dev-unsafe mode
+export EEZO_DEV_ALLOW_UNSIGNED_TX=1
+export EEZO_CONSENSUS_MODE=dag-primary
+export EEZO_DAG_ORDERING_ENABLED=1
+export EEZO_HYBRID_STRICT_PROFILE=1
+export EEZO_EXECUTOR_MODE=stm
+export EEZO_EXEC_LANES=32
+export EEZO_DATADIR=/tmp/eezo-bench
+
+# Clear previous data
+rm -rf /tmp/eezo-bench
+
+# Start the node
+./target/debug/eezo-node --genesis genesis.min.json --datadir /tmp/eezo-bench
+```
+
+**Run unsigned tx spam test:**
+```bash
+# Terminal 2: Spam unsigned transactions
+scripts/spam_tps.sh 1000 http://127.0.0.1:8080
+
+# Terminal 3: Check metrics
+scripts/t78_dag_primary_canary_check.sh http://127.0.0.1:9898/metrics --tps-window=5
+```
+
+**Expected in dev-unsafe mode:**
+- `[DEV-UNSAFE]` warnings visible in node logs
+- Unsigned transactions accepted
+- TPS ≥ 150 with spam test
 
 ---
 

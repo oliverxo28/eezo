@@ -354,3 +354,116 @@ curl -s http://localhost:3030/metrics | grep eezo_consensus_mode_active
    - Log a loud warning at startup
    - Have **no effect** on transaction processing
    - Unsigned transactions will still be rejected
+
+---
+
+## T78.9: Official Devnet Profile (devnet-safe + dag-primary)
+
+T78.9 locks in `devnet-safe + dag-primary + dag-ordering-enabled` as the **official devnet profile**, while clearly separating it from the local-only `dev-unsafe` profile.
+
+### Profiles Summary
+
+| Profile | Use Case | Unsigned TX? | Default Consensus | DAG Ordering |
+|---------|----------|-------------|-------------------|--------------|
+| **devnet-safe** (Official) | Devnet deployments | ❌ Never | dag-primary | true |
+| **dev-unsafe** | Local TPS benchmarks | ✅ With env var | configurable | configurable |
+| **generic** | CI/general builds | ❌ Never | hotstuff | false |
+
+### Official Devnet Profile: devnet-safe
+
+This is the **recommended profile for all devnet deployments**. It provides:
+
+- **DAG-primary consensus** as default (when `EEZO_CONSENSUS_MODE` is unset)
+- **DAG ordering enabled** by default (when `EEZO_DAG_ORDERING_ENABLED` is unset)
+- **No unsigned transaction support** (even if `EEZO_DEV_ALLOW_UNSIGNED_TX=1` is set)
+- Shadow HotStuff checker available with `hotstuff-shadow` feature
+- STM executor and DAG consensus included
+
+**Build Command (devnet-safe):**
+```bash
+# Option 1: Using the devnet-safe meta-feature (recommended)
+cargo build --release -p eezo-node \
+  --features "devnet-safe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
+
+# Option 2: With HotStuff shadow checker for additional observability
+cargo build --release -p eezo-node --features "devnet-safe,hotstuff-shadow"
+```
+
+**Run Command (devnet-safe):**
+```bash
+# Use the official launcher script
+./scripts/devnet_dag_primary.sh
+
+# Or run directly (minimal config needed - defaults are correct)
+./target/release/eezo-node --genesis genesis.min.json --datadir /tmp/eezo-devnet
+```
+
+### Local-Only Benchmark Profile: dev-unsafe
+
+This profile is for **local TPS testing and development benchmarks only**. It should **NEVER** be deployed to any network.
+
+**Build Command (dev-unsafe):**
+```bash
+# Build with dev-unsafe feature for local benchmarking
+cargo build -p eezo-node \
+  --features "dev-unsafe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
+```
+
+**Run Command (dev-unsafe):**
+```bash
+# Enable unsigned tx for spam testing
+export EEZO_DEV_ALLOW_UNSIGNED_TX=1
+export EEZO_CONSENSUS_MODE=dag-primary
+export EEZO_DAG_ORDERING_ENABLED=1
+./target/debug/eezo-node --genesis genesis.min.json --datadir /tmp/eezo-bench
+```
+
+**Warning Signs**: If you see `[DEV-UNSAFE]` warnings in your logs, you have a dev-unsafe build. This is correct for local benchmarks but **wrong for network deployments**.
+
+### Quick Reference: Which Profile to Use?
+
+| Scenario | Profile | Build Features |
+|----------|---------|----------------|
+| Official devnet deployment | **devnet-safe** | `devnet-safe,metrics,...` |
+| Local TPS benchmark (unsigned tx) | **dev-unsafe** | `dev-unsafe,metrics,...` |
+| CI/testing (signed tx only) | **generic** | `pq44-runtime,metrics,...` |
+| Testnet/Mainnet (future) | **devnet-safe** or custom | No dev-unsafe |
+
+### T78.9 Environment Variable Defaults
+
+When running with the devnet-safe feature:
+
+| Variable | Devnet-Safe Default | Dev-Unsafe Default |
+|----------|--------------------|--------------------|
+| `EEZO_CONSENSUS_MODE` | `dag-primary` | (unset = hotstuff) |
+| `EEZO_DAG_ORDERING_ENABLED` | `true` | `false` |
+| `EEZO_DEV_ALLOW_UNSIGNED_TX` | **No effect** | Works when `=1` |
+
+### Official Devnet Run Commands
+
+**Start a fresh devnet-safe DAG-primary node:**
+```bash
+./scripts/devnet_dag_primary.sh
+```
+
+**Test with transactions (requires funded account):**
+```bash
+# Terminal 2: Generate keys and fund account
+./target/release/ml_dsa_keygen
+export EEZO_TX_FROM=0x<your_address>
+curl -X POST http://127.0.0.1:8080/faucet \
+  -H "Content-Type: application/json" \
+  -d '{"to":"'$EEZO_TX_FROM'","amount":"1000000000000"}'
+```
+
+**Run canary SLO check:**
+```bash
+# Terminal 3: Check metrics and SLOs
+./scripts/t78_dag_primary_canary_check.sh http://127.0.0.1:9898/metrics --tps-window=5
+```
+
+**Expected metrics for devnet-safe:**
+- `eezo_consensus_mode_active = 3` (dag-primary)
+- `eezo_dag_primary_shadow_checks_total > 0` and increasing
+- `eezo_dag_primary_shadow_mismatch_total = 0`
+- No `[DEV-UNSAFE]` warnings in node logs
