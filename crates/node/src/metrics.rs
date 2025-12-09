@@ -2296,6 +2296,8 @@ pub fn register_dag_hybrid_metrics() {
     let _ = &*EEZO_DAG_HYBRID_FALLBACK_TOTAL;
     // T76.12: Register labeled fallback counter
     let _ = &*EEZO_DAG_HYBRID_FALLBACK_REASON_TOTAL;
+    // T78.4: Register dag-primary shadow checker metric
+    let _ = &*EEZO_DAG_PRIMARY_SHADOW_CHECKS_TOTAL;
     // T76.3: Also register the bytes-level metrics
     register_dag_hybrid_bytes_metrics();
     // T76.4: Also register the apply-level metrics

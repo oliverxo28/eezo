@@ -716,7 +716,8 @@ mod tests {
     #[test]
     fn test_strict_profile_constants() {
         // Verify that strict profile constants are set correctly
-        assert_eq!(STRICT_PROFILE_TIME_BUDGET_MS, 30);
+        // T78.2: Updated from 30ms to 50ms
+        assert_eq!(STRICT_PROFILE_TIME_BUDGET_MS, 50);
         assert_eq!(STRICT_PROFILE_MAX_TX, 500);
         assert_eq!(STRICT_PROFILE_MAX_BYTES, 1_048_576);
     }
@@ -868,7 +869,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_strict_profile_constants() {
+    fn test_strict_profile_dag_tuning_constants() {
         // T78.2: Verify strict profile constants are set correctly
         assert_eq!(STRICT_PROFILE_TIME_BUDGET_MS, 50);
         assert_eq!(STRICT_PROFILE_MAX_TX, 500);
@@ -883,18 +884,21 @@ mod tests {
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
         
-        // Enable strict profile, don't set explicit min_dag_tx
-        std::env::set_var("EEZO_HYBRID_STRICT_PROFILE", "1");
+        // Clear all env vars first to ensure clean state
+        std::env::remove_var("EEZO_HYBRID_STRICT_PROFILE");
         std::env::remove_var("EEZO_HYBRID_AGG_TIME_BUDGET_MS");
         std::env::remove_var("EEZO_HYBRID_AGG_MAX_TX");
         std::env::remove_var("EEZO_HYBRID_AGG_MAX_BYTES");
         std::env::remove_var("EEZO_HYBRID_MIN_DAG_TX");
         std::env::remove_var("EEZO_HYBRID_BATCH_TIMEOUT_MS");
         
+        // Enable strict profile, don't set explicit min_dag_tx
+        std::env::set_var("EEZO_HYBRID_STRICT_PROFILE", "1");
+        
         // Create config - should use strict profile defaults
         let config = AdaptiveAggConfig::from_env();
         
-        // Should use strict profile value for min_dag_tx (0)
+        // T78.2: Should use strict profile value for min_dag_tx (0, not default 1)
         assert_eq!(config.min_dag_tx(), STRICT_PROFILE_MIN_DAG_TX);
         assert_eq!(config.min_dag_tx(), 0);
         
