@@ -790,6 +790,36 @@ impl CoreRunnerHandle {
                                     guard.last_header = Some(blk.header.clone());
                                     guard.last_txs = Some(blk.txs.clone());
 
+                                    // T78.5/T78.7: Run shadow HotStuff checker in dag-primary mode (real checker)
+                                    // NOTE: The checker runs on EVERY committed block in dag-primary mode,
+                                    // not just when hybrid batches are used. This ensures invariant checking
+                                    // for all blocks regardless of tx source.
+                                    // T78.7: Only compiled when hotstuff-shadow feature is enabled
+                                    // (non-persistence variant)
+                                    #[cfg(all(feature = "dag-consensus", feature = "hotstuff-shadow"))]
+                                    if let Some(ref mut checker) = shadow_checker {
+                                        // Convert txs to DecodedTx for the checker
+                                        let decoded_txs: Vec<std::sync::Arc<crate::tx_decode_pool::DecodedTx>> = 
+                                            blk.txs.iter().map(|tx| {
+                                                std::sync::Arc::new(
+                                                    crate::tx_decode_pool::DecodedTx::new(tx.clone())
+                                                )
+                                            }).collect();
+                                        
+                                        let block_hash = eezo_ledger::block::header_hash(&blk.header);
+                                        log::debug!(
+                                            "shadow-hotstuff: height={} txs={} hash=0x{}",
+                                            blk.header.height,
+                                            blk.txs.len(),
+                                            hex::encode(&block_hash[..4])
+                                        );
+                                        checker.on_committed_block(
+                                            blk.header.height,
+                                            block_hash,
+                                            &decoded_txs,
+                                        );
+                                    }
+
                                     Ok(SlotOutcome::Committed { height: blk.header.height })
                                 }
                                 Err(e) => {
