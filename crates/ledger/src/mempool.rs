@@ -473,6 +473,36 @@ impl Mempool {
                 .collect();
 
             if candidates.is_empty() {
+                // T78.8: Log info-level diagnostic when no candidates found but mempool has txs.
+                // This helps diagnose nonce gap issues (e.g., faucet to wrong address).
+                if iterations == 1 && !self.per_sender.is_empty() {
+                    // Count how many senders have nonce gaps
+                    let gap_info: Vec<_> = self.per_sender.iter()
+                        .filter_map(|(sender, q)| {
+                            let expected = next_nonce.get(sender)
+                                .copied()
+                                .unwrap_or_else(|| accounts.get(sender).nonce);
+                            q.pending.iter().next().and_then(|(lowest_nonce, _)| {
+                                if *lowest_nonce != expected {
+                                    Some((*sender, *lowest_nonce, expected))
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .collect();
+                    
+                    if !gap_info.is_empty() {
+                        log::warn!(
+                            "mempool: {} sender(s) skipped due to nonce gaps (first: sender={:?} lowest_nonce={} expected={}). \
+                            This usually means tx nonce 0 was rejected (e.g., InsufficientFunds) while future nonces were admitted.",
+                            gap_info.len(),
+                            gap_info[0].0,
+                            gap_info[0].1,
+                            gap_info[0].2
+                        );
+                    }
+                }
                 break;
             }
 

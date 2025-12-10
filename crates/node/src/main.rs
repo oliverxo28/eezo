@@ -5121,4 +5121,110 @@ mod consensus_mode_tests {
             assert!(cfg!(feature = "dag-consensus"), "hotstuff-shadow requires dag-consensus");
         }
     }
+
+    // =========================================================================
+    // T78.9: Devnet-Safe Default Behavior Tests
+    // =========================================================================
+
+    /// T78.9: Test that devnet-safe defaults to dag-primary when EEZO_CONSENSUS_MODE is unset.
+    /// This test validates the key behavior change from T78.9.
+    #[cfg(feature = "devnet-safe")]
+    #[test]
+    fn test_devnet_safe_default_consensus_mode_dag_primary() {
+        let _guard = ENV_LOCK.lock().expect("T78.9: failed to acquire env lock");
+        
+        // Unset the consensus mode env var to test default behavior
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+        
+        // In devnet-safe builds, default should be DagPrimary
+        let mode = env_consensus_mode();
+        assert_eq!(
+            mode,
+            ConsensusMode::DagPrimary,
+            "T78.9: devnet-safe build should default to DagPrimary when EEZO_CONSENSUS_MODE is unset"
+        );
+    }
+
+    /// T78.9: Test that devnet-safe defaults to dag ordering enabled when EEZO_DAG_ORDERING_ENABLED is unset.
+    #[cfg(feature = "devnet-safe")]
+    #[test]
+    fn test_devnet_safe_default_dag_ordering_enabled() {
+        let _guard = ENV_LOCK.lock().expect("T78.9: failed to acquire env lock");
+        
+        // Unset the ordering env var to test default behavior
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+        
+        // In devnet-safe builds, default should be true
+        let enabled = env_dag_ordering_enabled();
+        assert!(
+            enabled,
+            "T78.9: devnet-safe build should default to dag ordering enabled when EEZO_DAG_ORDERING_ENABLED is unset"
+        );
+    }
+
+    /// T78.9: Test that explicit consensus mode overrides devnet-safe defaults.
+    #[cfg(feature = "devnet-safe")]
+    #[test]
+    fn test_devnet_safe_explicit_mode_override() {
+        let _guard = ENV_LOCK.lock().expect("T78.9: failed to acquire env lock");
+        
+        // Explicitly set hotstuff mode - should override devnet-safe default
+        std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
+        assert_eq!(
+            env_consensus_mode(),
+            ConsensusMode::Hotstuff,
+            "T78.9: explicit hotstuff mode should override devnet-safe default"
+        );
+        
+        // Explicitly set dag-hybrid mode
+        std::env::set_var("EEZO_CONSENSUS_MODE", "dag-hybrid");
+        assert_eq!(
+            env_consensus_mode(),
+            ConsensusMode::DagHybrid,
+            "T78.9: explicit dag-hybrid mode should override devnet-safe default"
+        );
+        
+        // Cleanup
+        std::env::remove_var("EEZO_CONSENSUS_MODE");
+    }
+
+    /// T78.9: Test that explicit dag ordering false overrides devnet-safe defaults.
+    #[cfg(feature = "devnet-safe")]
+    #[test]
+    fn test_devnet_safe_explicit_ordering_disabled() {
+        let _guard = ENV_LOCK.lock().expect("T78.9: failed to acquire env lock");
+        
+        // Explicitly disable ordering - should override devnet-safe default
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "0");
+        assert!(
+            !env_dag_ordering_enabled(),
+            "T78.9: explicit ordering=0 should override devnet-safe default"
+        );
+        
+        std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "false");
+        assert!(
+            !env_dag_ordering_enabled(),
+            "T78.9: explicit ordering=false should override devnet-safe default"
+        );
+        
+        // Cleanup
+        std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
+    }
+
+    /// T78.9: Test the gauge value for dag-primary mode is 3.
+    #[cfg(feature = "devnet-safe")]
+    #[test]
+    fn test_devnet_safe_dag_primary_gauge_value() {
+        // dag-primary mode should have gauge value 3
+        assert_eq!(
+            ConsensusMode::DagPrimary.gauge_value(true),
+            3,
+            "T78.9: dag-primary gauge value should be 3"
+        );
+        assert_eq!(
+            ConsensusMode::DagPrimary.gauge_value(false),
+            3,
+            "T78.9: dag-primary gauge value should be 3 regardless of ordering flag"
+        );
+    }
 }
