@@ -14,66 +14,63 @@
 mod common;
 
 use std::path::PathBuf;
+use pqcrypto_mldsa::mldsa44::{keypair, detached_sign, PublicKey, SecretKey};
+use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _, DetachedSignature as _};
 
-/// Generate ML-DSA-44 keypair and return (public_key_hex, secret_key_hex, address_hex)
-fn generate_ml_dsa_keypair() -> (Vec<u8>, Vec<u8>, [u8; 20]) {
-    use pqcrypto_mldsa::mldsa44::keypair;
-    use pqcrypto_traits::sign::PublicKey as _;
-    
-    let (pk, sk) = keypair();
-    let pk_bytes = pk.as_bytes().to_vec();
-    
-    // Address is first 20 bytes of public key
-    let mut addr = [0u8; 20];
-    addr.copy_from_slice(&pk_bytes[..20]);
-    
-    // Get secret key bytes
-    use pqcrypto_traits::sign::SecretKey as _;
-    let sk_bytes = sk.as_bytes().to_vec();
-    
-    (pk_bytes, sk_bytes, addr)
+/// Helper struct to hold keypair and sign transactions
+struct TxSigner {
+    pk: PublicKey,
+    sk: SecretKey,
+    address: [u8; 20],
 }
 
-/// Sign a transaction using ML-DSA-44
-fn sign_tx(
-    chain_id: [u8; 20],
-    to: [u8; 20],
-    amount: u128,
-    fee: u128,
-    nonce: u64,
-    pk_bytes: &[u8],
-    sk_bytes: &[u8],
-) -> serde_json::Value {
-    use pqcrypto_mldsa::mldsa44::{detached_sign, SecretKey};
-    use pqcrypto_traits::sign::DetachedSignature;
+impl TxSigner {
+    /// Generate a new ML-DSA-44 keypair
+    fn new() -> Self {
+        let (pk, sk) = keypair();
+        let pk_bytes = pk.as_bytes();
+        
+        // Address is first 20 bytes of public key
+        let mut address = [0u8; 20];
+        address.copy_from_slice(&pk_bytes[..20]);
+        
+        Self { pk, sk, address }
+    }
     
-    // Reconstruct secret key from bytes
-    let sk = SecretKey::from_bytes(sk_bytes).expect("valid secret key");
-    
-    // Create transaction core
-    let core = eezo_ledger::TxCore {
-        to: eezo_ledger::Address::from_bytes(to),
-        amount,
-        fee,
-        nonce,
-    };
-    
-    // Create domain-separated message for signing
-    let msg = eezo_ledger::tx_domain_bytes(chain_id, &core);
-    
-    // Sign the message
-    let sig = detached_sign(&msg, &sk);
-    let sig_bytes = sig.as_bytes();
-    
-    // Build JSON payload for /submit_tx endpoint
-    serde_json::json!({
-        "to": format!("0x{}", hex::encode(to)),
-        "amount": amount.to_string(),
-        "fee": fee.to_string(),
-        "nonce": nonce,
-        "pubkey": hex::encode(pk_bytes),
-        "sig": hex::encode(sig_bytes)
-    })
+    /// Sign a transaction and return JSON payload for /submit_tx endpoint
+    fn sign_tx(
+        &self,
+        chain_id: [u8; 20],
+        to: [u8; 20],
+        amount: u128,
+        fee: u128,
+        nonce: u64,
+    ) -> serde_json::Value {
+        // Create transaction core
+        let core = eezo_ledger::TxCore {
+            to: eezo_ledger::Address::from_bytes(to),
+            amount,
+            fee,
+            nonce,
+        };
+        
+        // Create domain-separated message for signing
+        let msg = eezo_ledger::tx_domain_bytes(chain_id, &core);
+        
+        // Sign the message
+        let sig = detached_sign(&msg, &self.sk);
+        let sig_bytes = sig.as_bytes();
+        
+        // Build JSON payload for /submit_tx endpoint
+        serde_json::json!({
+            "to": format!("0x{}", hex::encode(to)),
+            "amount": amount.to_string(),
+            "fee": fee.to_string(),
+            "nonce": nonce,
+            "pubkey": hex::encode(self.pk.as_bytes()),
+            "sig": hex::encode(sig_bytes)
+        })
+    }
 }
 
 /// Fund an address via the faucet
@@ -155,8 +152,8 @@ fn t78_dag_primary_shadow_checker_integration() {
     println!("Starting dag-primary integration test on port {}", port);
     
     // Generate keypair for signing transactions
-    let (pk_bytes, sk_bytes, sender_addr) = generate_ml_dsa_keypair();
-    println!("Generated keypair: sender=0x{}", hex::encode(sender_addr));
+    let signer = TxSigner::new();
+    println!("Generated keypair: sender=0x{}", hex::encode(signer.address));
     
     // Spawn node in dag-primary mode with shadow checker enabled
     let mut child = common::spawn_node_with_env(
@@ -194,7 +191,7 @@ fn t78_dag_primary_shadow_checker_integration() {
     
     // Fund the sender address via faucet
     // Need enough for 10 txs with amount=1000 and fee=100 each = 11000
-    if !fund_address(port, &sender_addr, 100_000) {
+    if !fund_address(port, &signer.address, 100_000) {
         println!("Faucet funding failed");
         child.kill();
         panic!("Faucet funding failed");
@@ -208,14 +205,12 @@ fn t78_dag_primary_shadow_checker_integration() {
     let recipient: [u8; 20] = [0xDE; 20]; // Some random recipient
     let mut submitted = 0;
     for nonce in 0..10 {
-        let tx_json = sign_tx(
+        let tx_json = signer.sign_tx(
             chain_id_bytes,
             recipient,
             1000,  // amount
             100,   // fee
             nonce,
-            &pk_bytes,
-            &sk_bytes,
         );
         
         if submit_tx(port, &tx_json) {

@@ -356,6 +356,7 @@ pub fn wait_until_metric_value(
 }
 
 /// Get the current value of a metric. Returns None if not found.
+/// Handles both simple metrics (e.g., "metric 42") and labeled metrics (e.g., "metric{label=\"value\"} 42").
 #[allow(dead_code)]
 pub fn get_metric_value(port: u16, metric_name: &str) -> Option<i64> {
     let url = format!("http://127.0.0.1:{}/metrics", port);
@@ -367,21 +368,46 @@ pub fn get_metric_value(port: u16, metric_name: &str) -> Option<i64> {
     
     let text = resp.text().ok()?;
     for line in text.lines() {
-        // Match exact metric name (followed by space or end of line)
-        // e.g., "eezo_txs_included_total 42" should match "eezo_txs_included_total"
-        if !line.starts_with('#') && line.starts_with(metric_name) {
-            let after_name = &line[metric_name.len()..];
-            // Ensure the next char is whitespace or nothing (exact match)
-            if after_name.is_empty() || after_name.starts_with(' ') || after_name.starts_with('{') {
-                // Handle labeled metrics like foo{label="value"} 123
-                let value_str = if after_name.contains('}') {
-                    after_name.split('}').nth(1)?.split_whitespace().next()?
-                } else {
-                    after_name.split_whitespace().next()?
-                };
-                return value_str.parse().ok();
-            }
+        // Skip comment lines
+        if line.starts_with('#') {
+            continue;
         }
+        
+        // Check for exact metric name match
+        // Must be followed by space, '{', or end of line
+        if !line.starts_with(metric_name) {
+            continue;
+        }
+        
+        let after_name = &line[metric_name.len()..];
+        
+        // Ensure exact match: next char must be space, '{', or nothing
+        let first_char = after_name.chars().next();
+        let is_exact_match = match first_char {
+            None => true,                          // End of line
+            Some(' ') => true,                     // Simple metric: "metric 42"
+            Some('{') => true,                     // Labeled metric: "metric{label=\"value\"} 42"
+            _ => false,                            // Partial match like "foobar" when searching "foo"
+        };
+        
+        if !is_exact_match {
+            continue;
+        }
+        
+        // Extract the value
+        let value_str = if let Some('{') = first_char {
+            // Labeled metric: find value after '}'
+            // e.g., "{label=\"value\"} 42" -> after '}' we have " 42"
+            after_name.find('}')
+                .and_then(|pos| {
+                    after_name[pos + 1..].split_whitespace().next()
+                })?
+        } else {
+            // Simple metric: value is after space
+            after_name.split_whitespace().next()?
+        };
+        
+        return value_str.parse().ok();
     }
     None
 }
