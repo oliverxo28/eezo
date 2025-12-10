@@ -442,7 +442,7 @@ impl SharedMempool {
     ///
     /// this is read-only: it does not pop, mark, or mutate any entries.
     /// dag uses this for "shadow" payload construction without affecting
-    /// the hotstuff path or mempool behaviour.
+    /// the legacy path or mempool behaviour.
     pub async fn sample_hashes(&self, max: usize) -> Vec<TxHash> {
         let g = self.inner.lock().await;
         g.sample_hashes(max)

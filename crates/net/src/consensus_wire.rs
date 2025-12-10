@@ -1,5 +1,8 @@
-//! T27: Wire envelope for HotStuff-like consensus (Proposal/Vote).
+//! T27: Wire envelope for legacy consensus (Proposal/Vote) — historical, see T81.
 //! Phase (Prepare/PreCommit/Commit) is carried *inside* Vote and is committed via the signature digest.
+//!
+//! Note: This is pre-DAG consensus wire format. EEZO production uses pure DAG
+//! consensus as of T81. The code is retained for backward compatibility.
 #![cfg(feature = "pq44-runtime")]
 use eezo_ledger::consensus_msg::{ConsensusMsg, SignedConsensusMsg};
 use serde::{Deserialize, Serialize};

@@ -407,7 +407,7 @@ struct StatusView {
     git_sha: Option<String>,
     node_id: String,
     first_seen: u64,
-    // T55.3: expose which consensus mode is active ("Hotstuff" or "Dag")
+    // T55.3: expose which consensus mode is active (e.g. "DagPrimary")
     consensus_mode: String,	
 }
 
@@ -433,7 +433,7 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusView> {
 
 #[derive(Serialize)]
 struct DagStatusView {
-    /// Consensus mode requested via EEZO_CONSENSUS_MODE ("hotstuff" or "dag")
+    /// Consensus mode requested via EEZO_CONSENSUS_MODE (e.g. "dag-primary")
     mode: String,
     /// Coarse runner status: "running", "disabled", or "absent"
     runner: String,
@@ -443,7 +443,7 @@ struct DagStatusView {
 async fn dag_status_handler(State(state): State<AppState>) -> Json<DagStatusView> {
     // Read current consensus mode from env (same helper you already use)
     let mode = match env_consensus_mode() {
-        ConsensusMode::Hotstuff => "hotstuff".to_string(),
+        ConsensusMode::Legacy0 => "legacy-0".to_string(),
         ConsensusMode::Dag => "dag".to_string(),
         ConsensusMode::DagHybrid => "dag-hybrid".to_string(),
         ConsensusMode::DagPrimary => "dag-primary".to_string(),
@@ -491,7 +491,7 @@ async fn dag_debug_handler(State(state): State<AppState>) -> Json<DagDebugView> 
             max_height: snapshot.max_height,
         })
     } else {
-        // In Hotstuff mode, or if DAG is not wired, we just return an empty view.
+        // In legacy mode, or if DAG is not wired, we just return an empty view.
         Json(DagDebugView {
             vertex_count: 0,
             tips: Vec::new(),
@@ -516,7 +516,7 @@ async fn dag_vertex_handler(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<u64>,
 ) -> Response {
-    // If there is no DAG runner (e.g. hotstuff mode), treat as 404.
+    // If there is no DAG runner (e.g. legacy mode), treat as 404.
     if let Some(dag) = state.dag_runner.as_ref() {
         match dag.vertex_debug(id).await {
             Some(v) => (StatusCode::OK, Json(v)).into_response(),
@@ -629,7 +629,7 @@ async fn dag_block_dry_run_handler() -> Response {
 }
 /// T64.1: GET /dag/block_template
 ///
-/// Returns a synthetic Hotstuff-style block template derived from the current
+/// Returns a synthetic legacy-style block template derived from the current
 /// DAG candidate, using the same shadow execution state as /dag/block_dry_run.
 /// This does NOT commit anything; it only inspects DAG + mempool.
 #[cfg(feature = "pq44-runtime")]
@@ -673,7 +673,7 @@ async fn dag_block_template_handler() -> Response {
 /// T65.0: GET /dag/block_compare
 ///
 /// Compare the current DAG candidate (tx hashes) against the latest committed
-/// block from the Hotstuff path (as tracked in `recent_blocks`).
+/// block from the legacy path (as tracked in `recent_blocks`).
 /// This is debug-only, read-only, and does **not** change real chain state.
 ///
 /// The idea is: while DAG is building candidates from mempool, we can inspect
@@ -1111,12 +1111,12 @@ fn env_u16(var: &str, default_v: u16) -> u16 {
 ///
 /// **EEZO's production consensus is DAG-based (DagPrimary mode).**
 ///
-/// HotStuff is a legacy consensus mechanism retained only for:
+/// Legacy consensus (mode 0) is a deprecated mechanism retained only for:
 /// - Backward compatibility during transition
 /// - Shadow/lab testing and comparison
 /// - Development debugging
 ///
-/// HotStuff NEVER decides block finality in production configurations.
+/// Legacy consensus NEVER decides block finality in production configurations.
 ///
 /// ## Mode Hierarchy
 ///
@@ -1124,16 +1124,16 @@ fn env_u16(var: &str, default_v: u16) -> u16 {
 /// |------|-------------|----------------|
 /// | `DagPrimary` | DAG is sole consensus authority | ✅ Recommended |
 /// | `DagHybrid` | DAG primary with mempool fallback | Transition only |
-/// | `Dag` | DAG tx source with HotStuff commit | Legacy |
-/// | `Hotstuff` | Pure HotStuff (pre-DAG) | ❌ Not for production |
+/// | `Dag` | DAG tx source with legacy commit | Legacy |
+/// | `Legacy0` | Pre-DAG consensus (historical) | ❌ Not for production |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConsensusMode {
-    /// Legacy HotStuff-style block production.
+    /// Legacy pre-DAG block production (historical mode 0).
     /// **NOT RECOMMENDED for production.** Use DagPrimary instead.
     /// Only available in builds without dag-only feature.
-    Hotstuff,
+    Legacy0,
     /// DAG mode: DAG is used for tx source + dry-run + shadow consensus,
-    /// but HotStuff still commits blocks. Legacy transition mode.
+    /// but legacy path still commits blocks. Legacy transition mode.
     Dag,
     /// T76.1: Hybrid mode: DAG provides ordered batches as primary tx source,
     /// with mempool fallback. Transition mode only.
@@ -1148,14 +1148,14 @@ impl ConsensusMode {
     /// T76.11/T78.3/T80.0: Compute the gauge value for the consensus mode metric.
     ///
     /// Returns:
-    /// - 0 for Hotstuff (legacy mode, not recommended)
+    /// - 0 for Legacy0 (legacy mode, not recommended)
     /// - 1 for DagHybrid mode with DAG ordering enabled (transition)
-    /// - 0 for DagHybrid mode with DAG ordering disabled (effectively hotstuff)
+    /// - 0 for DagHybrid mode with DAG ordering disabled (effectively legacy)
     /// - 2 for full DAG mode (legacy)
     /// - 3 for DagPrimary mode (PRODUCTION: DAG is sole consensus authority)
     fn gauge_value(&self, dag_ordering_enabled: bool) -> i64 {
         match self {
-            ConsensusMode::Hotstuff => 0,
+            ConsensusMode::Legacy0 => 0,
             ConsensusMode::DagHybrid => {
                 if dag_ordering_enabled { 1 } else { 0 }
             }
@@ -1178,20 +1178,20 @@ impl ConsensusMode {
 /// - `"dag-primary"`, `"dag_primary"` → DagPrimary (PRODUCTION)
 /// - `"dag-hybrid"`, `"dag_hybrid"` → DagHybrid (transition)
 /// - `"dag"` → Dag (legacy)
-/// - `"hotstuff"`, `"hs"` → Hotstuff (legacy, NOT for production)
+/// - `"hotstuff"`, `"hs"` → **WARNING**: Legacy mode is deprecated (T81.4)
 /// - Unknown strings log a warning and fall back to the default.
 ///
 /// # Build Profile Defaults
 ///
-/// - **`dag-only` feature**: Always DagPrimary (ignores HotStuff modes)
+/// - **`dag-only` feature**: Always DagPrimary (legacy modes unavailable)
 /// - **`devnet-safe` feature**: Default is DagPrimary
-/// - **Generic build**: Default is Hotstuff (for backward compatibility)
+/// - **Generic build**: Default is Legacy0 (for backward compatibility only)
 ///
 /// # Note on dag-only builds
 ///
-/// When built with `--features dag-only`, HotStuff modes are not available.
-/// Attempts to set `EEZO_CONSENSUS_MODE=hotstuff` will log a warning and
-/// use DagPrimary instead.
+/// When built with `--features dag-only`, legacy modes are not available.
+/// Attempts to set `EEZO_CONSENSUS_MODE=hotstuff` will produce a warning
+/// and fall back to dag-primary mode.
 fn env_consensus_mode() -> ConsensusMode {
     // T80.0: dag-only builds always use DagPrimary
     #[cfg(feature = "dag-only")]
@@ -1211,9 +1211,9 @@ fn env_consensus_mode() -> ConsensusMode {
         ConsensusMode::DagPrimary
     };
     
-    // Generic builds default to Hotstuff for backward compatibility
+    // Generic builds default to Legacy0 for backward compatibility
     #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
-    let default_mode = ConsensusMode::Hotstuff;
+    let default_mode = ConsensusMode::Legacy0;
 
     match env::var("EEZO_CONSENSUS_MODE") {
         Ok(raw) => {
@@ -1222,21 +1222,23 @@ fn env_consensus_mode() -> ConsensusMode {
                 // Empty string uses the default mode (depends on build profile)
                 "" => default_mode,
                 
-                // T80.0: In dag-only builds, reject HotStuff modes
+                // T81.4: In dag-only builds, reject legacy modes with clear warning
                 #[cfg(feature = "dag-only")]
                 "hotstuff" | "hs" => {
                     log::warn!(
-                        "[T80.0 dag-only] HotStuff mode requested but not available in dag-only build; using dag-primary"
+                        "[T81.4 dag-only] Legacy mode (hotstuff) has been removed; EEZO is DAG-only now. Using dag-primary."
                     );
                     ConsensusMode::DagPrimary
                 }
                 
+                // T81.4: In non-dag-only builds, legacy mode is deprecated
                 #[cfg(not(feature = "dag-only"))]
                 "hotstuff" | "hs" => {
                     log::warn!(
-                        "[T80.0] HotStuff mode is LEGACY and NOT RECOMMENDED for production; consider dag-primary"
+                        "[T81.4] Legacy mode (hotstuff) is DEPRECATED and NOT RECOMMENDED; consider dag-primary. \
+                         This mode will be removed in a future release."
                     );
-                    ConsensusMode::Hotstuff
+                    ConsensusMode::Legacy0
                 }
                 
                 "dag" => ConsensusMode::Dag,
@@ -2032,7 +2034,7 @@ async fn post_tx_batch(
             parsed.push(eezo_ledger::SignedTx { core, pubkey: pubkey_bytes, sig: sig_bytes });
         }
 
-        // Only use CoreRunnerHandle (Hotstuff); DAG mode doesn't support batch tx yet
+        // Only use CoreRunnerHandle (legacy path); DAG mode doesn't support batch tx yet
         let Some(core_runner) = state.core_runner.as_ref() else {
             if state.dag_runner.is_some() {
                 return (
@@ -3121,7 +3123,7 @@ async fn main() -> anyhow::Result<()> {
         register_t76_decode_pool_metrics();
 
         // T76.11: Set consensus mode gauge based on current mode
-        // 0 = Hotstuff, 1 = Hybrid (dag-hybrid with ordering), 2 = DAG
+        // 0 = Legacy, 1 = Hybrid (dag-hybrid with ordering), 2 = DAG
         let mode = env_consensus_mode();
         let dag_ordering = env_dag_ordering_enabled();
         let mode_value = mode.gauge_value(dag_ordering);
@@ -3508,7 +3510,7 @@ async fn main() -> anyhow::Result<()> {
         let rollback_on_error = true;
 
         match consensus_mode {
-            ConsensusMode::Hotstuff => {
+            ConsensusMode::Legacy0 => {
                 let single: SingleNode = SingleNode::new(cfg, sk, pk);
                 // NEW: pass the DB (Some(persistence.clone())) so T36.5 can read real roots/timestamp
                 let runner = CoreRunnerHandle::spawn(single, Some(persistence.clone()), tick_ms, rollback_on_error);
@@ -3622,7 +3624,7 @@ async fn main() -> anyhow::Result<()> {
         let rollback_on_error = true;
 
         match consensus_mode {
-            ConsensusMode::Hotstuff => {
+            ConsensusMode::Legacy0 => {
                 let single: SingleNode = SingleNode::new(cfg, sk, pk);
                 let runner = CoreRunnerHandle::spawn(single, tick_ms, rollback_on_error);
                 (Some(runner), None)
@@ -3683,6 +3685,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "pq44-runtime"))]
     let (core_runner, dag_runner): (Option<Arc<CoreRunnerHandle>>, Option<Arc<DagRunnerHandle>>) = (None, None);
 
+    // T81.4: Legacy consensus code (historical, not used in production)
     // let hs: Arc<Mutex<eezo_ledger::HotStuff<StaticCertStore, consensus_runner::NodeLoopback>>> = {
     //     let certs = Arc::new(StaticCertStore::new());
     // consensus_runner::start_single_node_consensus(chain_id, certs)
@@ -3942,14 +3945,14 @@ async fn main() -> anyhow::Result<()> {
             // Both handles exist → attach DAG
             core.set_dag_runner(Some(dag)).await;
         } else if let Some(core) = core_runner.clone() {
-            // Only core runner exists (normal Hotstuff mode) → mark DAG as absent
+            // Only core runner exists (legacy mode) → mark DAG as absent
             core.set_dag_runner(None).await;
         }
         // If there is no core_runner at all (pure DAG mode), we don't call set_dag_runner.
     }
 
     // T75.0: Spawn shadow DAG consensus runner if enabled.
-    // This runs the consensus-dag crate in parallel with Hotstuff/STM but only
+    // This runs the consensus-dag crate in parallel with legacy/STM but only
     // observes block commits - it never affects the canonical consensus path.
     #[cfg(feature = "dag-consensus")]
     let shadow_dag_handle = crate::dag_consensus_runner::spawn_shadow_dag_if_enabled();
@@ -5016,14 +5019,14 @@ mod consensus_mode_tests {
         // T80.0/T78.7: Test empty/unset → depends on build profile
         // - dag-only build: always DagPrimary
         // - devnet-safe build: defaults to DagPrimary
-        // - generic build: defaults to Hotstuff
+        // - generic build: defaults to Legacy0
         std::env::remove_var("EEZO_CONSENSUS_MODE");
         #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
         #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
         #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
 
         // Empty string also uses default based on build profile
         std::env::set_var("EEZO_CONSENSUS_MODE", "");
@@ -5032,33 +5035,33 @@ mod consensus_mode_tests {
         #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
         #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
 
-        // T80.0: In dag-only builds, hotstuff modes are overridden to dag-primary
-        // In non-dag-only builds, hotstuff is still available (but deprecated)
+        // T81.4: In dag-only builds, legacy modes are rejected and forced to dag-primary
+        // In non-dag-only builds, legacy mode is still available (but deprecated)
         std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
         #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Forced
         #[cfg(not(feature = "dag-only"))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "HOTSTUFF");
         #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Forced
         #[cfg(not(feature = "dag-only"))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "hs");
         #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Forced
         #[cfg(not(feature = "dag-only"))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "HS");
         #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Forced
         #[cfg(not(feature = "dag-only"))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
 
         // Test dag (works in all builds)
         std::env::set_var("EEZO_CONSENSUS_MODE", "dag");
@@ -5100,7 +5103,7 @@ mod consensus_mode_tests {
         #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
         #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "invalid");
         #[cfg(feature = "dag-only")]
@@ -5108,7 +5111,7 @@ mod consensus_mode_tests {
         #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
         #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
+        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
 
         // Clean up
         std::env::remove_var("EEZO_CONSENSUS_MODE");
@@ -5209,9 +5212,9 @@ mod consensus_mode_tests {
     fn test_consensus_mode_gauge_value_t78_3() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        // Test Hotstuff mode always returns 0
-        assert_eq!(ConsensusMode::Hotstuff.gauge_value(false), 0);
-        assert_eq!(ConsensusMode::Hotstuff.gauge_value(true), 0);
+        // Test Legacy0 mode always returns 0
+        assert_eq!(ConsensusMode::Legacy0.gauge_value(false), 0);
+        assert_eq!(ConsensusMode::Legacy0.gauge_value(true), 0);
 
         // Test DAG mode always returns 2
         assert_eq!(ConsensusMode::Dag.gauge_value(false), 2);
@@ -5311,12 +5314,12 @@ mod consensus_mode_tests {
     fn test_devnet_safe_explicit_mode_override() {
         let _guard = ENV_LOCK.lock().expect("T78.9: failed to acquire env lock");
         
-        // Explicitly set hotstuff mode - should override devnet-safe default
+        // Explicitly set legacy mode - should override devnet-safe default
         std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
         assert_eq!(
             env_consensus_mode(),
-            ConsensusMode::Hotstuff,
-            "T78.9: explicit hotstuff mode should override devnet-safe default"
+            ConsensusMode::Legacy0,
+            "T78.9: explicit legacy mode should override devnet-safe default"
         );
         
         // Explicitly set dag-hybrid mode

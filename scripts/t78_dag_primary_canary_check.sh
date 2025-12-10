@@ -117,11 +117,12 @@ print_status() {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SLO 1: Consensus Mode = dag-primary (3)
+# Historical note: 0=legacy (pre-T81), 1=hybrid, 2=dag, 3=dag-primary
 # ─────────────────────────────────────────────────────────────────────────────
 echo -e "${BLUE}[Consensus Mode]${NC}"
 CONSENSUS_MODE=$(get_metric "eezo_consensus_mode_active" "")
 case "$CONSENSUS_MODE" in
-  0) MODE_NAME="hotstuff"; MODE_OK=false ;;
+  0) MODE_NAME="legacy"; MODE_OK=false ;;
   1) MODE_NAME="hybrid"; MODE_OK=false ;;
   2) MODE_NAME="dag"; MODE_OK=false ;;
   3) MODE_NAME="dag-primary"; MODE_OK=true ;;
