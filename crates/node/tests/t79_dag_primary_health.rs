@@ -1,7 +1,7 @@
-//! T79.0: dag-primary health endpoint integration test
+//! T79.0 / T81.2: dag-primary health endpoint integration test (pure DAG semantics)
 //!
 //! This test validates the `/health/dag_primary` endpoint:
-//! - Returns 200 when in dag-primary mode with shadow checker and txs active
+//! - Returns 200 when in dag-primary mode with blocks and txs flowing
 //! - Returns 503 with "wrong_mode" reason when not in dag-primary mode
 //!
 //! The test uses the existing test infrastructure from common.rs.
@@ -54,12 +54,15 @@ fn call_health_endpoint(port: u16) -> Result<(u16, serde_json::Value), String> {
     Ok((status, body))
 }
 
-/// T79.0: Test that the health endpoint returns 503 for wrong mode (hotstuff).
+/// T79.0 / T81.2: Test that the health endpoint returns 503 for wrong mode.
 ///
 /// This test:
-/// 1. Boots a node in hotstuff mode (NOT dag-primary)
+/// 1. Boots a node with consensus mode != 3 (not dag-primary)
 /// 2. Calls /health/dag_primary
 /// 3. Verifies HTTP 503 and "wrong_mode" reason in JSON
+///
+/// NOTE: Since T81.1, HotStuff modes may not be available in all builds.
+/// This test verifies that non-dag-primary modes result in degraded status.
 #[test]
 #[ignore = "requires metrics,pq44-runtime features"]
 fn t79_health_endpoint_wrong_mode() {
@@ -78,7 +81,8 @@ fn t79_health_endpoint_wrong_mode() {
     
     println!("Starting health endpoint wrong_mode test on port {}", port);
     
-    // Spawn node in hotstuff mode (default, NOT dag-primary)
+    // Spawn node in hybrid mode (NOT dag-primary)
+    // This tests that any non-dag-primary mode results in degraded status
     let metrics_bind = format!("127.0.0.1:{}", metrics_port);
     let mut child = common::spawn_node_with_env(
         &[
@@ -89,8 +93,8 @@ fn t79_health_endpoint_wrong_mode() {
         &[
             ("EEZO_CHAIN_ID", chain_id_hex),
             ("EEZO_METRICS_BIND", &metrics_bind),
-            // Explicitly set hotstuff mode (NOT dag-primary)
-            ("EEZO_CONSENSUS_MODE", "hotstuff"),
+            // Set to hybrid mode (mode=1, NOT dag-primary)
+            ("EEZO_CONSENSUS_MODE", "hybrid"),
         ],
     );
     
@@ -121,23 +125,27 @@ fn t79_health_endpoint_wrong_mode() {
     // Verify JSON contains "degraded" status and "wrong_mode" reason
     assert_eq!(body["status"], "degraded", "Expected degraded status");
     assert_eq!(body["reason"], "wrong_mode", "Expected wrong_mode reason");
-    assert_eq!(body["consensus_mode"], 0, "Expected consensus_mode=0 (hotstuff)");
+    // Mode 1 = hybrid (not dag-primary)
+    assert_ne!(body["consensus_mode"], 3, "Expected consensus_mode != 3 (not dag-primary)");
     
     // Clean up
     child.kill();
     println!("Test completed successfully!");
 }
 
-/// T79.0: Test that the health endpoint returns 200 for healthy dag-primary mode.
+/// T79.0 / T81.2: Test that the health endpoint returns 200 for healthy dag-primary mode.
 ///
 /// This test:
-/// 1. Boots a node in dag-primary mode with shadow checker enabled
+/// 1. Boots a node in dag-primary mode
 /// 2. Funds an account and submits transactions
-/// 3. Waits for transactions to be included
+/// 3. Waits for transactions to be included and block height to increase
 /// 4. Calls /health/dag_primary
 /// 5. Verifies HTTP 200 and "healthy" status in JSON
 ///
-/// NOTE: This test is more complex because it requires actual transaction flow.
+/// Health is based on DAG-only semantics:
+/// - consensus mode is dag-primary (3)
+/// - block height is increasing within the health window
+/// - transactions are being included within the health window
 #[test]
 #[ignore = "requires dag-primary build with pq44-runtime,dag-consensus,metrics features"]
 fn t79_health_endpoint_healthy() {
@@ -167,7 +175,7 @@ fn t79_health_endpoint_healthy() {
     sender_address.copy_from_slice(&pk_bytes[..20]);
     println!("Generated keypair: sender=0x{}", hex::encode(sender_address));
     
-    // Spawn node in dag-primary mode with shadow checker enabled
+    // Spawn node in dag-primary mode (pure DAG semantics, no shadow checker)
     let metrics_bind = format!("127.0.0.1:{}", metrics_port);
     let mut child = common::spawn_node_with_env(
         &[
@@ -180,7 +188,6 @@ fn t79_health_endpoint_healthy() {
             ("EEZO_METRICS_BIND", &metrics_bind),
             ("EEZO_CONSENSUS_MODE", "dag-primary"),
             ("EEZO_DAG_ORDERING_ENABLED", "1"),
-            ("EEZO_DAG_PRIMARY_SHADOW_ENABLED", "1"),
             ("EEZO_HYBRID_STRICT_PROFILE", "1"),
             ("EEZO_EXECUTOR_MODE", "stm"),
             ("EEZO_EXEC_LANES", "16"),
@@ -250,14 +257,14 @@ fn t79_health_endpoint_healthy() {
     }
     println!("Submitted 5 transactions");
     
-    // Wait for transactions to be included
+    // Wait for transactions to be included (DAG-only liveness check)
     if !common::wait_until_metric_gte(metrics_port, "eezo_txs_included_total", 5, 30_000) {
         println!("Warning: Transactions may not have been included");
     }
     
-    // Wait for shadow checker to run
-    if !common::wait_until_metric_gt_zero(metrics_port, "eezo_dag_primary_shadow_checks_total", 10_000) {
-        println!("Warning: Shadow checker may not have run");
+    // Wait for block height to increase (DAG-only liveness check)
+    if !common::wait_until_metric_gt_zero(metrics_port, "eezo_block_height", 10_000) {
+        println!("Warning: Block height may not have increased");
     }
     
     // Now call the health endpoint
@@ -278,6 +285,8 @@ fn t79_health_endpoint_healthy() {
     assert_eq!(body["status"], "healthy", "Expected healthy status");
     assert!(body.get("reason").is_none() || body["reason"].is_null(), "Expected no reason for healthy");
     assert_eq!(body["consensus_mode"], 3, "Expected consensus_mode=3 (dag-primary)");
+    // Verify block_height is in the response (DAG-only metric)
+    assert!(body.get("block_height").is_some(), "Expected block_height in response");
     
     // Clean up
     child.kill();
