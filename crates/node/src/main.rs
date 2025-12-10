@@ -1111,31 +1111,55 @@ fn env_u16(var: &str, default_v: u16) -> u16 {
         .unwrap_or(default_v)
 }
 
-/// T76.1: Consensus mode enum supporting hotstuff, dag, and dag-hybrid modes.
+/// T76.1/T80.0: Consensus mode enum for EEZO nodes.
+///
+/// # EEZO Consensus Architecture
+///
+/// **EEZO's production consensus is DAG-based (DagPrimary mode).**
+///
+/// HotStuff is a legacy consensus mechanism retained only for:
+/// - Backward compatibility during transition
+/// - Shadow/lab testing and comparison
+/// - Development debugging
+///
+/// HotStuff NEVER decides block finality in production configurations.
+///
+/// ## Mode Hierarchy
+///
+/// | Mode | Description | Production Use |
+/// |------|-------------|----------------|
+/// | `DagPrimary` | DAG is sole consensus authority | ✅ Recommended |
+/// | `DagHybrid` | DAG primary with mempool fallback | Transition only |
+/// | `Dag` | DAG tx source with HotStuff commit | Legacy |
+/// | `Hotstuff` | Pure HotStuff (pre-DAG) | ❌ Not for production |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConsensusMode {
-    /// Original Hotstuff-style block production (default)
+    /// Legacy HotStuff-style block production.
+    /// **NOT RECOMMENDED for production.** Use DagPrimary instead.
+    /// Only available in builds without dag-only feature.
     Hotstuff,
     /// DAG mode: DAG is used for tx source + dry-run + shadow consensus,
-    /// but Hotstuff still commits blocks.
+    /// but HotStuff still commits blocks. Legacy transition mode.
     Dag,
     /// T76.1: Hybrid mode: DAG provides ordered batches as primary tx source,
-    /// but Hotstuff/CoreRunnerHandle still performs the canonical commit.
+    /// with mempool fallback. Transition mode only.
     DagHybrid,
-    /// T78.3: DAG-primary mode: DAG is the only source of tx ordering for committed blocks.
-    /// No mempool fallback on the main path. HotStuff/legacy path runs as shadow checker only.
+    /// T78.3/T80.0: DAG-primary mode (PRODUCTION RECOMMENDED).
+    /// DAG is the only source of tx ordering for committed blocks.
+    /// No mempool fallback on the main path.
+    /// HotStuff/legacy path runs as shadow checker only (if hotstuff-shadow is enabled).
     DagPrimary,
 }
 
 impl ConsensusMode {
-    /// T76.11/T78.3: Compute the gauge value for the consensus mode metric.
+    /// T76.11/T78.3/T80.0: Compute the gauge value for the consensus mode metric.
     ///
     /// Returns:
-    /// - 0 for Hotstuff (default mode)
-    /// - 1 for DagHybrid mode with DAG ordering enabled
+    /// - 0 for Hotstuff (legacy mode, not recommended)
+    /// - 1 for DagHybrid mode with DAG ordering enabled (transition)
     /// - 0 for DagHybrid mode with DAG ordering disabled (effectively hotstuff)
-    /// - 2 for full DAG mode
-    /// - 3 for DagPrimary mode (DAG-only with shadow HotStuff)
+    /// - 2 for full DAG mode (legacy)
+    /// - 3 for DagPrimary mode (PRODUCTION: DAG is sole consensus authority)
     fn gauge_value(&self, dag_ordering_enabled: bool) -> i64 {
         match self {
             ConsensusMode::Hotstuff => 0,
@@ -1150,27 +1174,52 @@ impl ConsensusMode {
 
 /// Parse consensus mode from EEZO_CONSENSUS_MODE environment variable.
 ///
-/// Accepts:
-/// - `""`, `"hotstuff"`, `"hs"` → Hotstuff (default for generic builds)
-/// - `"dag"` → Dag
-/// - `"dag-hybrid"`, `"dag_hybrid"` → DagHybrid
-/// - `"dag-primary"`, `"dag_primary"` → DagPrimary (T78.3)
+/// # Production Configuration
+///
+/// For production deployments (devnet/testnet/mainnet), use:
+/// - `EEZO_CONSENSUS_MODE=dag-primary` (or rely on devnet-safe/dag-only defaults)
+///
+/// # Mode Values
+///
+/// - `""`, unset → Default based on build profile (see below)
+/// - `"dag-primary"`, `"dag_primary"` → DagPrimary (PRODUCTION)
+/// - `"dag-hybrid"`, `"dag_hybrid"` → DagHybrid (transition)
+/// - `"dag"` → Dag (legacy)
+/// - `"hotstuff"`, `"hs"` → Hotstuff (legacy, NOT for production)
 /// - Unknown strings log a warning and fall back to the default.
 ///
-/// T78.7: When the `devnet-safe` feature is enabled:
-/// - Default mode (when EEZO_CONSENSUS_MODE is unset) is `DagPrimary` instead of `Hotstuff`
-/// - All explicit mode values are still honored for flexibility
-/// - A startup log message indicates devnet-safe mode is active
+/// # Build Profile Defaults
+///
+/// - **`dag-only` feature**: Always DagPrimary (ignores HotStuff modes)
+/// - **`devnet-safe` feature**: Default is DagPrimary
+/// - **Generic build**: Default is Hotstuff (for backward compatibility)
+///
+/// # Note on dag-only builds
+///
+/// When built with `--features dag-only`, HotStuff modes are not available.
+/// Attempts to set `EEZO_CONSENSUS_MODE=hotstuff` will log a warning and
+/// use DagPrimary instead.
 fn env_consensus_mode() -> ConsensusMode {
-    // T78.7: Determine the default mode based on build profile
-    #[cfg(feature = "devnet-safe")]
+    // T80.0: dag-only builds always use DagPrimary
+    #[cfg(feature = "dag-only")]
+    let default_mode = {
+        log::info!(
+            "[T80.0 dag-only] build profile active: DAG is the only consensus mode"
+        );
+        ConsensusMode::DagPrimary
+    };
+    
+    // T78.7: devnet-safe builds default to DagPrimary (but can use other modes)
+    #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
     let default_mode = {
         log::info!(
             "[T78.7 devnet-safe] build profile active: default consensus mode is dag-primary"
         );
         ConsensusMode::DagPrimary
     };
-    #[cfg(not(feature = "devnet-safe"))]
+    
+    // Generic builds default to Hotstuff for backward compatibility
+    #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
     let default_mode = ConsensusMode::Hotstuff;
 
     match env::var("EEZO_CONSENSUS_MODE") {
@@ -1179,7 +1228,24 @@ fn env_consensus_mode() -> ConsensusMode {
             match s.as_str() {
                 // Empty string uses the default mode (depends on build profile)
                 "" => default_mode,
-                "hotstuff" | "hs" => ConsensusMode::Hotstuff,
+                
+                // T80.0: In dag-only builds, reject HotStuff modes
+                #[cfg(feature = "dag-only")]
+                "hotstuff" | "hs" => {
+                    log::warn!(
+                        "[T80.0 dag-only] HotStuff mode requested but not available in dag-only build; using dag-primary"
+                    );
+                    ConsensusMode::DagPrimary
+                }
+                
+                #[cfg(not(feature = "dag-only"))]
+                "hotstuff" | "hs" => {
+                    log::warn!(
+                        "[T80.0] HotStuff mode is LEGACY and NOT RECOMMENDED for production; consider dag-primary"
+                    );
+                    ConsensusMode::Hotstuff
+                }
+                
                 "dag" => ConsensusMode::Dag,
                 "dag-hybrid" | "dag_hybrid" => ConsensusMode::DagHybrid,
                 "dag-primary" | "dag_primary" => ConsensusMode::DagPrimary,
@@ -1197,15 +1263,35 @@ fn env_consensus_mode() -> ConsensusMode {
     }
 }
 
-/// T76.1: Parse EEZO_DAG_ORDERING_ENABLED environment variable.
+/// T76.1/T80.0: Parse EEZO_DAG_ORDERING_ENABLED environment variable.
 ///
 /// Returns `true` if the env var is set to "1", "true", "yes", or "on".
 /// Returns `false` otherwise (including when unset).
 ///
-/// T78.7: When the `devnet-safe` feature is enabled:
-/// - Returns `true` by default when the env var is unset
-/// - Explicit "0", "false", "no", "off" can still disable ordering
+/// # Build Profile Defaults
+///
+/// - **`dag-only` feature**: Always returns `true` (DAG ordering is mandatory)
+/// - **`devnet-safe` feature**: Returns `true` by default when env var is unset
+/// - **Generic build**: Returns `false` by default when env var is unset
+///
+/// Note: In dag-only builds, explicit "0"/"false"/"no"/"off" is ignored and
+/// ordering remains enabled (logs a warning).
+#[allow(unreachable_code)]
 fn env_dag_ordering_enabled() -> bool {
+    // T80.0: dag-only builds always have ordering enabled
+    #[cfg(feature = "dag-only")]
+    {
+        if let Ok(raw) = env::var("EEZO_DAG_ORDERING_ENABLED") {
+            let s = raw.trim().to_ascii_lowercase();
+            if matches!(s.as_str(), "0" | "false" | "no" | "off") {
+                log::warn!(
+                    "[T80.0 dag-only] EEZO_DAG_ORDERING_ENABLED=false requested but ignored; DAG ordering is mandatory in dag-only builds"
+                );
+            }
+        }
+        return true;
+    }
+
     // T78.7: Determine the default value based on build profile
     #[cfg(feature = "devnet-safe")]
     let default_enabled = true;
@@ -4950,43 +5036,61 @@ mod consensus_mode_tests {
     fn test_consensus_mode_parsing() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        // T78.7: Test empty/unset → depends on build profile
+        // T80.0/T78.7: Test empty/unset → depends on build profile
+        // - dag-only build: always DagPrimary
         // - devnet-safe build: defaults to DagPrimary
         // - generic build: defaults to Hotstuff
         std::env::remove_var("EEZO_CONSENSUS_MODE");
-        #[cfg(feature = "devnet-safe")]
+        #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
-        #[cfg(not(feature = "devnet-safe"))]
+        #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
+        #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
         // Empty string also uses default based on build profile
         std::env::set_var("EEZO_CONSENSUS_MODE", "");
-        #[cfg(feature = "devnet-safe")]
+        #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
-        #[cfg(not(feature = "devnet-safe"))]
+        #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
+        #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
-        // Test explicit hotstuff variants (always work regardless of build profile)
+        // T80.0: In dag-only builds, hotstuff modes are overridden to dag-primary
+        // In non-dag-only builds, hotstuff is still available (but deprecated)
         std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
+        #[cfg(feature = "dag-only")]
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Forced
+        #[cfg(not(feature = "dag-only"))]
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "HOTSTUFF");
+        #[cfg(feature = "dag-only")]
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Forced
+        #[cfg(not(feature = "dag-only"))]
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "hs");
+        #[cfg(feature = "dag-only")]
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Forced
+        #[cfg(not(feature = "dag-only"))]
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "HS");
+        #[cfg(feature = "dag-only")]
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Forced
+        #[cfg(not(feature = "dag-only"))]
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
-        // Test dag
+        // Test dag (works in all builds)
         std::env::set_var("EEZO_CONSENSUS_MODE", "dag");
         assert_eq!(env_consensus_mode(), ConsensusMode::Dag);
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "DAG");
         assert_eq!(env_consensus_mode(), ConsensusMode::Dag);
 
-        // Test dag-hybrid variants
+        // Test dag-hybrid variants (works in all builds)
         std::env::set_var("EEZO_CONSENSUS_MODE", "dag-hybrid");
         assert_eq!(env_consensus_mode(), ConsensusMode::DagHybrid);
 
@@ -4999,7 +5103,7 @@ mod consensus_mode_tests {
         std::env::set_var("EEZO_CONSENSUS_MODE", "DAG_HYBRID");
         assert_eq!(env_consensus_mode(), ConsensusMode::DagHybrid);
 
-        // T78.3: Test dag-primary variants
+        // T78.3: Test dag-primary variants (works in all builds)
         std::env::set_var("EEZO_CONSENSUS_MODE", "dag-primary");
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
 
@@ -5012,17 +5116,21 @@ mod consensus_mode_tests {
         std::env::set_var("EEZO_CONSENSUS_MODE", "DAG_PRIMARY");
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
 
-        // T78.7: Test unknown strings fall back to default (depends on build profile)
+        // T80.0/T78.7: Test unknown strings fall back to default (depends on build profile)
         std::env::set_var("EEZO_CONSENSUS_MODE", "unknown");
-        #[cfg(feature = "devnet-safe")]
+        #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
-        #[cfg(not(feature = "devnet-safe"))]
+        #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
+        #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "invalid");
-        #[cfg(feature = "devnet-safe")]
+        #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
-        #[cfg(not(feature = "devnet-safe"))]
+        #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
+        #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
         assert_eq!(env_consensus_mode(), ConsensusMode::Hotstuff);
 
         // Clean up
@@ -5033,22 +5141,28 @@ mod consensus_mode_tests {
     fn test_dag_ordering_enabled_parsing() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        // T78.7: Test unset → depends on build profile
+        // T80.0/T78.7: Test unset → depends on build profile
+        // - dag-only build: always true (forced)
         // - devnet-safe build: defaults to true
         // - generic build: defaults to false
         std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
-        #[cfg(feature = "devnet-safe")]
+        #[cfg(feature = "dag-only")]
+        assert!(env_dag_ordering_enabled()); // Always true
+        #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
         assert!(env_dag_ordering_enabled());
-        #[cfg(not(feature = "devnet-safe"))]
+        #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
         assert!(!env_dag_ordering_enabled());
 
-        // T78.7: Test empty → depends on build profile
+        // T80.0/T78.7: Test empty → depends on build profile
+        // - dag-only build: always true (forced)
         // - devnet-safe build: defaults to true
         // - generic build: defaults to false
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "");
-        #[cfg(feature = "devnet-safe")]
+        #[cfg(feature = "dag-only")]
+        assert!(env_dag_ordering_enabled()); // Always true (forced)
+        #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
         assert!(env_dag_ordering_enabled());
-        #[cfg(not(feature = "devnet-safe"))]
+        #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
         assert!(!env_dag_ordering_enabled());
 
         // Test true values (always work)
@@ -5073,24 +5187,39 @@ mod consensus_mode_tests {
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "ON");
         assert!(env_dag_ordering_enabled());
 
-        // Test false values (always work - can explicitly disable even in devnet-safe)
+        // T80.0: In dag-only builds, false values are IGNORED (ordering is forced)
+        // In other builds, false values work as expected
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "0");
+        #[cfg(feature = "dag-only")]
+        assert!(env_dag_ordering_enabled()); // Forced true
+        #[cfg(not(feature = "dag-only"))]
         assert!(!env_dag_ordering_enabled());
 
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "false");
+        #[cfg(feature = "dag-only")]
+        assert!(env_dag_ordering_enabled()); // Forced true
+        #[cfg(not(feature = "dag-only"))]
         assert!(!env_dag_ordering_enabled());
 
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "no");
+        #[cfg(feature = "dag-only")]
+        assert!(env_dag_ordering_enabled()); // Forced true
+        #[cfg(not(feature = "dag-only"))]
         assert!(!env_dag_ordering_enabled());
 
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "off");
+        #[cfg(feature = "dag-only")]
+        assert!(env_dag_ordering_enabled()); // Forced true
+        #[cfg(not(feature = "dag-only"))]
         assert!(!env_dag_ordering_enabled());
 
-        // T78.7: Unknown strings use default based on build profile
+        // T80.0/T78.7: Unknown strings use default based on build profile
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "unknown");
-        #[cfg(feature = "devnet-safe")]
+        #[cfg(feature = "dag-only")]
+        assert!(env_dag_ordering_enabled()); // Always true
+        #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
         assert!(env_dag_ordering_enabled());
-        #[cfg(not(feature = "devnet-safe"))]
+        #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
         assert!(!env_dag_ordering_enabled());
 
         // Clean up
