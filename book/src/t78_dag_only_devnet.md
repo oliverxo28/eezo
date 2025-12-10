@@ -1,15 +1,17 @@
 # T78: DAG-Only Devnet & Strict Hybrid Tuning
 
+> **Note (T81)**: As of T81, EEZO uses pure DAG consensus. The hybrid and shadow checker modes described in this document are historical and have been superseded by the `dag-only` and `devnet-safe` build profiles. See [T81 Consensus History](t81_consensus_history.md) for current build commands.
+
 ## Overview
 
-T78 is a multi-phase task focused on refining the DAG-hybrid consensus mode and eventually transitioning to a pure DAG-based consensus system. This document describes the implementation phases and configuration options.
+T78 was a multi-phase task focused on refining the DAG-hybrid consensus mode and transitioning to a pure DAG-based consensus system. This document describes the implementation phases and configuration options that were part of the DAG transition.
 
 ## Background
 
-Building on the stable DAG-hybrid implementation validated in T76.12 (~150 TPS in dev-unsafe mode), T78 focuses on:
+Building on the stable DAG-hybrid implementation validated in T76.12, T78 focused on:
 1. Making DAG aggregation more tunable without disrupting stable defaults
 2. Providing preset configurations for different deployment scenarios
-3. Preparing for an eventual DAG-only mode
+3. Transitioning to DAG-only mode (completed in T81)
 
 ## Roadmap
 
@@ -18,8 +20,8 @@ Building on the stable DAG-hybrid implementation validated in T76.12 (~150 TPS i
 | **T78.0** | Design documentation & stable baseline validation | ✅ Complete |
 | **T78.1** | Strict Hybrid DAG Tuning (Phase 1) | ✅ Implemented |
 | **T78.2** | Advanced tuning profiles | ✅ Implemented |
-| **T78.3** | DAG-primary mode (no fallback, shadow HotStuff) | ✅ Implemented |
-| **T78.4** | Future: Expand shadow checker with block comparison | 🔜 Future |
+| **T78.3** | DAG-primary mode implementation | ✅ Implemented |
+| **T81** | Pure DAG consensus (HotStuff removed) | ✅ Complete |
 
 ---
 
