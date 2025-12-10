@@ -1,28 +1,46 @@
-//! shadow_hotstuff.rs — T78.5: Real HotStuff Shadow Checker for dag-primary mode.
+//! shadow_hotstuff.rs — T78.5/T80.0: Shadow HotStuff Checker (LAB/DEBUG ONLY)
 //!
-//! This module provides a minimal, in-memory shadow checker that runs after each
-//! successfully committed block in dag-primary mode. It:
+//! # T80.0: Pure DAG Consensus Cutover
 //!
-//! - Checks height monotonicity (no regress, no duplicates)
-//! - Performs basic consistency checks between committed block data
-//! - Emits metrics on every check and on mismatches
-//! - Logs warnings on any detected mismatch
+//! **EEZO's production consensus is pure DAG.** HotStuff is a LEGACY mechanism.
 //!
-//! This is a **safety oracle**, not a second consensus. It never affects block commit
-//! and never panics — all failures are surfaced via metrics + warnings only.
+//! This shadow checker exists ONLY for:
+//! - Observability and metrics comparison during transition
+//! - Development debugging and validation
+//! - Verification that DAG ordering matches legacy expectations
+//!
+//! ## Critical Safety Properties
+//!
+//! The shadow checker **NEVER**:
+//! - Decides block finality (DAG is the sole authority)
+//! - Causes the node to reject or roll back a committed DAG block
+//! - Alters the behavior of DAG block production or commit
+//! - Panics the node (even on mismatch detection)
+//! - Affects block ordering or liveness
+//!
+//! The shadow checker **ONLY**:
+//! - Verifies DAG decisions (height monotonicity, basic consistency)
+//! - Emits metrics for observability
+//! - Logs warnings on detected mismatches
+//!
+//! ## Feature Gates
 //!
 //! T78.7: This module is only compiled when BOTH features are enabled:
 //! - `dag-consensus`: Required for DAG consensus infrastructure
-//! - `hotstuff-shadow`: Opt-in feature to enable shadow HotStuff checker
+//! - `hotstuff-shadow`: Opt-in feature to enable shadow checker
 //!
-//! For devnet-safe builds without hotstuff-shadow, the shadow checker is not included.
+//! For production dag-only builds, this module is NOT compiled.
+//! For devnet-safe builds, use `--features "devnet-safe,hotstuff-shadow"` if shadow
+//! checking is desired for observability.
 
 #![cfg(all(feature = "dag-consensus", feature = "hotstuff-shadow"))]
 
 use crate::tx_decode_pool::DecodedTx;
 use std::sync::Arc;
 
-/// T78.5: Mismatch reason types for labeled metrics.
+/// T78.5/T80.0: Mismatch reason types for labeled metrics.
+///
+/// These are informational only — mismatches do NOT affect block production.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShadowMismatchReason {
     /// Height regressed (new height < previous height)
@@ -47,7 +65,19 @@ impl ShadowMismatchReason {
     }
 }
 
-/// T78.5: Shadow HotStuff checker for dag-primary mode.
+/// T78.5/T80.0: Shadow HotStuff checker for dag-primary mode (LAB/DEBUG ONLY).
+///
+/// # Purpose
+///
+/// This is a **safety oracle for observability**, not a second consensus.
+/// It validates that DAG-committed blocks maintain expected invariants.
+///
+/// # Safety Guarantees
+///
+/// - **Never affects block commit**: Mismatches are logged and metriced only
+/// - **Never panics**: All errors are handled gracefully
+/// - **Never blocks**: Checks are synchronous but fast
+/// - **Never rollbacks**: DAG decisions are final
 ///
 /// This struct maintains minimal state to verify invariants across committed blocks:
 /// - Height monotonicity (strictly increasing)
