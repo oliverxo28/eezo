@@ -2,31 +2,29 @@
 
 ## Overview
 
-This runbook defines the procedure for running a **dag-primary canary** on Element Zero (EEZO). The dag-primary mode uses DAG as the **only** source of transaction ordering for committed blocks, with HotStuff running as a shadow checker (no effect on block production).
+This runbook defines the procedure for running a **dag-primary canary** on Element Zero (EEZO). The dag-primary mode uses DAG as the **only** source of transaction ordering for committed blocks.
 
 ### Background
 
-The `dag-primary` mode (`EEZO_CONSENSUS_MODE=dag-primary`) is a stepping stone toward pure DAG consensus:
+The `dag-primary` mode (`EEZO_CONSENSUS_MODE=dag-primary`) is the production consensus mode:
 
 - Transactions are ordered **exclusively** via DAG consensus
 - No mempool fallback (empty blocks if no valid DAG txs)
-- HotStuff runs as a shadow checker to validate DAG ordering correctness
-- Mismatch detection ensures DAG produces correct ordering before removing HotStuff entirely
+- Pure DAG consensus with no legacy code paths
 
 ### Goals
 
 1. **Validate DAG-only ordering**: All transactions processed through DAG path
-2. **Zero shadow mismatches**: DAG ordering matches expected behavior
-3. **Confirm liveness**: Transactions included under load (no stalls)
-4. **Monitor performance**: Sustained TPS with dev-unsafe enabled
+2. **Confirm liveness**: Transactions included under load (no stalls)
+3. **Monitor performance**: Sustained TPS with signed transactions
 
 ### Roadmap Context
 
 | Task | Description |
 |------|-------------|
-| **T78.5** | Completed: dag-primary mode with real shadow HotStuff checker |
+| **T78.5** | Completed: dag-primary mode implementation |
 | **T78.6** | This task: Canary runbook, SLO scripts, and alerts |
-| **T78.7+** | Future: Remove HotStuff entirely |
+| **T81** | Completed: HotStuff removed from live codebase |
 
 ---
 
@@ -43,9 +41,6 @@ export EEZO_CONSENSUS_MODE=dag-primary
 
 # Enable DAG ordering layer (required)
 export EEZO_DAG_ORDERING_ENABLED=1
-
-# Enable shadow HotStuff checker
-export EEZO_DAG_PRIMARY_SHADOW_ENABLED=1
 
 # Enable strict hybrid profile (recommended for dag-primary)
 export EEZO_HYBRID_STRICT_PROFILE=1
@@ -76,17 +71,17 @@ export EEZO_DATADIR=/tmp/eezo-canary
 
 ### Feature Flags
 
-**For devnet-safe deployment (recommended):**
+**For production deployment (recommended):**
 
-Build the node with devnet-safe for official devnet:
+Build the node with dag-only for production:
 
 ```bash
-# Option 1: Using devnet-safe meta-feature (recommended)
+# Option 1: Using dag-only feature (recommended for production)
+cargo build --release -p eezo-node --features "dag-only"
+
+# Option 2: Using devnet-safe meta-feature
 cargo build --release -p eezo-node \
   --features "devnet-safe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
-
-# Option 2: With HotStuff shadow checker for observability
-cargo build --release -p eezo-node --features "devnet-safe,hotstuff-shadow"
 ```
 
 **Run using the official launcher script:**
@@ -202,49 +197,7 @@ curl -s http://127.0.0.1:9898/metrics | grep '^eezo_consensus_mode_active '
 
 ---
 
-### SLO 2: Shadow Checker Active
-
-**Goal**: Shadow HotStuff checker must be running.
-
-**Metric**: `eezo_dag_primary_shadow_checks_total`
-
-**Threshold**: Must be > 0 and increasing over the monitoring window.
-
-**Query**:
-```bash
-curl -s http://127.0.0.1:9898/metrics | grep '^eezo_dag_primary_shadow_checks_total '
-# Expected: Steadily increasing counter
-```
-
-**Prometheus Expression**:
-```
-increase(eezo_dag_primary_shadow_checks_total[5m]) > 0
-```
-
----
-
-### SLO 3: Zero Shadow Mismatches
-
-**Goal**: DAG ordering must match shadow HotStuff ordering.
-
-**Metric**: `eezo_dag_primary_shadow_mismatch_total`
-
-**Threshold**: Must be `0` (any mismatch is critical)
-
-**Query**:
-```bash
-curl -s http://127.0.0.1:9898/metrics | grep '^eezo_dag_primary_shadow_mismatch_total '
-# Expected: eezo_dag_primary_shadow_mismatch_total 0
-```
-
-**Prometheus Expression**:
-```
-increase(eezo_dag_primary_shadow_mismatch_total[5m]) == 0
-```
-
----
-
-### SLO 4: Transaction Liveness
+### SLO 2: Transaction Liveness
 
 **Goal**: Transactions must be included under load.
 
@@ -264,13 +217,28 @@ increase(eezo_txs_included_total[5m]) > 0
 
 ---
 
-### SLO 5: TPS Performance (dev-unsafe)
+### SLO 3: Block Height Progress
 
-**Goal**: Sustain ≥150 TPS with dev-unsafe enabled.
+**Goal**: Blocks must be produced consistently.
+
+**Metric**: `eezo_block_height`
+
+**Threshold**: Must be increasing over the monitoring window.
+
+**Query**:
+```bash
+curl -s http://127.0.0.1:9898/metrics | grep '^eezo_block_height '
+```
+
+---
+
+### SLO 4: TPS Performance
+
+**Goal**: Sustain expected TPS with load.
 
 **Metric**: `eezo_txs_included_total` (rate over window)
 
-**Threshold**: `increase(eezo_txs_included_total[60s]) / 60 >= 150`
+**Threshold**: TPS should be consistent with expected throughput.
 
 **Query using script**:
 ```bash
@@ -280,42 +248,6 @@ scripts/measure_tps.sh 60 http://127.0.0.1:9898/metrics
 ---
 
 ## Failure Interpretation
-
-### Shadow Mismatch > 0
-
-**Symptom**: `eezo_dag_primary_shadow_mismatch_total` is non-zero
-
-**Meaning**: DAG ordering produced a different result than the shadow HotStuff checker. This indicates a potential bug in DAG ordering logic.
-
-**Actions**:
-1. Immediately capture logs:
-   ```bash
-   cp /tmp/eezo-canary/*.log /tmp/eezo-canary-debug/
-   ```
-2. Check mismatch reason:
-   ```bash
-   curl -s http://127.0.0.1:9898/metrics | grep eezo_dag_primary_shadow_mismatch_reason_total
-   ```
-3. **Stop the canary** - do not proceed with dag-only transition
-4. Report bug with logs and metrics snapshot
-
-### No Shadow Checks While Blocks Apply
-
-**Symptom**: `block_applied_total` is increasing but `eezo_dag_primary_shadow_checks_total` is flat
-
-**Meaning**: Shadow checker is not running despite blocks being committed. This could indicate:
-- Shadow checker disabled
-- Shadow checker crashed
-- Configuration issue
-
-**Actions**:
-1. Verify environment variable:
-   ```bash
-   echo $EEZO_DAG_PRIMARY_SHADOW_ENABLED
-   # Expected: 1
-   ```
-2. Check node logs for shadow checker errors
-3. Restart node if necessary
 
 ### TPS Drops to 0 with Mempool Load
 
@@ -341,24 +273,14 @@ scripts/measure_tps.sh 60 http://127.0.0.1:9898/metrics
 
 ## Rollback Procedure
 
-If critical issues are discovered, rollback to dag-hybrid mode:
+If critical issues are discovered, investigate the metrics and logs:
 
 ```bash
-# Stop the node
-pkill -f eezo-node  # Or use proper service stop
+# Check node logs for errors
+journalctl -u eezo-node --since "10 minutes ago" | grep -i error
 
-# Switch to dag-hybrid mode (with fallback)
-export EEZO_CONSENSUS_MODE=dag-hybrid
-unset EEZO_DAG_PRIMARY_SHADOW_ENABLED
-
-# Restart
-./target/release/eezo-node
-```
-
-Verify rollback:
-```bash
-curl -s http://127.0.0.1:9898/metrics | grep eezo_consensus_mode_active
-# Expected: eezo_consensus_mode_active 1  (1 = hybrid)
+# Check DAG metrics
+curl -s http://127.0.0.1:9898/metrics | grep -E "eezo_(dag|block|tx)"
 ```
 
 ---
@@ -377,10 +299,9 @@ scripts/t78_dag_primary_canary_check.sh http://127.0.0.1:9898/metrics --tps-wind
 
 The script checks:
 1. ✓ Consensus mode is exactly 3 (dag-primary)
-2. ✓ Shadow checks are > 0 and increasing
-3. ✓ Shadow mismatches are 0
-4. ✓ Transactions included over the window
-5. ✓ Optional: TPS >= threshold
+2. ✓ Transactions included over the window
+3. ✓ Block height is progressing
+4. ✓ Optional: TPS >= threshold
 
 Exit codes:
 - `0`: All SLOs passing
@@ -395,18 +316,7 @@ Exit codes:
 
 | Metric | Value | Mode |
 |--------|-------|------|
-| `eezo_consensus_mode_active` | 0 | hotstuff |
-| `eezo_consensus_mode_active` | 1 | dag-hybrid |
-| `eezo_consensus_mode_active` | 2 | dag |
-| `eezo_consensus_mode_active` | 3 | dag-primary |
-
-### Shadow Checker Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `eezo_dag_primary_shadow_checks_total` | Counter | Shadow checks performed |
-| `eezo_dag_primary_shadow_mismatch_total` | Counter | Ordering mismatches detected |
-| `eezo_dag_primary_shadow_mismatch_reason_total{reason="..."}` | Counter | Mismatch breakdown by reason |
+| `eezo_consensus_mode_active` | 3 | dag-primary (production) |
 
 ### Performance Metrics
 
@@ -555,17 +465,22 @@ curl -s http://127.0.0.1:9898/metrics | grep nonce
 
 ### Build Profile Comparison
 
-| Aspect | **devnet-safe** | **dev-unsafe** |
-|--------|-----------------|----------------|
-| **Use case** | Official devnet deployments | Local TPS benchmarks only |
-| **Unsigned tx** | ❌ Never allowed | ✅ With `EEZO_DEV_ALLOW_UNSIGNED_TX=1` |
-| **Signature verification** | ✅ Always enforced | ⚠️ Can be bypassed |
-| **Default consensus mode** | dag-primary | hotstuff |
-| **Safe for network?** | ✅ Yes | ❌ **NEVER** deploy |
+| Aspect | **dag-only** | **devnet-safe** | **dev-unsafe** |
+|--------|-------------|-----------------|----------------|
+| **Use case** | Production deployments | Official devnet | Local TPS benchmarks only |
+| **Unsigned tx** | ❌ Never allowed | ❌ Never allowed | ✅ With `EEZO_DEV_ALLOW_UNSIGNED_TX=1` |
+| **Signature verification** | ✅ Always enforced | ✅ Always enforced | ⚠️ Can be bypassed |
+| **Default consensus mode** | dag-primary (forced) | dag-primary | configurable |
+| **Safe for network?** | ✅ Yes | ✅ Yes | ❌ **NEVER** deploy |
 
 ### Build Commands
 
-**Devnet-safe (recommended for any networked deployment):**
+**dag-only (recommended for production):**
+```bash
+cargo build --release -p eezo-node --features "dag-only"
+```
+
+**Devnet-safe (recommended for devnet):**
 ```bash
 cargo build --release -p eezo-node \
   --features "devnet-safe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
@@ -580,16 +495,13 @@ cargo build -p eezo-node \
 ### Key Differences in Behavior
 
 1. **Signature verification**
-   - `devnet-safe`: All transactions MUST have valid ML-DSA signatures
+   - `dag-only/devnet-safe`: All transactions MUST have valid ML-DSA signatures
    - `dev-unsafe`: With `EEZO_DEV_ALLOW_UNSIGNED_TX=1`, signature verification is skipped
 
 2. **Startup logging**
+   - `dag-only`: `[T80.0 dag-only] build profile active: DAG is the only consensus mode`
    - `devnet-safe`: `[T78.8] Build profile: devnet-safe`
    - `dev-unsafe`: `[DEV-UNSAFE]` warnings visible
-
-3. **Transaction rejection**
-   - `devnet-safe`: Unsigned transactions are rejected with `BadSig`
-   - `dev-unsafe`: Unsigned transactions are accepted when env var is set
 
 ### Security Warning
 
@@ -634,8 +546,9 @@ echo "TPS: $(echo "scale=2; ($AFTER - $BEFORE) / 10" | bc)"
 
 ## References
 
+- [T81: EEZO Consensus History & DAG-Only Runtime](t81_consensus_history.md)
+- [T80: Pure DAG Consensus Cutover](t80_dag_consensus_cutover.md)
 - [T78: DAG-Only Devnet & Strict Hybrid Tuning](t78_dag_only_devnet.md)
-- [T76: DAG-Hybrid Canary & SLO Runbook](t76_dag_hybrid_canary.md)
 - [Dev Unsafe Modes](dev_unsafe_modes.md)
 
 ---
