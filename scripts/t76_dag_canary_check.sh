@@ -115,11 +115,13 @@ print_status() {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SLO 1: Consensus Mode
+# Historical note (T81.4): 0=legacy (pre-T81), 1=hybrid, 2=dag, 3=dag-primary
+# This script is for historical T76 hybrid canary; use t78_dag_primary_canary_check.sh for current DAG
 # ─────────────────────────────────────────────────────────────────────────────
 echo -e "${BLUE}[Consensus Mode]${NC}"
 CONSENSUS_MODE=$(get_metric "eezo_consensus_mode_active" "")
 case "$CONSENSUS_MODE" in
-  0) MODE_NAME="hotstuff"; MODE_OK=false ;;
+  0) MODE_NAME="legacy"; MODE_OK=false ;;
   1) MODE_NAME="hybrid"; MODE_OK=true ;;
   2) MODE_NAME="dag"; MODE_OK=true ;;
   *) MODE_NAME="unknown"; MODE_OK=false ;;

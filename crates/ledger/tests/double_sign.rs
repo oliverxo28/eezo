@@ -35,6 +35,8 @@ fn make_signed_msg(
     hs_msg::SignedConsensusMsg::new(msg, signer_id, sig)
 }
 
+/// T81.4: Test double-sign evidence emission using legacy consensus
+/// Note: HotStuff struct name retained for backward compatibility
 #[cfg_attr(not(feature = "consensus-tests"), ignore)]
 #[test]
 fn double_sign_evidence_emitted() {
@@ -42,6 +44,7 @@ fn double_sign_evidence_emitted() {
     let certs = Arc::new(StaticCertStore::new());
     let net = LoopbackNet::new();
     let (_pk, _sk) = keypair();
+    // Note: HotStuff struct name retained for backward compatibility (T81.4)
     let mut hs = HotStuff::new(cfg, certs, net);
 
     // Two conflicting headers at same height
@@ -71,6 +74,7 @@ fn double_sign_evidence_emitted() {
     assert_ne!(b1, b2, "conflicting messages must differ");
 }
 
+/// T81.4: Test no false positive for double-sign using legacy consensus
 #[cfg_attr(not(feature = "consensus-tests"), ignore)]
 #[test]
 fn double_sign_no_false_positive() {
@@ -78,6 +82,7 @@ fn double_sign_no_false_positive() {
     let certs = Arc::new(StaticCertStore::new());
     let net = LoopbackNet::new();
     let (_pk, _sk) = keypair();
+    // Note: HotStuff struct name retained for backward compatibility (T81.4)
     let mut hs = HotStuff::new(cfg, certs, net);
 
     // Same header signed twice → should be accepted once, ignored second time, but no double-sign

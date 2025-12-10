@@ -1406,7 +1406,7 @@ pub static EEZO_BLOCK_TOTAL_LATENCY_SECONDS: Lazy<Histogram> = Lazy::new(|| {
 pub enum PerfMode {
     /// No performance instrumentation (default)
     Off,
-    /// Measure Hotstuff + mempool baseline path
+    /// Measure legacy + mempool baseline path
     Baseline,
     /// Measure DAG tx source path
     DagSource,

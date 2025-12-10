@@ -61,7 +61,7 @@ fn call_health_endpoint(port: u16) -> Result<(u16, serde_json::Value), String> {
 /// 2. Calls /health/dag_primary
 /// 3. Verifies HTTP 503 and "wrong_mode" reason in JSON
 ///
-/// NOTE: Since T81.1, HotStuff modes may not be available in all builds.
+/// NOTE: Since T81.1, legacy modes may not be available in all builds.
 /// This test verifies that non-dag-primary modes result in degraded status.
 #[test]
 #[ignore = "requires metrics,pq44-runtime features"]

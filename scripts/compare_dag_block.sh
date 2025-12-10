@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# =============================================================================
+# HISTORICAL SCRIPT (pre-T81 era)
+# =============================================================================
+# This script was used during T64–T78 to compare legacy blocks with DAG
+# candidates. As of T81, EEZO uses pure DAG consensus and legacy mode
+# is no longer available in production builds.
+#
+# Retained for historical reference and development/testing only.
+# =============================================================================
 set -euo pipefail
 
 if [ "$#" -lt 2 ]; then
@@ -10,7 +19,7 @@ fi
 BASE="$1"
 HEIGHT="$2"
 
-echo "[i] comparing Hotstuff block height=$HEIGHT vs current DAG candidate from $BASE"
+echo "[i] comparing legacy block height=$HEIGHT vs current DAG candidate from $BASE"
 
 # 1) Fetch block view
 block_json=$(curl -s "$BASE/block/$HEIGHT")
@@ -29,7 +38,7 @@ if echo "$dag_json" | jq -e '.error?' >/dev/null 2>&1; then
 fi
 
 echo
-echo "=== Hotstuff block ==="
+echo "=== Legacy block ==="
 echo "$block_json" | jq '{height, tx_count: (.tx_hashes | length)}'
 
 echo

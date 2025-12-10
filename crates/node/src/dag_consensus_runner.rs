@@ -3,7 +3,7 @@
 //! Runs the new consensus-dag::DagConsensusHandle inside the node in a
 //! completely safe shadow mode:
 //!
-//! - Hotstuff + STM executor remain the only commit authority.
+//! - Legacy executor + STM remain the only commit authority.
 //! - consensus-dag receives the same block/tx flow and orders "shadow" batches.
 //! - We observe DAG behaviour via metrics and logs, but it never changes what gets committed.
 //!
@@ -650,7 +650,7 @@ pub fn spawn_shadow_dag_if_enabled() -> Option<ShadowDagHandle> {
 ///
 /// In hybrid mode:
 /// - DAG provides ordered batches as the primary tx source
-/// - CoreRunnerHandle still performs the canonical Hotstuff-style commit
+/// - CoreRunnerHandle still performs the canonical legacy-style commit
 /// - If no ordered batch is available, fallback to mempool
 ///
 /// This type wraps a DagConsensusHandle and provides:

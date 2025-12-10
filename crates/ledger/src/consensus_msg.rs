@@ -1,5 +1,8 @@
-//! T27: HotStuff-like consensus messages and signed wrappers
+//! T27: Legacy consensus messages and signed wrappers (historical — see T81)
 //! Phases: Prepare → PreCommit → Commit. QCs attest to (phase, view, block_id).
+//!
+//! Note: This is pre-DAG consensus infrastructure. EEZO production uses pure
+//! DAG consensus as of T81. The code is retained for backward compatibility.
 
 use bitvec::vec::BitVec;
 use core::fmt;

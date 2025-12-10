@@ -639,13 +639,13 @@ pub fn evaluate_template_policy(
     }
 }
 
-/// T64.0: header-like view of a "shadow" hotstuff block template.
+/// T64.0: header-like view of a "shadow" legacy block template.
 ///
 /// this is derived entirely from the dry-run result and does not change
 /// real consensus or ledger behaviour.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DagShadowBlockHeader {
-    /// target hotstuff height this block would be proposed at
+    /// target ledger height this block would be proposed at
     pub target_height: u64,
     /// number of txs that would actually be included in the block
     /// (successful txs only)
@@ -662,9 +662,9 @@ pub struct DagShadowBlockHeader {
     pub would_apply_cleanly: bool,
 }
 
-/// T64.0: shadow hotstuff block template derived from a DAG candidate.
+/// T64.0: shadow legacy block template derived from a DAG candidate.
 ///
-/// this is debug-only: it exposes how a hotstuff-style block would look
+/// this is debug-only: it exposes how a legacy-style block would look
 /// (header + tx list) if we fed the current DAG candidate into the ledger.
 /// it does *not* commit anything and is not used by consensus.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -674,7 +674,7 @@ pub struct DagShadowBlockTemplate {
     pub round: u64,
     /// logical DAG "height" stored on the vertex (not the real chain height)
     pub dag_height: u64,
-    /// header-like summary compatible with hotstuff-style blocks
+    /// header-like summary compatible with legacy-style blocks
     pub header: DagShadowBlockHeader,
     /// full per-tx dry-run results (hash/from/to/amount/fee/nonce/success/error)
     pub txs: Vec<DagBlockDryRunTxResult>,
@@ -1277,7 +1277,7 @@ impl DagRunnerHandle {
         })
     }
 
-    /// T64.0: build a shadow hotstuff block template from the current DAG candidate.
+    /// T64.0: build a shadow legacy block template from the current DAG candidate.
     ///
     /// this is a thin wrapper on top of `block_dry_run`:
     /// - runs the same dry-run execution (optionally against real state)
@@ -1316,7 +1316,7 @@ impl DagRunnerHandle {
         }
 
         // 3) read the *real* chain height from the internal SingleNode
-        //    (this is the height a hotstuff block would target)
+        //    (this is the height a legacy-style block would target)
         let target_height = {
             let g = self.node.lock().await;
             g.height.saturating_add(1)

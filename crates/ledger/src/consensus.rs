@@ -34,7 +34,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use crate::Address;
 
-// === T27: HotStuff-like pipeline (uses new message module) ===
+// === T27: Legacy consensus pipeline (uses new message module) ===
+// Note: This is historical pre-DAG consensus. See T81 for current architecture.
 use crate::block::BlockId;
 use std::sync::Arc;
 
@@ -1022,8 +1023,9 @@ impl SingleNode {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// T27: HotStuff-like 3-phase pipeline (Prepare → PreCommit → Commit)
-// This coexists with the legacy SingleNode harness above.
+// T27: Legacy 3-phase pipeline (Prepare → PreCommit → Commit)
+// This is historical pre-DAG consensus. EEZO now uses pure DAG (see T81).
+// The code is retained for backward compatibility and testing only.
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]

@@ -161,7 +161,7 @@ groups:
       labels: { severity: page }
       annotations:
         summary: "DAG-primary shadow mismatch detected"
-        description: "{{ $value }} mismatches between DAG ordering and shadow HotStuff. Critical divergence bug. Stop canary immediately."
+        description: "{{ $value }} mismatches between DAG ordering and shadow legacy check. Critical divergence bug. Stop canary immediately."
 
     # Warning: Shadow checker not running while blocks are applying
     - alert: DagPrimaryShadowNotRunning

@@ -47,8 +47,9 @@ impl ConsensusNetwork for LoopbackNet {
     }
 }
 
+/// T81.4: Test legacy single node consensus (renamed from hotstuff_single_node_basic_propose_and_commit)
 #[test]
-fn hotstuff_single_node_basic_propose_and_commit() {
+fn legacy_single_node_basic_propose_and_commit() {
     // Setup: 1-node consensus config
     let c_cfg = ConsensusCfg {
         n: 1,
@@ -61,7 +62,8 @@ fn hotstuff_single_node_basic_propose_and_commit() {
     let (tx, rx) = mpsc::channel::<hs_msg::SignedConsensusMsg>();
     net.set_sender(tx);
 
-    // HotStuff instance behind Arc<Mutex<_>>
+    // Legacy consensus instance behind Arc<Mutex<_>>
+    // Note: HotStuff struct name retained for backward compatibility (T81.4)
     let hs = Arc::new(Mutex::new(HotStuff::new(c_cfg, certs.clone(), net.clone())));
 
     // Delivery thread: receives messages and calls on_signed_msg
@@ -88,7 +90,7 @@ fn hotstuff_single_node_basic_propose_and_commit() {
         qc_hash: [0u8; 32],
     };
 
-    // Call propose on HotStuff (should broadcast and loopback)
+    // Call propose on legacy consensus (should broadcast and loopback)
     {
         let mut g = hs.lock().unwrap();
         g.propose(dummy_header.clone(), hs_msg::ValidatorId(0), None);
