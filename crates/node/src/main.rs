@@ -104,12 +104,6 @@ mod dag_runner;
 #[cfg(feature = "dag-consensus")]
 mod dag_consensus_runner;
 
-// T78.5/T78.7: Shadow HotStuff checker module (only when both features are enabled)
-// The hotstuff-shadow feature gates the shadow checker for dag-primary mode.
-// In devnet-safe builds without hotstuff-shadow, this module is not compiled.
-#[cfg(all(feature = "dag-consensus", feature = "hotstuff-shadow"))]
-mod shadow_hotstuff;
-
 // T76.9: Fast Decode Pool module
 #[cfg(feature = "pq44-runtime")]
 mod tx_decode_pool;
@@ -1144,10 +1138,9 @@ enum ConsensusMode {
     /// T76.1: Hybrid mode: DAG provides ordered batches as primary tx source,
     /// with mempool fallback. Transition mode only.
     DagHybrid,
-    /// T78.3/T80.0: DAG-primary mode (PRODUCTION RECOMMENDED).
+    /// T78.3/T80.0/T81.1: DAG-primary mode (PRODUCTION RECOMMENDED).
     /// DAG is the only source of tx ordering for committed blocks.
     /// No mempool fallback on the main path.
-    /// HotStuff/legacy path runs as shadow checker only (if hotstuff-shadow is enabled).
     DagPrimary,
 }
 
@@ -5287,17 +5280,6 @@ mod consensus_mode_tests {
                 "WARNING: dev-unsafe is active alongside devnet-safe. \
                  This is OK for testing but should not be done for real devnet."
             );
-        }
-    }
-
-    /// T78.7: Test hotstuff-shadow feature detection.
-    #[test]
-    fn test_hotstuff_shadow_feature_detection() {
-        let is_hotstuff_shadow = cfg!(feature = "hotstuff-shadow");
-        
-        // hotstuff-shadow requires dag-consensus
-        if is_hotstuff_shadow {
-            assert!(cfg!(feature = "dag-consensus"), "hotstuff-shadow requires dag-consensus");
         }
     }
 
