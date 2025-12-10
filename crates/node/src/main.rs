@@ -1190,8 +1190,8 @@ impl ConsensusMode {
 /// # Note on dag-only builds
 ///
 /// When built with `--features dag-only`, legacy modes are not available.
-/// Attempts to set `EEZO_CONSENSUS_MODE=hotstuff` will produce an error
-/// stating that the mode has been removed.
+/// Attempts to set `EEZO_CONSENSUS_MODE=hotstuff` will produce a warning
+/// and fall back to dag-primary mode.
 fn env_consensus_mode() -> ConsensusMode {
     // T80.0: dag-only builds always use DagPrimary
     #[cfg(feature = "dag-only")]
@@ -1222,10 +1222,10 @@ fn env_consensus_mode() -> ConsensusMode {
                 // Empty string uses the default mode (depends on build profile)
                 "" => default_mode,
                 
-                // T81.4: In dag-only builds, reject legacy modes with clear error
+                // T81.4: In dag-only builds, reject legacy modes with clear warning
                 #[cfg(feature = "dag-only")]
                 "hotstuff" | "hs" => {
-                    log::error!(
+                    log::warn!(
                         "[T81.4 dag-only] Legacy mode (hotstuff) has been removed; EEZO is DAG-only now. Using dag-primary."
                     );
                     ConsensusMode::DagPrimary

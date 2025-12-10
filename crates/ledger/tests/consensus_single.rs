@@ -47,7 +47,15 @@ impl ConsensusNetwork for LoopbackNet {
     }
 }
 
-/// T81.4: Test legacy single node consensus (renamed from hotstuff_single_node_basic_propose_and_commit)
+/// Tests basic propose and commit flow in a single-node legacy consensus setup.
+///
+/// This test verifies that:
+/// - A 1-node consensus config can be created
+/// - A header can be proposed via the legacy consensus path
+/// - Messages are broadcast and looped back correctly
+///
+/// Note: Previously named `hotstuff_single_node_basic_propose_and_commit`.
+/// The HotStuff struct name is retained for backward compatibility (T81.4).
 #[test]
 fn legacy_single_node_basic_propose_and_commit() {
     // Setup: 1-node consensus config
