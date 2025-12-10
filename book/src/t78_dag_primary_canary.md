@@ -637,3 +637,175 @@ echo "TPS: $(echo "scale=2; ($AFTER - $BEFORE) / 10" | bc)"
 - [T78: DAG-Only Devnet & Strict Hybrid Tuning](t78_dag_only_devnet.md)
 - [T76: DAG-Hybrid Canary & SLO Runbook](t76_dag_hybrid_canary.md)
 - [Dev Unsafe Modes](dev_unsafe_modes.md)
+
+---
+
+## T79.0: dag-primary Health Probe & Ops Polish
+
+### Overview
+
+T79.0 introduces a structured HTTP health endpoint (`/health/dag_primary`) designed for Kubernetes readiness/liveness probes and operational monitoring. This endpoint provides a machine-readable health check that verifies the node is operating correctly in dag-primary mode.
+
+### Purpose
+
+The `/health/dag_primary` endpoint differs from the general `/health` endpoint:
+
+| Endpoint | Purpose | Response |
+|----------|---------|----------|
+| `/health` | Basic liveness check | Always returns `"ok"` |
+| `/health/dag_primary` | dag-primary mode readiness | JSON with status and metrics |
+
+The dag-primary health endpoint checks:
+
+1. **Consensus mode**: Must be `dag-primary` (mode value `3`)
+2. **Shadow checker activity**: `eezo_dag_primary_shadow_checks_total` must have increased recently
+3. **Transaction liveness**: `eezo_txs_included_total` must have increased recently
+
+### HTTP Response Codes
+
+| Status | Meaning |
+|--------|---------|
+| `200 OK` | All health checks pass - node is healthy |
+| `503 Service Unavailable` | One or more checks failed - node is degraded |
+
+### Response Format
+
+**Healthy response (HTTP 200):**
+```json
+{
+  "status": "healthy",
+  "consensus_mode": 3,
+  "shadow_checks_total": 1234,
+  "txs_included_total": 5678,
+  "window_secs": 60
+}
+```
+
+**Degraded response (HTTP 503):**
+```json
+{
+  "status": "degraded",
+  "reason": "wrong_mode",
+  "consensus_mode": 1,
+  "shadow_checks_total": 0,
+  "txs_included_total": 0,
+  "window_secs": 60
+}
+```
+
+### Degraded Reasons
+
+| Reason | Meaning |
+|--------|---------|
+| `wrong_mode` | Consensus mode is not dag-primary (mode ≠ 3) |
+| `no_shadow_checks_recently` | Shadow checker has not run within the window |
+| `no_txs_recently` | No transactions included within the window |
+
+### Configuration
+
+The health check window (how recently metrics must have changed) is configurable:
+
+```bash
+# Default: 60 seconds
+export EEZO_DAG_PRIMARY_HEALTH_WINDOW_SECS=60
+```
+
+### Usage Examples
+
+**Basic health check:**
+```bash
+# Check if node is healthy (will return exit code 0 for 200, non-zero otherwise)
+curl -sf http://127.0.0.1:8080/health/dag_primary > /dev/null && echo "healthy" || echo "degraded"
+
+# Get full JSON response
+curl -s http://127.0.0.1:8080/health/dag_primary | jq .
+```
+
+**Kubernetes readiness probe:**
+```yaml
+readinessProbe:
+  httpGet:
+    path: /health/dag_primary
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+```
+
+**Kubernetes liveness probe:**
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health/dag_primary
+    port: 8080
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  timeoutSeconds: 10
+  failureThreshold: 5
+```
+
+### Devnet Launcher Script
+
+The `scripts/devnet_dag_primary.sh` launcher script now prints endpoint URLs including the health endpoint:
+
+```bash
+./scripts/devnet_dag_primary.sh
+```
+
+Output:
+```
+═══════════════════════════════════════════════════════════════
+  T79.0: Official devnet-safe DAG-primary Launcher
+═══════════════════════════════════════════════════════════════
+
+Configuration:
+  EEZO_CONSENSUS_MODE=dag-primary
+  EEZO_DAG_ORDERING_ENABLED=1
+  ...
+
+Endpoints (once started):
+  Mode:                 dag-primary
+  HTTP Base URL:        http://127.0.0.1:8080
+  Metrics URL:          http://127.0.0.1:9898/metrics
+  Health (general):     http://127.0.0.1:8080/health
+  Health (dag-primary): http://127.0.0.1:8080/health/dag_primary
+```
+
+### Ops Notes
+
+#### Recommended Probe Settings
+
+For production Kubernetes deployments:
+
+| Setting | Recommended Value | Rationale |
+|---------|-------------------|-----------|
+| `initialDelaySeconds` | 30-60 | Allow node startup time |
+| `periodSeconds` | 10-30 | Balance responsiveness vs overhead |
+| `timeoutSeconds` | 5-10 | Network latency buffer |
+| `failureThreshold` | 3-5 | Avoid false positives |
+
+#### Activity Window Semantics
+
+The health check uses a **"must have increased recently"** semantic:
+
+- Metrics are considered active if they changed within the last `EEZO_DAG_PRIMARY_HEALTH_WINDOW_SECS` seconds
+- Default window is 60 seconds, matching typical Prometheus scrape intervals
+- For high-throughput scenarios, consider shorter windows (30s)
+- For low-traffic environments, consider longer windows (120s)
+
+#### Monitoring Integration
+
+The health endpoint is designed to complement Prometheus metrics:
+
+```bash
+# Check health endpoint
+curl -s http://127.0.0.1:8080/health/dag_primary | jq .status
+
+# Check raw Prometheus metrics
+curl -s http://127.0.0.1:9898/metrics | grep -E "(consensus_mode|shadow_checks|txs_included)"
+```
+
+Use both for comprehensive monitoring:
+- Health endpoint for quick pass/fail status
+- Prometheus metrics for detailed time-series analysis

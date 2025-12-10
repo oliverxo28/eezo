@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# T78.9: Official devnet-safe DAG-primary launcher (no unsigned tx).
+# T78.9/T79.0: Official devnet-safe DAG-primary launcher (no unsigned tx).
 #
 # This script is the canonical entrypoint for running a devnet-safe DAG-primary node.
 # It configures the recommended environment variables and starts the node with
@@ -26,7 +26,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 echo "═══════════════════════════════════════════════════════════════"
-echo "  T78.9: Official devnet-safe DAG-primary Launcher"
+echo "  T79.0: Official devnet-safe DAG-primary Launcher"
 echo "═══════════════════════════════════════════════════════════════"
 echo ""
 
@@ -44,6 +44,11 @@ export EEZO_HYBRID_STRICT_PROFILE="${EEZO_HYBRID_STRICT_PROFILE:-1}"
 export EEZO_EXECUTOR_MODE="${EEZO_EXECUTOR_MODE:-stm}"
 export EEZO_EXEC_LANES="${EEZO_EXEC_LANES:-32}"
 export EEZO_EXEC_WAVE_CAP="${EEZO_EXEC_WAVE_CAP:-256}"
+
+# ───────────────────────────────────────────────────────────────────────────────
+# T79.0: Health Check Window (seconds for activity checks)
+# ───────────────────────────────────────────────────────────────────────────────
+export EEZO_DAG_PRIMARY_HEALTH_WINDOW_SECS="${EEZO_DAG_PRIMARY_HEALTH_WINDOW_SECS:-60}"
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Data Directory (clean start by default)
@@ -82,6 +87,7 @@ echo "  EEZO_HYBRID_STRICT_PROFILE=$EEZO_HYBRID_STRICT_PROFILE"
 echo "  EEZO_EXECUTOR_MODE=$EEZO_EXECUTOR_MODE"
 echo "  EEZO_EXEC_LANES=$EEZO_EXEC_LANES"
 echo "  EEZO_EXEC_WAVE_CAP=$EEZO_EXEC_WAVE_CAP"
+echo "  EEZO_DAG_PRIMARY_HEALTH_WINDOW_SECS=$EEZO_DAG_PRIMARY_HEALTH_WINDOW_SECS"
 echo "  EEZO_DATADIR=$EEZO_DATADIR"
 echo "  EEZO_LISTEN=$EEZO_LISTEN"
 echo "  EEZO_METRICS_BIND=$EEZO_METRICS_BIND"
@@ -90,11 +96,20 @@ echo "Build features: devnet-safe,metrics,pq44-runtime,checkpoints,stm-exec,dag-
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo ""
+echo "Endpoints (once started):"
+echo "  Mode:                 $EEZO_CONSENSUS_MODE"
+echo "  HTTP Base URL:        http://${EEZO_LISTEN}"
+echo "  Metrics URL:          http://${EEZO_METRICS_BIND}/metrics"
+echo "  Health (general):     http://${EEZO_LISTEN}/health"
+echo "  Health (dag-primary): http://${EEZO_LISTEN}/health/dag_primary"
+echo ""
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Run the node with devnet-safe feature set
 # ───────────────────────────────────────────────────────────────────────────────
-exec cargo run -p eezo-node \
+exec cargo run -p eezo-node --bin eezo-node \
   --features "devnet-safe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus" -- \
   --genesis genesis.min.json \
   --datadir "$EEZO_DATADIR"
