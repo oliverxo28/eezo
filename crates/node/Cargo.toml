@@ -145,44 +145,25 @@ gpu-hash = ["eezo-prover", "eezo-prover/gpu-hash", "eezo-prover/stark-air"]
 # Note: This only adds the modules; wiring into consensus_runner is T73.3+
 stm-exec = ["dashmap"]
 
-# T75.0: DAG consensus shadow mode (optional, for observability without changing behavior)
-# When enabled, node can run consensus-dag in shadow mode alongside Hotstuff/STM.
-# Shadow DAG receives committed block info and orders shadow batches for metrics/logging.
-# Env: EEZO_DAG_CONSENSUS_MODE=off|shadow (default: off)
+# T75.0/T81.1: DAG consensus mode (required for production).
+# EEZO's production consensus is pure DAG; this feature enables the DAG infrastructure.
 dag-consensus = ["consensus-dag", "consensus-dag/metrics"]
 
-# T78.7: HotStuff shadow checker feature gate (LAB/DEBUG ONLY).
-# HotStuff is a LEGACY consensus mechanism. In EEZO production, DAG is the canonical consensus.
-# When enabled, the shadow HotStuff checker is available in dag-primary mode for:
-# - Observability and metrics comparison
-# - Debugging and development validation
-# - Transition verification during DAG cutover
-# The shadow checker ONLY logs and emits metrics — it NEVER:
-# - Decides block finality
-# - Affects block ordering
-# - Causes panics or rollbacks
-# When disabled, HotStuff shadow code is not compiled, reducing binary size.
-# Only effective in dag-primary mode. Has no effect in other consensus modes.
-# Requires dag-consensus feature for the shadow checker to function.
-hotstuff-shadow = ["dag-consensus"]
-
-# T78.7/T78.8: Devnet-safe build profile.
+# T78.7/T78.8/T81.1: Devnet-safe build profile (DAG-only production profile).
 # When enabled:
 # - Default consensus mode is dag-primary (when EEZO_CONSENSUS_MODE is unset)
 # - DAG ordering is enabled by default (effective EEZO_DAG_ORDERING_ENABLED=1)
 # - Does NOT include dev-unsafe (no unsigned tx support)
-# - HotStuff runs as shadow only (when hotstuff-shadow is also enabled)
 # - T78.8: Build profile detection for startup logging and guardrails
 # Use for "official devnet" deployments. For local benchmarks, use dev-unsafe instead.
 devnet-safe = ["pq44-runtime", "metrics", "checkpoints", "dag-consensus", "stm-exec", "eezo-ledger/devnet-safe"]
 
-# T80.0: Pure DAG consensus build profile (DAG-only, no HotStuff code compiled).
-# EEZO's production consensus is pure DAG; this feature excludes all HotStuff code.
+# T80.0/T81.1: Pure DAG consensus build profile (production recommended).
+# EEZO's production consensus is pure DAG.
 # When enabled:
-# - DAG is the only consensus implementation (no HotStuff types or modules)
-# - Consensus mode is always dag-primary (ignores EEZO_CONSENSUS_MODE for HotStuff modes)
-# - No shadow HotStuff checker (hotstuff-shadow is not included)
-# - Reduced binary size (HotStuff code paths eliminated)
+# - DAG is the only consensus implementation
+# - Consensus mode is always dag-primary
+# - Reduced binary size
 # - All DAG integration tests pass
 # - Suitable for devnet/testnet/mainnet deployments
 # Build: cargo build --release -p eezo-node --features "dag-only"

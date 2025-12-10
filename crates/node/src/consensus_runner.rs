@@ -191,33 +191,6 @@ fn compute_block_body_hash_with_gpu(blk_opt: &Option<Block>, height: u64) -> Opt
     Some(digest)
 }
 
-/// T78.3 — Shadow HotStuff/legacy checker (stub for dag-primary mode).
-///
-/// DEPRECATED: T78.5 replaced this stub with a stateful ShadowHotstuffChecker.
-/// This function is kept for reference but no longer called.
-///
-/// This function ran the HotStuff/legacy path as a shadow checker without
-/// affecting block production. It was only active in dag-primary mode.
-///
-/// For T78.3, this was a minimal stub that:
-/// - Incremented the shadow check counter metric
-/// - Logged that a shadow check was performed
-/// - Did NOT build or commit a shadow block
-///
-/// T78.5 now uses crate::shadow_hotstuff::ShadowHotstuffChecker instead.
-#[cfg(feature = "dag-consensus")]
-#[allow(dead_code)]
-fn run_shadow_hotstuff_check(_height: u64, _dag_block_txs: &[SignedTx]) {
-    // T78.3: Stub implementation - just increment the metric
-    // T78.5: This function is deprecated; see ShadowHotstuffChecker instead.
-    crate::metrics::dag_primary_shadow_checks_inc();
-    
-    log::debug!(
-        "dag-primary: shadow HotStuff check performed at height={} (deprecated stub)",
-        _height
-    );
-}
-
 // --- T54 executor wiring ---
 use crate::executor::{Executor, ExecInput};
 use crate::executor::{SingleExecutor};
@@ -561,43 +534,12 @@ impl CoreRunnerHandle {
 			#[cfg(feature = "metrics")]
 			register_t36_bridge_metrics();
             
-            // T78.5: Create shadow HotStuff checker if dag-primary mode and shadow enabled.
-            // This checker runs after each committed block to verify invariants.
-            // (non-persistence variant)
-            // T78.7: Shadow checker only compiled when hotstuff-shadow feature is enabled
-            #[cfg(all(feature = "dag-consensus", feature = "hotstuff-shadow"))]
-            let mut shadow_checker: Option<crate::shadow_hotstuff::ShadowHotstuffChecker> = {
-                // Check if shadow checker is enabled via env
-                let shadow_enabled = std::env::var("EEZO_DAG_PRIMARY_SHADOW_ENABLED")
-                    .map(|v| v.trim() == "1")
-                    .unwrap_or(false);
-                let dag_ordering_enabled = std::env::var("EEZO_DAG_ORDERING_ENABLED")
-                    .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-                    .unwrap_or(false);
-                
-                // Log the consensus mode configuration at startup
-                log::info!(
-                    "consensus: mode={:?}, dag_ordering_enabled={}, shadow_hotstuff_enabled={} (non-persistence)",
-                    hybrid_mode_cfg, dag_ordering_enabled, shadow_enabled
-                );
-                
-                if matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary) && shadow_enabled {
-                    log::info!("[T78.5 shadow-checker] enabled in dag-primary mode (non-persistence)");
-                    Some(crate::shadow_hotstuff::ShadowHotstuffChecker::new())
-                } else if matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary) {
-                    log::info!("[T78.5 shadow-checker] disabled (EEZO_DAG_PRIMARY_SHADOW_ENABLED not set to 1)");
-                    None
-                } else {
-                    // Not dag-primary mode, shadow checker not applicable
-                    None
-                }
-            };
-            // T78.7: When hotstuff-shadow feature is not enabled, shadow checker is unavailable
-            #[cfg(all(feature = "dag-consensus", not(feature = "hotstuff-shadow")))]
+            // T81.1: Log consensus mode at startup (non-persistence variant)
+            #[cfg(feature = "dag-consensus")]
             {
                 let dag_ordering_enabled = dag_ordering_enabled_from_env();
                 log::info!(
-                    "consensus: mode={:?}, dag_ordering_enabled={}, shadow_hotstuff=not-compiled (non-persistence)",
+                    "consensus: mode={:?}, dag_ordering_enabled={} (non-persistence)",
                     hybrid_mode_cfg, dag_ordering_enabled
                 );
             }
@@ -789,36 +731,6 @@ impl CoreRunnerHandle {
                                     guard.prev_hash = curr_hash;
                                     guard.last_header = Some(blk.header.clone());
                                     guard.last_txs = Some(blk.txs.clone());
-
-                                    // T78.5/T78.7: Run shadow HotStuff checker in dag-primary mode (real checker)
-                                    // NOTE: The checker runs on EVERY committed block in dag-primary mode,
-                                    // not just when hybrid batches are used. This ensures invariant checking
-                                    // for all blocks regardless of tx source.
-                                    // T78.7: Only compiled when hotstuff-shadow feature is enabled
-                                    // (non-persistence variant)
-                                    #[cfg(all(feature = "dag-consensus", feature = "hotstuff-shadow"))]
-                                    if let Some(ref mut checker) = shadow_checker {
-                                        // Convert txs to DecodedTx for the checker
-                                        let decoded_txs: Vec<std::sync::Arc<crate::tx_decode_pool::DecodedTx>> = 
-                                            blk.txs.iter().map(|tx| {
-                                                std::sync::Arc::new(
-                                                    crate::tx_decode_pool::DecodedTx::new(tx.clone())
-                                                )
-                                            }).collect();
-                                        
-                                        let block_hash = eezo_ledger::block::header_hash(&blk.header);
-                                        log::debug!(
-                                            "shadow-hotstuff: height={} txs={} hash=0x{}",
-                                            blk.header.height,
-                                            blk.txs.len(),
-                                            hex::encode(&block_hash[..4])
-                                        );
-                                        checker.on_committed_block(
-                                            blk.header.height,
-                                            block_hash,
-                                            &decoded_txs,
-                                        );
-                                    }
 
                                     Ok(SlotOutcome::Committed { height: blk.header.height })
                                 }
@@ -1402,42 +1314,12 @@ impl CoreRunnerHandle {
                 crate::metrics::register_t77_dag_ordering_latency_metrics();
             }
             
-            // T78.5/T78.7: Create shadow HotStuff checker if dag-primary mode and shadow enabled.
-            // This checker runs after each committed block to verify invariants.
-            // T78.7: Shadow checker only compiled when hotstuff-shadow feature is enabled
-            #[cfg(all(feature = "dag-consensus", feature = "hotstuff-shadow"))]
-            let mut shadow_checker: Option<crate::shadow_hotstuff::ShadowHotstuffChecker> = {
-                // Check if shadow checker is enabled via env
-                let shadow_enabled = std::env::var("EEZO_DAG_PRIMARY_SHADOW_ENABLED")
-                    .map(|v| v.trim() == "1")
-                    .unwrap_or(false);
-                let dag_ordering_enabled = std::env::var("EEZO_DAG_ORDERING_ENABLED")
-                    .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-                    .unwrap_or(false);
-                
-                // Log the consensus mode configuration at startup
-                log::info!(
-                    "consensus: mode={:?}, dag_ordering_enabled={}, shadow_hotstuff_enabled={}",
-                    hybrid_mode_cfg, dag_ordering_enabled, shadow_enabled
-                );
-                
-                if matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary) && shadow_enabled {
-                    log::info!("[T78.5 shadow-checker] enabled in dag-primary mode");
-                    Some(crate::shadow_hotstuff::ShadowHotstuffChecker::new())
-                } else if matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary) {
-                    log::info!("[T78.5 shadow-checker] disabled (EEZO_DAG_PRIMARY_SHADOW_ENABLED not set to 1)");
-                    None
-                } else {
-                    // Not dag-primary mode, shadow checker not applicable
-                    None
-                }
-            };
-            // T78.7: When hotstuff-shadow feature is not enabled, shadow checker is unavailable
-            #[cfg(all(feature = "dag-consensus", not(feature = "hotstuff-shadow")))]
+            // T81.1: Log consensus mode at startup (persistence variant)
+            #[cfg(feature = "dag-consensus")]
             {
                 let dag_ordering_enabled = dag_ordering_enabled_from_env();
                 log::info!(
-                    "consensus: mode={:?}, dag_ordering_enabled={}, shadow_hotstuff=not-compiled",
+                    "consensus: mode={:?}, dag_ordering_enabled={}",
                     hybrid_mode_cfg, dag_ordering_enabled
                 );
             }
@@ -2017,35 +1899,6 @@ impl CoreRunnerHandle {
                                                 );
                                             }
                                         }
-                                    }
-
-                                    // T78.5/T78.7: Run shadow HotStuff checker in dag-primary mode (real checker)
-                                    // NOTE: The checker runs on EVERY committed block in dag-primary mode,
-                                    // not just when hybrid batches are used. This ensures invariant checking
-                                    // for all blocks regardless of tx source.
-                                    // T78.7: Only compiled when hotstuff-shadow feature is enabled
-                                    #[cfg(all(feature = "dag-consensus", feature = "hotstuff-shadow"))]
-                                    if let Some(ref mut checker) = shadow_checker {
-                                        // Convert txs to DecodedTx for the checker
-                                        let decoded_txs: Vec<std::sync::Arc<crate::tx_decode_pool::DecodedTx>> = 
-                                            blk.txs.iter().map(|tx| {
-                                                std::sync::Arc::new(
-                                                    crate::tx_decode_pool::DecodedTx::new(tx.clone())
-                                                )
-                                            }).collect();
-                                        
-                                        let block_hash = eezo_ledger::block::header_hash(&blk.header);
-                                        log::debug!(
-                                            "shadow-hotstuff: height={} txs={} hash=0x{}",
-                                            blk.header.height,
-                                            blk.txs.len(),
-                                            hex::encode(&block_hash[..4])
-                                        );
-                                        checker.on_committed_block(
-                                            blk.header.height,
-                                            block_hash,
-                                            &decoded_txs,
-                                        );
                                     }
 
                                     Ok(SlotOutcome::Committed { height: blk.header.height })
