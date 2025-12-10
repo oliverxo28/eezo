@@ -156,15 +156,17 @@ fn t78_dag_primary_shadow_checker_integration() {
     println!("Generated keypair: sender=0x{}", hex::encode(signer.address));
     
     // Spawn node in dag-primary mode with shadow checker enabled
+    // Note: metrics bind is configured via EEZO_METRICS_BIND env var, not CLI flag
+    let metrics_bind = format!("127.0.0.1:{}", metrics_port);
     let mut child = common::spawn_node_with_env(
         &[
             "--listen", &format!("127.0.0.1:{}", port),
-            "--metrics-bind", &format!("127.0.0.1:{}", metrics_port),
             "--datadir", &datadir,
             "--genesis", genesis,
         ],
         &[
             ("EEZO_CHAIN_ID", &chain_id_hex),
+            ("EEZO_METRICS_BIND", &metrics_bind),
             ("EEZO_CONSENSUS_MODE", "dag-primary"),
             ("EEZO_DAG_ORDERING_ENABLED", "1"),
             ("EEZO_DAG_PRIMARY_SHADOW_ENABLED", "1"),
