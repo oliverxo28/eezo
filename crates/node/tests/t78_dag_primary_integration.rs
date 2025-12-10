@@ -137,7 +137,7 @@ fn submit_tx(port: u16, tx_json: &serde_json::Value) -> bool {
 /// - eezo_dag_primary_shadow_checks_total > 0 (shadow checker running)
 /// - eezo_txs_included_total >= 10 (transactions included)
 #[test]
-#[ignore = "requires dag-primary build with pq44-runtime,dag-consensus,hotstuff-shadow,metrics features"]
+#[ignore = "requires dag-primary build with pq44-runtime,dag-consensus,metrics features"]
 fn t78_dag_primary_shadow_checker_integration() {
     let port: u16 = 18900;
     let metrics_port: u16 = 9900;

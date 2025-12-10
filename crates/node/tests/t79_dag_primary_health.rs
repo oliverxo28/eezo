@@ -139,7 +139,7 @@ fn t79_health_endpoint_wrong_mode() {
 ///
 /// NOTE: This test is more complex because it requires actual transaction flow.
 #[test]
-#[ignore = "requires dag-primary build with pq44-runtime,dag-consensus,hotstuff-shadow,metrics features"]
+#[ignore = "requires dag-primary build with pq44-runtime,dag-consensus,metrics features"]
 fn t79_health_endpoint_healthy() {
     use pqcrypto_mldsa::mldsa44::{keypair, detached_sign};
     use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _, DetachedSignature as _};
