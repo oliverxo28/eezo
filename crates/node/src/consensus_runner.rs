@@ -3516,17 +3516,27 @@ mod executor_mode_tests {
         std::env::remove_var("EEZO_CONSENSUS_MODE");
         std::env::remove_var("EEZO_DAG_ORDERING_ENABLED");
         
+        // T81.5: Default behavior depends on build profile:
+        // - devnet-safe: defaults to DagPrimary
+        // - generic: defaults to Standard
+        #[cfg(feature = "devnet-safe")]
+        assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::DagPrimary);
+        #[cfg(not(feature = "devnet-safe"))]
         assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::Standard);
     }
 
     #[test]
-    fn test_hybrid_mode_config_standard_when_legacy() {
+    fn test_hybrid_mode_config_standard_when_legacy_alias_used() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         
-        // T81.4: Test with legacy mode (previously called hotstuff)
+        // T81.5: Test that "hotstuff" alias does NOT enable any special mode
+        // It's treated as an unknown/invalid mode and HybridModeConfig::from_env()
+        // falls through to Standard (since it doesn't match dag-hybrid or dag-primary).
         std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
         
+        // HybridModeConfig::from_env() only recognizes dag-primary and dag-hybrid
+        // Any other value (including hotstuff) results in Standard
         assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::Standard);
         
         std::env::remove_var("EEZO_CONSENSUS_MODE");

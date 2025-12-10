@@ -2182,23 +2182,36 @@ pub fn register_dag_shadow_metrics() {
 }
 
 // -----------------------------------------------------------------------------
-// T76.1 / T81.2 — DAG mode metrics (pure DAG semantics)
+// T76.1 / T81.2 / T81.5 — DAG mode metrics (pure DAG semantics)
 // -----------------------------------------------------------------------------
 
-/// Gauge: Active consensus mode (3=dag-primary is the production mode).
+/// Gauge: Active consensus mode (3=dag-primary is the only production mode).
 /// Set at startup based on EEZO_CONSENSUS_MODE environment variable.
-/// After T81.2, only dag-primary (3) is supported in production.
+///
+/// # T81.5: DAG-Only Semantics
+///
+/// After T81.5, EEZO is DAG-only. The gauge values are:
+/// - 3 = DagPrimary (PRODUCTION: the only recommended mode)
+/// - 2 = Dag (legacy transition mode)
+/// - 1 = DagHybrid with ordering enabled (deprecated transition mode)
+/// - 0 = Legacy0/DagHybrid-without-ordering (DEPRECATED, not valid in production)
+///
+/// Note: "hotstuff" / "hs" are no longer valid mode strings and will cause
+/// a config error with fallback to dag-primary.
 #[cfg(feature = "metrics")]
 pub static EEZO_CONSENSUS_MODE_ACTIVE: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(
         "eezo_consensus_mode_active",
-        "Active consensus mode: 3=dag-primary (production)"
+        "Active consensus mode: 3=dag-primary (production), 2=dag, 1=dag-hybrid, 0=legacy(deprecated)"
     )
     .unwrap()
 });
 
 /// Helper: Set the consensus mode gauge value.
-/// - 3 = DagPrimary (T81.2: DAG-only production mode)
+/// - 3 = DagPrimary (T81.5: DAG-only production mode, RECOMMENDED)
+/// - 2 = Dag (legacy transition)
+/// - 1 = DagHybrid with ordering (deprecated transition)
+/// - 0 = Legacy/deprecated (should not appear in production)
 #[inline]
 pub fn consensus_mode_active_set(mode: i64) {
     #[cfg(feature = "metrics")]

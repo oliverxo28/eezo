@@ -1128,9 +1128,18 @@ fn env_u16(var: &str, default_v: u16) -> u16 {
 /// | `Legacy0` | Pre-DAG consensus (historical) | ❌ Not for production |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConsensusMode {
-    /// Legacy pre-DAG block production (historical mode 0).
-    /// **NOT RECOMMENDED for production.** Use DagPrimary instead.
-    /// Only available in builds without dag-only feature.
+    /// T81.5: Legacy pre-DAG block production (historical mode 0).
+    /// 
+    /// # Deprecation Notice
+    /// 
+    /// **This variant is deprecated and will be removed in a future release.**
+    /// EEZO is now DAG-only; use `DagPrimary` instead.
+    /// 
+    /// This variant remains in the enum for backward compatibility during the
+    /// transition period (T81.0–T81.4). It is not constructed in any build;
+    /// attempting to use `EEZO_CONSENSUS_MODE=hotstuff` or `hs` will result
+    /// in an error log and fallback to `DagPrimary`.
+    #[deprecated(since = "T81.5", note = "EEZO is DAG-only; use DagPrimary instead")]
     Legacy0,
     /// DAG mode: DAG is used for tx source + dry-run + shadow consensus,
     /// but legacy path still commits blocks. Legacy transition mode.
@@ -1172,26 +1181,25 @@ impl ConsensusMode {
 /// For production deployments (devnet/testnet/mainnet), use:
 /// - `EEZO_CONSENSUS_MODE=dag-primary` (or rely on devnet-safe/dag-only defaults)
 ///
-/// # Mode Values
+/// # Supported Mode Values (T81.5)
 ///
 /// - `""`, unset → Default based on build profile (see below)
-/// - `"dag-primary"`, `"dag_primary"` → DagPrimary (PRODUCTION)
-/// - `"dag-hybrid"`, `"dag_hybrid"` → DagHybrid (transition)
-/// - `"dag"` → Dag (legacy)
-/// - `"hotstuff"`, `"hs"` → **WARNING**: Legacy mode is deprecated (T81.4)
+/// - `"dag-primary"`, `"dag_primary"` → DagPrimary (PRODUCTION RECOMMENDED)
+/// - `"dag-hybrid"`, `"dag_hybrid"` → DagHybrid (transition mode only)
+/// - `"dag"` → Dag (legacy transition mode)
+///
+/// # Rejected Values (T81.5)
+///
+/// - `"hotstuff"`, `"hs"` → **ERROR**: These values are no longer valid.
+///   EEZO is DAG-only; use `dag-primary` instead. Node will log an error
+///   and fall back to `dag-primary`.
 /// - Unknown strings log a warning and fall back to the default.
 ///
 /// # Build Profile Defaults
 ///
 /// - **`dag-only` feature**: Always DagPrimary (legacy modes unavailable)
 /// - **`devnet-safe` feature**: Default is DagPrimary
-/// - **Generic build**: Default is Legacy0 (for backward compatibility only)
-///
-/// # Note on dag-only builds
-///
-/// When built with `--features dag-only`, legacy modes are not available.
-/// Attempts to set `EEZO_CONSENSUS_MODE=hotstuff` will produce a warning
-/// and fall back to dag-primary mode.
+/// - **Generic build**: Default is DagPrimary (T81.5: changed from Legacy0)
 fn env_consensus_mode() -> ConsensusMode {
     // T80.0: dag-only builds always use DagPrimary
     #[cfg(feature = "dag-only")]
@@ -1202,7 +1210,7 @@ fn env_consensus_mode() -> ConsensusMode {
         ConsensusMode::DagPrimary
     };
     
-    // T78.7: devnet-safe builds default to DagPrimary (but can use other modes)
+    // T78.7: devnet-safe builds default to DagPrimary
     #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
     let default_mode = {
         log::info!(
@@ -1211,9 +1219,14 @@ fn env_consensus_mode() -> ConsensusMode {
         ConsensusMode::DagPrimary
     };
     
-    // Generic builds default to Legacy0 for backward compatibility
+    // T81.5: Generic builds now also default to DagPrimary (DAG-only era)
     #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
-    let default_mode = ConsensusMode::Legacy0;
+    let default_mode = {
+        log::info!(
+            "[T81.5] Generic build: default consensus mode is dag-primary (EEZO is DAG-only)"
+        );
+        ConsensusMode::DagPrimary
+    };
 
     match env::var("EEZO_CONSENSUS_MODE") {
         Ok(raw) => {
@@ -1222,23 +1235,15 @@ fn env_consensus_mode() -> ConsensusMode {
                 // Empty string uses the default mode (depends on build profile)
                 "" => default_mode,
                 
-                // T81.4: In dag-only builds, reject legacy modes with clear warning
-                #[cfg(feature = "dag-only")]
+                // T81.5: hotstuff/hs is NO LONGER VALID - log error and use dag-primary
                 "hotstuff" | "hs" => {
-                    log::warn!(
-                        "[T81.4 dag-only] Legacy mode (hotstuff) has been removed; EEZO is DAG-only now. Using dag-primary."
+                    log::error!(
+                        "[T81.5] EEZO_CONSENSUS_MODE={} is no longer supported. \
+                         EEZO is DAG-only; please use EEZO_CONSENSUS_MODE=dag-primary. \
+                         Falling back to dag-primary.",
+                        raw.trim()
                     );
                     ConsensusMode::DagPrimary
-                }
-                
-                // T81.4: In non-dag-only builds, legacy mode is deprecated
-                #[cfg(not(feature = "dag-only"))]
-                "hotstuff" | "hs" => {
-                    log::warn!(
-                        "[T81.4] Legacy mode (hotstuff) is DEPRECATED and NOT RECOMMENDED; consider dag-primary. \
-                         This mode will be removed in a future release."
-                    );
-                    ConsensusMode::Legacy0
                 }
                 
                 "dag" => ConsensusMode::Dag,
@@ -1246,11 +1251,12 @@ fn env_consensus_mode() -> ConsensusMode {
                 "dag-primary" | "dag_primary" => ConsensusMode::DagPrimary,
                 unknown => {
                     log::warn!(
-                        "consensus: unknown EEZO_CONSENSUS_MODE='{}', falling back to {:?}",
-                        unknown,
-                        default_mode
+                        "[T81.5] consensus: unknown EEZO_CONSENSUS_MODE='{}'. \
+                         EEZO is DAG-only; supported modes are: dag-primary, dag-hybrid, dag. \
+                         Falling back to dag-primary.",
+                        unknown
                     );
-                    default_mode
+                    ConsensusMode::DagPrimary
                 }
             }
         }
@@ -5016,52 +5022,27 @@ mod consensus_mode_tests {
     fn test_consensus_mode_parsing() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        // T80.0/T78.7: Test empty/unset → depends on build profile
-        // - dag-only build: always DagPrimary
-        // - devnet-safe build: defaults to DagPrimary
-        // - generic build: defaults to Legacy0
+        // T81.5: All builds now default to DagPrimary (EEZO is DAG-only)
         std::env::remove_var("EEZO_CONSENSUS_MODE");
-        #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
-        #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
-        #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
 
-        // Empty string also uses default based on build profile
+        // Empty string also uses DagPrimary default
         std::env::set_var("EEZO_CONSENSUS_MODE", "");
-        #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
-        #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
-        #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
 
-        // T81.4: In dag-only builds, legacy modes are rejected and forced to dag-primary
-        // In non-dag-only builds, legacy mode is still available (but deprecated)
+        // T81.5: Legacy modes (hotstuff/hs) are NO LONGER VALID in any build.
+        // They log an error and fall back to DagPrimary.
         std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
-        #[cfg(feature = "dag-only")]
-        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Forced
-        #[cfg(not(feature = "dag-only"))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Fallback
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "HOTSTUFF");
-        #[cfg(feature = "dag-only")]
-        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Forced
-        #[cfg(not(feature = "dag-only"))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Fallback
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "hs");
-        #[cfg(feature = "dag-only")]
-        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Forced
-        #[cfg(not(feature = "dag-only"))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Fallback
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "HS");
-        #[cfg(feature = "dag-only")]
-        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Forced
-        #[cfg(not(feature = "dag-only"))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
+        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Fallback
 
         // Test dag (works in all builds)
         std::env::set_var("EEZO_CONSENSUS_MODE", "dag");
@@ -5096,22 +5077,12 @@ mod consensus_mode_tests {
         std::env::set_var("EEZO_CONSENSUS_MODE", "DAG_PRIMARY");
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
 
-        // T80.0/T78.7: Test unknown strings fall back to default (depends on build profile)
+        // T81.5: Unknown strings now fall back to DagPrimary with a warning
         std::env::set_var("EEZO_CONSENSUS_MODE", "unknown");
-        #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
-        #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
-        #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
 
         std::env::set_var("EEZO_CONSENSUS_MODE", "invalid");
-        #[cfg(feature = "dag-only")]
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
-        #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
-        #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
-        assert_eq!(env_consensus_mode(), ConsensusMode::Legacy0);
 
         // Clean up
         std::env::remove_var("EEZO_CONSENSUS_MODE");
@@ -5308,21 +5279,22 @@ mod consensus_mode_tests {
         );
     }
 
-    /// T78.9: Test that explicit consensus mode overrides devnet-safe defaults.
+    /// T78.9/T81.5: Test that explicit consensus mode overrides devnet-safe defaults.
+    /// Note: hotstuff/hs are no longer valid and fall back to DagPrimary with an error.
     #[cfg(feature = "devnet-safe")]
     #[test]
     fn test_devnet_safe_explicit_mode_override() {
         let _guard = ENV_LOCK.lock().expect("T78.9: failed to acquire env lock");
         
-        // Explicitly set legacy mode - should override devnet-safe default
+        // T81.5: Legacy mode (hotstuff) is no longer valid - falls back to DagPrimary
         std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
         assert_eq!(
             env_consensus_mode(),
-            ConsensusMode::Legacy0,
-            "T78.9: explicit legacy mode should override devnet-safe default"
+            ConsensusMode::DagPrimary,
+            "T81.5: hotstuff is no longer valid, should fall back to DagPrimary"
         );
         
-        // Explicitly set dag-hybrid mode
+        // Explicitly set dag-hybrid mode - still works
         std::env::set_var("EEZO_CONSENSUS_MODE", "dag-hybrid");
         assert_eq!(
             env_consensus_mode(),
