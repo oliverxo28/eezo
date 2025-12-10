@@ -244,13 +244,13 @@ async fn dag_primary_health_handler(
 ) -> (StatusCode, Json<crate::dag_primary_health::HealthResult>) {
     use crate::dag_primary_health::{check_dag_primary_health, read_dag_primary_metrics};
 
-    // Read current metric values from Prometheus registry
-    let (consensus_mode, shadow_checks, txs_included) = read_dag_primary_metrics();
+    // Read current metric values from Prometheus registry (DAG-only per T81.2)
+    let (consensus_mode, block_height, txs_included) = read_dag_primary_metrics();
 
     // Compute health result using the state tracker
     let result = check_dag_primary_health(
         consensus_mode,
-        shadow_checks,
+        block_height,
         txs_included,
         &state.dag_primary_health_state,
     );
@@ -1306,24 +1306,6 @@ fn env_dag_ordering_enabled() -> bool {
             }
             Err(_) => default_enabled,
         }
-    }
-}
-
-/// T78.5: Parse EEZO_DAG_PRIMARY_SHADOW_ENABLED environment variable.
-///
-/// Returns `true` if the env var is set to "1".
-/// Returns `false` otherwise (including when unset or set to "0").
-///
-/// This flag enables the shadow HotStuff checker in dag-primary mode.
-/// When enabled, the checker runs after each committed block and verifies:
-/// - Height monotonicity (no regress, no duplicates)
-/// - Basic consistency checks
-///
-/// Only effective when EEZO_CONSENSUS_MODE=dag-primary.
-fn env_dag_primary_shadow_enabled() -> bool {
-    match env::var("EEZO_DAG_PRIMARY_SHADOW_ENABLED") {
-        Ok(raw) => raw.trim() == "1",
-        Err(_) => false,
     }
 }
 

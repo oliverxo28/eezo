@@ -1,12 +1,12 @@
-//! T78.9: DAG-Primary Integration Test
+//! T78.9 / T81.2: DAG-Primary Integration Test (pure DAG semantics)
 //!
-//! This test validates the dag-primary mode with shadow HotStuff checker:
+//! This test validates the dag-primary mode with DAG-only metrics:
 //! - Boots a node in dag-primary mode
 //! - Funds a dev account via faucet
 //! - Submits 10 signed transactions
 //! - Verifies:
 //!   - eezo_txs_included_total >= 10
-//!   - eezo_dag_primary_shadow_checks_total > 0
+//!   - eezo_block_height > 0 (blocks flowing)
 //!   - eezo_consensus_mode_active == 3 (dag-primary)
 //!
 //! This test runs with devnet-safe (no unsigned transactions allowed).
@@ -123,22 +123,22 @@ fn submit_tx(port: u16, tx_json: &serde_json::Value) -> bool {
     }
 }
 
-/// T78.9: Integration test for dag-primary mode with signed transactions.
+/// T78.9 / T81.2: Integration test for dag-primary mode with signed transactions.
 ///
 /// This test:
-/// 1. Boots a node in dag-primary mode with shadow checker enabled
+/// 1. Boots a node in dag-primary mode (pure DAG semantics)
 /// 2. Funds a dev account via faucet
 /// 3. Submits 10 signed transactions
-/// 4. Waits for blocks and verifies metrics
+/// 4. Waits for blocks and verifies DAG-only metrics
 ///
 /// Requirements:
 /// - Must use devnet-safe (no unsigned tx support)
 /// - eezo_consensus_mode_active == 3 (dag-primary)
-/// - eezo_dag_primary_shadow_checks_total > 0 (shadow checker running)
+/// - eezo_block_height > 0 (blocks flowing)
 /// - eezo_txs_included_total >= 10 (transactions included)
 #[test]
 #[ignore = "requires dag-primary build with pq44-runtime,dag-consensus,metrics features"]
-fn t78_dag_primary_shadow_checker_integration() {
+fn t78_dag_primary_integration() {
     let port: u16 = 18900;
     let metrics_port: u16 = 9900;
     let datadir = format!("/tmp/t78_dag_primary_test_{}", port);
@@ -160,7 +160,7 @@ fn t78_dag_primary_shadow_checker_integration() {
     let signer = TxSigner::new();
     println!("Generated keypair: sender=0x{}", hex::encode(signer.address));
     
-    // Spawn node in dag-primary mode with shadow checker enabled
+    // Spawn node in dag-primary mode (pure DAG semantics per T81.2)
     // Note: metrics bind is configured via EEZO_METRICS_BIND env var, not CLI flag
     let metrics_bind = format!("127.0.0.1:{}", metrics_port);
     let mut child = common::spawn_node_with_env(
@@ -174,7 +174,6 @@ fn t78_dag_primary_shadow_checker_integration() {
             ("EEZO_METRICS_BIND", &metrics_bind),
             ("EEZO_CONSENSUS_MODE", "dag-primary"),
             ("EEZO_DAG_ORDERING_ENABLED", "1"),
-            ("EEZO_DAG_PRIMARY_SHADOW_ENABLED", "1"),
             ("EEZO_HYBRID_STRICT_PROFILE", "1"),
             ("EEZO_EXECUTOR_MODE", "stm"),
             ("EEZO_EXEC_LANES", "16"),
@@ -243,25 +242,24 @@ fn t78_dag_primary_shadow_checker_integration() {
     }
     println!("Transaction inclusion verified: >= 10 txs included");
     
-    // Verify shadow checker is running (shadow_checks_total > 0)
-    if !common::wait_until_metric_gt_zero(metrics_port, "eezo_dag_primary_shadow_checks_total", 10_000) {
-        println!("Shadow checker not running");
+    // Verify block height is increasing (DAG-only liveness check per T81.2)
+    if !common::wait_until_metric_gt_zero(metrics_port, "eezo_block_height", 10_000) {
+        println!("Block height not increasing");
         child.kill();
-        panic!("Shadow checker metric check failed");
+        panic!("Block height check failed");
     }
-    println!("Shadow checker verified: > 0 checks performed");
+    println!("Block height verified: > 0 blocks produced");
     
-    // Print final metrics summary
+    // Print final DAG-only metrics summary
     if let Some(v) = common::get_metric_value(metrics_port, "eezo_txs_included_total") {
         println!("Final: eezo_txs_included_total = {}", v);
     }
-    if let Some(v) = common::get_metric_value(metrics_port, "eezo_dag_primary_shadow_checks_total") {
-        println!("Final: eezo_dag_primary_shadow_checks_total = {}", v);
+    if let Some(v) = common::get_metric_value(metrics_port, "eezo_block_height") {
+        println!("Final: eezo_block_height = {}", v);
     }
-    if let Some(v) = common::get_metric_value(metrics_port, "eezo_dag_primary_shadow_mismatch_total") {
-        println!("Final: eezo_dag_primary_shadow_mismatch_total = {}", v);
-        // Verify no mismatches
-        assert_eq!(v, 0, "Should have 0 shadow mismatches");
+    if let Some(v) = common::get_metric_value(metrics_port, "eezo_consensus_mode_active") {
+        println!("Final: eezo_consensus_mode_active = {}", v);
+        assert_eq!(v, 3, "Should be in dag-primary mode (3)");
     }
     
     // Clean up

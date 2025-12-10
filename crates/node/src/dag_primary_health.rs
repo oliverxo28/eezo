@@ -1,15 +1,26 @@
-//! T79.0: dag-primary health probe
+//! T79.0 / T81.2: dag-primary health probe (pure DAG semantics)
 //!
 //! This module provides a health endpoint for dag-primary mode that checks:
 //! - Consensus mode is dag-primary (eezo_consensus_mode_active == 3)
-//! - Shadow checker is active (shadow_checks_total increased recently)
+//! - Block height is increasing (blocks flowing in the configured window)
 //! - Transactions are being included (txs_included_total increased recently)
 //!
 //! The health check is designed for k8s readiness/liveness probes.
+//!
+//! ## DAG-only Health Semantics (T81.2)
+//!
+//! The health endpoint returns:
+//! - **healthy** when:
+//!   - consensus mode is dag-primary (3)
+//!   - blocks are flowing (block height increasing within window)
+//!   - transactions are being included (txs included counter increasing)
+//!
+//! - **degraded** only for DAG-specific reasons:
+//!   - `wrong_mode`: consensus mode is not dag-primary
+//!   - `no_blocks_recently`: block height not increasing within window
+//!   - `no_txs_recently`: transactions not being included within window
 
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
-use std::sync::Arc;
 use serde::Serialize;
 
 /// Default window in seconds for "activity must increase" checks.
@@ -47,8 +58,8 @@ impl Default for MetricSnapshot {
 /// In-memory state for tracking metric changes over time.
 /// This is used to determine if metrics are increasing within the health window.
 pub struct DagPrimaryHealthState {
-    /// Last seen shadow_checks_total value.
-    shadow_checks: parking_lot::RwLock<MetricSnapshot>,
+    /// Last seen block_height value (DAG-based liveness indicator).
+    block_height: parking_lot::RwLock<MetricSnapshot>,
     /// Last seen txs_included_total value.
     txs_included: parking_lot::RwLock<MetricSnapshot>,
     /// Window duration for activity checks.
@@ -65,7 +76,7 @@ impl DagPrimaryHealthState {
     /// Create a new health state tracker with default window.
     pub fn new() -> Self {
         Self {
-            shadow_checks: parking_lot::RwLock::new(MetricSnapshot::default()),
+            block_height: parking_lot::RwLock::new(MetricSnapshot::default()),
             txs_included: parking_lot::RwLock::new(MetricSnapshot::default()),
             window: Duration::from_secs(get_window_secs()),
         }
@@ -74,15 +85,15 @@ impl DagPrimaryHealthState {
     /// Create a new health state tracker with custom window.
     pub fn with_window(window_secs: u64) -> Self {
         Self {
-            shadow_checks: parking_lot::RwLock::new(MetricSnapshot::default()),
+            block_height: parking_lot::RwLock::new(MetricSnapshot::default()),
             txs_included: parking_lot::RwLock::new(MetricSnapshot::default()),
             window: Duration::from_secs(window_secs),
         }
     }
 
-    /// Update the shadow_checks snapshot if the value has changed.
-    pub fn update_shadow_checks(&self, value: i64) {
-        let mut guard = self.shadow_checks.write();
+    /// Update the block_height snapshot if the value has changed.
+    pub fn update_block_height(&self, value: i64) {
+        let mut guard = self.block_height.write();
         if value != guard.value {
             guard.value = value;
             guard.timestamp = Instant::now();
@@ -98,15 +109,15 @@ impl DagPrimaryHealthState {
         }
     }
 
-    /// Check if shadow_checks has increased within the window.
+    /// Check if block_height has increased within the window.
     /// 
     /// Returns true only if:
     /// - The metric value is > 0 (activity has started)
     /// - The metric value has changed within the last `window` duration
     /// 
     /// This ensures we detect both initial activity and ongoing liveness.
-    pub fn shadow_checks_active(&self) -> bool {
-        let guard = self.shadow_checks.read();
+    pub fn block_height_active(&self) -> bool {
+        let guard = self.block_height.read();
         guard.value > 0 && guard.timestamp.elapsed() < self.window
     }
 
@@ -122,9 +133,9 @@ impl DagPrimaryHealthState {
         guard.value > 0 && guard.timestamp.elapsed() < self.window
     }
 
-    /// Get current shadow_checks value.
-    pub fn shadow_checks_value(&self) -> i64 {
-        self.shadow_checks.read().value
+    /// Get current block_height value.
+    pub fn block_height_value(&self) -> i64 {
+        self.block_height.read().value
     }
 
     /// Get current txs_included value.
@@ -141,12 +152,15 @@ pub enum HealthStatus {
     Degraded,
 }
 
-/// Reason for degraded health.
+/// Reason for degraded health (DAG-only reasons per T81.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DegradedReason {
+    /// Consensus mode is not dag-primary.
     WrongMode,
-    NoShadowChecksRecently,
+    /// Block height not increasing within the configured window.
+    NoBlocksRecently,
+    /// Transactions not being included within the configured window.
     NoTxsRecently,
 }
 
@@ -156,10 +170,10 @@ pub struct HealthResult {
     pub status: HealthStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<DegradedReason>,
-    /// Current consensus mode value (0=hotstuff, 1=hybrid, 2=dag, 3=dag-primary).
+    /// Current consensus mode value (3=dag-primary for healthy).
     pub consensus_mode: i64,
-    /// Current shadow_checks_total value.
-    pub shadow_checks_total: i64,
+    /// Current block height (DAG liveness indicator).
+    pub block_height: i64,
     /// Current txs_included_total value.
     pub txs_included_total: i64,
     /// Health window in seconds.
@@ -168,12 +182,12 @@ pub struct HealthResult {
 
 impl HealthResult {
     /// Create a healthy result.
-    pub fn healthy(consensus_mode: i64, shadow_checks: i64, txs_included: i64, window_secs: u64) -> Self {
+    pub fn healthy(consensus_mode: i64, block_height: i64, txs_included: i64, window_secs: u64) -> Self {
         Self {
             status: HealthStatus::Healthy,
             reason: None,
             consensus_mode,
-            shadow_checks_total: shadow_checks,
+            block_height,
             txs_included_total: txs_included,
             window_secs,
         }
@@ -183,7 +197,7 @@ impl HealthResult {
     pub fn degraded(
         reason: DegradedReason,
         consensus_mode: i64,
-        shadow_checks: i64,
+        block_height: i64,
         txs_included: i64,
         window_secs: u64,
     ) -> Self {
@@ -191,7 +205,7 @@ impl HealthResult {
             status: HealthStatus::Degraded,
             reason: Some(reason),
             consensus_mode,
-            shadow_checks_total: shadow_checks,
+            block_height,
             txs_included_total: txs_included,
             window_secs,
         }
@@ -206,10 +220,11 @@ impl HealthResult {
 /// Check dag-primary health by reading current metrics and comparing with state.
 ///
 /// This function is the core health logic that can be unit tested.
+/// Uses pure DAG semantics (T81.2): checks block height and tx inclusion activity.
 ///
 /// # Arguments
 /// * `consensus_mode` - Current eezo_consensus_mode_active gauge value
-/// * `shadow_checks_total` - Current eezo_dag_primary_shadow_checks_total counter value
+/// * `block_height` - Current eezo_block_height gauge value (DAG liveness indicator)
 /// * `txs_included_total` - Current eezo_txs_included_total counter value
 /// * `state` - The in-memory state tracker for detecting recent activity
 ///
@@ -217,14 +232,14 @@ impl HealthResult {
 /// A `HealthResult` indicating healthy or degraded status with reason.
 pub fn check_dag_primary_health(
     consensus_mode: i64,
-    shadow_checks_total: i64,
+    block_height: i64,
     txs_included_total: i64,
     state: &DagPrimaryHealthState,
 ) -> HealthResult {
     let window_secs = state.window.as_secs();
 
     // Update state with current values
-    state.update_shadow_checks(shadow_checks_total);
+    state.update_block_height(block_height);
     state.update_txs_included(txs_included_total);
 
     // Check 1: Consensus mode must be dag-primary (3)
@@ -232,18 +247,18 @@ pub fn check_dag_primary_health(
         return HealthResult::degraded(
             DegradedReason::WrongMode,
             consensus_mode,
-            shadow_checks_total,
+            block_height,
             txs_included_total,
             window_secs,
         );
     }
 
-    // Check 2: Shadow checker must be active (value increased recently)
-    if !state.shadow_checks_active() {
+    // Check 2: Block height must be active (increasing within window)
+    if !state.block_height_active() {
         return HealthResult::degraded(
-            DegradedReason::NoShadowChecksRecently,
+            DegradedReason::NoBlocksRecently,
             consensus_mode,
-            shadow_checks_total,
+            block_height,
             txs_included_total,
             window_secs,
         );
@@ -254,7 +269,7 @@ pub fn check_dag_primary_health(
         return HealthResult::degraded(
             DegradedReason::NoTxsRecently,
             consensus_mode,
-            shadow_checks_total,
+            block_height,
             txs_included_total,
             window_secs,
         );
@@ -263,7 +278,7 @@ pub fn check_dag_primary_health(
     // All checks passed
     HealthResult::healthy(
         consensus_mode,
-        shadow_checks_total,
+        block_height,
         txs_included_total,
         window_secs,
     )
@@ -271,19 +286,20 @@ pub fn check_dag_primary_health(
 
 /// Read current metric values from Prometheus registry.
 ///
-/// Returns (consensus_mode, shadow_checks_total, txs_included_total).
+/// Returns (consensus_mode, block_height, txs_included_total).
+/// Uses DAG-only metrics per T81.2.
 #[cfg(feature = "metrics")]
 pub fn read_dag_primary_metrics() -> (i64, i64, i64) {
     // Read consensus mode gauge
     let consensus_mode = crate::metrics::EEZO_CONSENSUS_MODE_ACTIVE.get();
 
-    // Read shadow checks counter
-    let shadow_checks = crate::metrics::EEZO_DAG_PRIMARY_SHADOW_CHECKS_TOTAL.get() as i64;
+    // Read block height gauge (DAG liveness indicator)
+    let block_height = crate::metrics::EEZO_BLOCK_HEIGHT.get();
 
     // Read txs included counter (from ledger crate)
     let txs_included = eezo_ledger::metrics::TXS_INCLUDED_TOTAL.get() as i64;
 
-    (consensus_mode, shadow_checks, txs_included)
+    (consensus_mode, block_height, txs_included)
 }
 
 /// Fallback when metrics feature is disabled.
@@ -305,8 +321,8 @@ mod tests {
     fn test_healthy_when_all_conditions_met() {
         let state = DagPrimaryHealthState::with_window(60);
         
-        // First update to set initial values
-        state.update_shadow_checks(10);
+        // First update to set initial values (DAG-only: block height and txs)
+        state.update_block_height(10);
         state.update_txs_included(100);
         
         let result = check_dag_primary_health(3, 10, 100, &state);
@@ -320,7 +336,7 @@ mod tests {
     #[test]
     fn test_degraded_wrong_mode() {
         let state = DagPrimaryHealthState::with_window(60);
-        state.update_shadow_checks(10);
+        state.update_block_height(10);
         state.update_txs_included(100);
         
         // Mode 1 = hybrid, not dag-primary
@@ -332,20 +348,20 @@ mod tests {
     }
 
     #[test]
-    fn test_degraded_no_shadow_checks() {
+    fn test_degraded_no_blocks_recently() {
         let state = DagPrimaryHealthState::with_window(60);
         
-        // Shadow checks at 0
+        // Block height at 0 means no blocks produced
         let result = check_dag_primary_health(3, 0, 100, &state);
         
         assert!(!result.is_healthy());
-        assert_eq!(result.reason, Some(DegradedReason::NoShadowChecksRecently));
+        assert_eq!(result.reason, Some(DegradedReason::NoBlocksRecently));
     }
 
     #[test]
     fn test_degraded_no_txs() {
         let state = DagPrimaryHealthState::with_window(60);
-        state.update_shadow_checks(10);
+        state.update_block_height(10);
         
         // Txs at 0
         let result = check_dag_primary_health(3, 10, 0, &state);
@@ -358,17 +374,17 @@ mod tests {
     fn test_state_tracks_updates() {
         let state = DagPrimaryHealthState::with_window(60);
         
-        state.update_shadow_checks(5);
-        assert_eq!(state.shadow_checks_value(), 5);
+        state.update_block_height(5);
+        assert_eq!(state.block_height_value(), 5);
         
-        state.update_shadow_checks(10);
-        assert_eq!(state.shadow_checks_value(), 10);
+        state.update_block_height(10);
+        assert_eq!(state.block_height_value(), 10);
         
         // Same value should not update timestamp
-        let before = state.shadow_checks.read().timestamp;
+        let before = state.block_height.read().timestamp;
         std::thread::sleep(std::time::Duration::from_millis(10));
-        state.update_shadow_checks(10);
-        let after = state.shadow_checks.read().timestamp;
+        state.update_block_height(10);
+        let after = state.block_height.read().timestamp;
         assert_eq!(before, after);
     }
 
@@ -383,5 +399,12 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"status\":\"degraded\""));
         assert!(json.contains("\"reason\":\"wrong_mode\""));
+    }
+
+    #[test]
+    fn test_no_blocks_recently_serialization() {
+        let result = HealthResult::degraded(DegradedReason::NoBlocksRecently, 3, 0, 100, 60);
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"reason\":\"no_blocks_recently\""));
     }
 }

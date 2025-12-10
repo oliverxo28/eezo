@@ -2182,25 +2182,23 @@ pub fn register_dag_shadow_metrics() {
 }
 
 // -----------------------------------------------------------------------------
-// T76.1 — DAG Hybrid mode metrics
+// T76.1 / T81.2 — DAG mode metrics (pure DAG semantics)
 // -----------------------------------------------------------------------------
 
-/// Gauge: Active consensus mode (0=hotstuff, 1=hybrid, 2=dag, 3=dag-primary).
+/// Gauge: Active consensus mode (3=dag-primary is the production mode).
 /// Set at startup based on EEZO_CONSENSUS_MODE environment variable.
+/// After T81.2, only dag-primary (3) is supported in production.
 #[cfg(feature = "metrics")]
 pub static EEZO_CONSENSUS_MODE_ACTIVE: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(
         "eezo_consensus_mode_active",
-        "Active consensus mode: 0=hotstuff, 1=hybrid, 2=dag, 3=dag-primary"
+        "Active consensus mode: 3=dag-primary (production)"
     )
     .unwrap()
 });
 
 /// Helper: Set the consensus mode gauge value.
-/// - 0 = Hotstuff (default)
-/// - 1 = Hybrid (dag-hybrid mode with DAG ordering enabled)
-/// - 2 = DAG (full DAG mode)
-/// - 3 = DagPrimary (T78.3: DAG-only with shadow HotStuff)
+/// - 3 = DagPrimary (T81.2: DAG-only production mode)
 #[inline]
 pub fn consensus_mode_active_set(mode: i64) {
     #[cfg(feature = "metrics")]
@@ -2296,10 +2294,6 @@ pub fn register_dag_hybrid_metrics() {
     let _ = &*EEZO_DAG_HYBRID_FALLBACK_TOTAL;
     // T76.12: Register labeled fallback counter
     let _ = &*EEZO_DAG_HYBRID_FALLBACK_REASON_TOTAL;
-    // T78.4: Register dag-primary shadow checker metric
-    let _ = &*EEZO_DAG_PRIMARY_SHADOW_CHECKS_TOTAL;
-    // T78.5: Register shadow mismatch metrics
-    register_t78_shadow_mismatch_metrics();
     // T76.3: Also register the bytes-level metrics
     register_dag_hybrid_bytes_metrics();
     // T76.4: Also register the apply-level metrics
@@ -2870,106 +2864,6 @@ pub fn register_dag_hybrid_dedup_metrics() {
 /// No-op version when metrics feature is disabled.
 #[cfg(not(feature = "metrics"))]
 pub fn register_dag_hybrid_dedup_metrics() {
-    // No metrics to register when the feature is off.
-}
-
-// -----------------------------------------------------------------------------
-// T78.3 — DAG-primary mode shadow checker metrics
-// -----------------------------------------------------------------------------
-
-/// Counter: Total shadow checks performed in dag-primary mode.
-/// Incremented each time the shadow HotStuff/legacy path runs.
-#[cfg(feature = "metrics")]
-pub static EEZO_DAG_PRIMARY_SHADOW_CHECKS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "eezo_dag_primary_shadow_checks_total",
-        "Total shadow HotStuff checks performed in dag-primary mode"
-    )
-    .unwrap()
-});
-
-/// Helper: Increment shadow checks counter.
-#[inline]
-pub fn dag_primary_shadow_checks_inc() {
-    #[cfg(feature = "metrics")]
-    {
-        EEZO_DAG_PRIMARY_SHADOW_CHECKS_TOTAL.inc();
-    }
-}
-
-/// No-op version when metrics feature is disabled.
-#[cfg(not(feature = "metrics"))]
-#[inline]
-pub fn dag_primary_shadow_checks_inc() {
-    // No-op when metrics disabled
-}
-
-// -----------------------------------------------------------------------------
-// T78.5 — DAG-primary shadow checker mismatch metrics
-// -----------------------------------------------------------------------------
-
-/// Counter: Total mismatches detected by the shadow checker in dag-primary mode.
-/// Incremented when any invariant violation is detected (height regress, duplicate, hash mismatch).
-#[cfg(feature = "metrics")]
-pub static EEZO_DAG_PRIMARY_SHADOW_MISMATCH_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "eezo_dag_primary_shadow_mismatch_total",
-        "Total mismatches detected by shadow checker in dag-primary mode"
-    )
-    .unwrap()
-});
-
-/// Counter with labels for mismatch reasons (T78.5).
-/// Labels:
-/// - reason="height_regress" — height went backwards
-/// - reason="height_equal" — duplicate height detected
-/// - reason="hash_mismatch" — block hash or tx-set mismatch
-/// - reason="other" — any other unexpected issue
-#[cfg(feature = "metrics")]
-pub static EEZO_DAG_PRIMARY_SHADOW_MISMATCH_REASON_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "eezo_dag_primary_shadow_mismatch_reason_total",
-        "Shadow checker mismatches (labeled by reason)",
-        &["reason"]
-    )
-    .expect("metric registered")
-});
-
-/// Helper: Increment total mismatch counter.
-#[inline]
-pub fn dag_primary_shadow_mismatch_inc() {
-    #[cfg(feature = "metrics")]
-    {
-        EEZO_DAG_PRIMARY_SHADOW_MISMATCH_TOTAL.inc();
-    }
-}
-
-/// T78.5: Increment mismatch counter with a specific reason label.
-/// Valid reasons: "height_regress", "height_equal", "hash_mismatch", "other"
-#[inline]
-pub fn dag_primary_shadow_mismatch_reason_inc(reason: &str) {
-    #[cfg(feature = "metrics")]
-    {
-        EEZO_DAG_PRIMARY_SHADOW_MISMATCH_REASON_TOTAL
-            .with_label_values(&[reason])
-            .inc();
-    }
-    #[cfg(not(feature = "metrics"))]
-    {
-        let _ = reason;
-    }
-}
-
-/// Eagerly register T78.5 shadow checker mismatch metrics so they appear on /metrics at boot.
-#[cfg(feature = "metrics")]
-pub fn register_t78_shadow_mismatch_metrics() {
-    let _ = &*EEZO_DAG_PRIMARY_SHADOW_MISMATCH_TOTAL;
-    let _ = &*EEZO_DAG_PRIMARY_SHADOW_MISMATCH_REASON_TOTAL;
-}
-
-/// No-op version when metrics feature is disabled.
-#[cfg(not(feature = "metrics"))]
-pub fn register_t78_shadow_mismatch_metrics() {
     // No metrics to register when the feature is off.
 }
 
