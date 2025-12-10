@@ -145,9 +145,9 @@ fn t78_dag_primary_shadow_checker_integration() {
     let genesis_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../genesis.min.json");
     let genesis = genesis_path.to_str().unwrap();
     
-    // Chain ID must match genesis
-    let chain_id_hex = "0000000000000000000000000000000000000001";
+    // Chain ID must match genesis (19 zero bytes followed by 0x01)
     let chain_id_bytes: [u8; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let chain_id_hex = hex::encode(chain_id_bytes);
     
     println!("Starting dag-primary integration test on port {}", port);
     
@@ -164,7 +164,7 @@ fn t78_dag_primary_shadow_checker_integration() {
             "--genesis", genesis,
         ],
         &[
-            ("EEZO_CHAIN_ID", chain_id_hex),
+            ("EEZO_CHAIN_ID", &chain_id_hex),
             ("EEZO_CONSENSUS_MODE", "dag-primary"),
             ("EEZO_DAG_ORDERING_ENABLED", "1"),
             ("EEZO_DAG_PRIMARY_SHADOW_ENABLED", "1"),
