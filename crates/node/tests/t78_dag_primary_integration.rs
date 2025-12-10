@@ -37,7 +37,7 @@ impl TxSigner {
         Self { pk, sk, address }
     }
     
-    /// Sign a transaction and return JSON payload for /submit_tx endpoint
+    /// Sign a transaction and return JSON payload for /tx endpoint
     fn sign_tx(
         &self,
         chain_id: [u8; 20],
@@ -61,12 +61,17 @@ impl TxSigner {
         let sig = detached_sign(&msg, &self.sk);
         let sig_bytes = sig.as_bytes();
         
-        // Build JSON payload for /submit_tx endpoint
+        // Build JSON payload for /tx endpoint (SignedTxEnvelope format)
+        // The endpoint expects: { tx: TransferTx, pubkey: String, sig: String }
         serde_json::json!({
-            "to": format!("0x{}", hex::encode(to)),
-            "amount": amount.to_string(),
-            "fee": fee.to_string(),
-            "nonce": nonce,
+            "tx": {
+                "from": format!("0x{}", hex::encode(self.address)),
+                "to": format!("0x{}", hex::encode(to)),
+                "amount": amount.to_string(),
+                "fee": fee.to_string(),
+                "nonce": nonce.to_string(),
+                "chain_id": format!("0x{}", hex::encode(chain_id))
+            },
             "pubkey": hex::encode(self.pk.as_bytes()),
             "sig": hex::encode(sig_bytes)
         })
@@ -95,9 +100,9 @@ fn fund_address(port: u16, address: &[u8; 20], amount: u128) -> bool {
     }
 }
 
-/// Submit a signed transaction
+/// Submit a signed transaction via POST /tx
 fn submit_tx(port: u16, tx_json: &serde_json::Value) -> bool {
-    let url = format!("http://127.0.0.1:{}/submit_tx", port);
+    let url = format!("http://127.0.0.1:{}/tx", port);
     
     let client = reqwest::blocking::Client::new();
     match client.post(&url).json(tx_json).send() {
