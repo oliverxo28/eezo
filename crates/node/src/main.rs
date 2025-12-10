@@ -118,6 +118,10 @@ mod tx_decode_pool;
 #[cfg(feature = "dag-consensus")]
 mod adaptive_agg;
 
+// T79.0: dag-primary health probe module
+#[cfg(feature = "metrics")]
+mod dag_primary_health;
+
 // T36.6: expose bridge metrics immediately at boot
 // metrics registrars used at boot
 #[cfg(feature = "metrics")]
@@ -236,6 +240,41 @@ async fn ready_handler(State(state): State<AppState>) -> (StatusCode, &'static s
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "degraded")
     }
+}
+
+// T79.0: dag-primary health handler
+// Returns 200 if healthy, 503 if degraded, with JSON body describing status.
+#[cfg(feature = "metrics")]
+async fn dag_primary_health_handler(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<crate::dag_primary_health::HealthResult>) {
+    use crate::dag_primary_health::{check_dag_primary_health, read_dag_primary_metrics};
+
+    // Read current metric values from Prometheus registry
+    let (consensus_mode, shadow_checks, txs_included) = read_dag_primary_metrics();
+
+    // Compute health result using the state tracker
+    let result = check_dag_primary_health(
+        consensus_mode,
+        shadow_checks,
+        txs_included,
+        &state.dag_primary_health_state,
+    );
+
+    // Return appropriate HTTP status code
+    let status_code = if result.is_healthy() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (status_code, Json(result))
+}
+
+// Fallback when metrics feature is disabled
+#[cfg(not(feature = "metrics"))]
+async fn dag_primary_health_handler() -> (StatusCode, &'static str) {
+    (StatusCode::NOT_IMPLEMENTED, "metrics feature disabled")
 }
 
 async fn admin_degrade(
@@ -1471,6 +1510,10 @@ struct AppState {
     // Used by GET /dag/ordered_head endpoint to show queue visibility.
     #[cfg(feature = "dag-consensus")]
     hybrid_dag: Option<Arc<crate::dag_consensus_runner::HybridDagHandle>>,
+    // T79.0: dag-primary health state tracker
+    // Used by GET /health/dag_primary endpoint to track metric activity.
+    #[cfg(feature = "metrics")]
+    dag_primary_health_state: Arc<crate::dag_primary_health::DagPrimaryHealthState>,
 }
 
 struct RecentBlocks {
@@ -3969,6 +4012,9 @@ async fn main() -> anyhow::Result<()> {
         // T76.2: Hybrid DAG handle (only when dag-consensus feature is enabled)
         #[cfg(feature = "dag-consensus")]
         hybrid_dag: hybrid_dag_for_state,
+        // T79.0: dag-primary health state tracker
+        #[cfg(feature = "metrics")]
+        dag_primary_health_state: Arc::new(crate::dag_primary_health::DagPrimaryHealthState::new()),
     };
     println!(
         "✅ AppState initialized: ready_flag={}, version={}, git_sha={:?}",
@@ -4128,6 +4174,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/healthz", get(health_handler))
+        // T79.0: dag-primary health endpoint
+        .route("/health/dag_primary", get(dag_primary_health_handler))
         .route("/ready", get(ready_handler))
         // ── T36.2: consensus endpoints (only when testing the adapter) ──
         .route(
