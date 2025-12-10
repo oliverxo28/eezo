@@ -1333,4 +1333,112 @@ mod tests {
         
         assert_eq!(mp.len(), 0);
     }
+
+    // =========================================================================
+    // T78.9: Nonce gap WARN log trigger condition test
+    // =========================================================================
+
+    /// T78.9: Test that nonce gap detection correctly identifies senders with gaps.
+    /// This validates the conditions that trigger the WARN log in drain_for_block.
+    /// The WARN log is triggered when:
+    /// - candidates.is_empty() on first iteration
+    /// - per_sender is not empty (there are pending txs)
+    /// - sender's lowest nonce != expected nonce (gap exists)
+    #[test]
+    fn drain_for_block_nonce_gap_detection() {
+        let mut mp = test_mempool();
+        let mut accounts = Accounts::default();
+        
+        // Sender 1: Has a nonce gap (pending nonces 7, 8, 9 but expected 0)
+        let (_, sender1) = test_tx(0xAA, 0);
+        accounts.credit(sender1, 10_000);
+        
+        // Sender 2: Has a nonce gap (pending nonces 10, 11 but expected 0)
+        let (_, sender2) = test_tx(0xBB, 0);
+        accounts.credit(sender2, 10_000);
+        
+        // Insert txs with gaps (no nonce 0 for either sender)
+        let q1 = mp.per_sender.entry(sender1).or_default();
+        q1.pending.insert(7, make_entry_now(test_tx(0xAA, 7).0, 100));
+        q1.pending.insert(8, make_entry_now(test_tx(0xAA, 8).0, 100));
+        q1.pending.insert(9, make_entry_now(test_tx(0xAA, 9).0, 100));
+        
+        let q2 = mp.per_sender.entry(sender2).or_default();
+        q2.pending.insert(10, make_entry_now(test_tx(0xBB, 10).0, 100));
+        q2.pending.insert(11, make_entry_now(test_tx(0xBB, 11).0, 100));
+        
+        assert_eq!(mp.len(), 5);
+        assert_eq!(mp.per_sender.len(), 2);
+        
+        // Drain should get nothing (all senders have nonce gaps)
+        // This is the condition that triggers WARN log
+        let drained = mp.drain_for_block(10_000, &accounts);
+        assert_eq!(drained.len(), 0, "Should drain nothing due to nonce gaps for all senders");
+        
+        // Mempool should still have all 5 txs
+        assert_eq!(mp.len(), 5);
+        
+        // Now verify the gap detection logic by checking what the drain loop would see:
+        // For sender1: expected nonce = 0, lowest pending = 7 → gap
+        // For sender2: expected nonce = 0, lowest pending = 10 → gap
+        let acc1 = accounts.get(&sender1);
+        let acc2 = accounts.get(&sender2);
+        assert_eq!(acc1.nonce, 0, "Expected nonce for sender1 is 0");
+        assert_eq!(acc2.nonce, 0, "Expected nonce for sender2 is 0");
+        
+        let lowest1 = mp.per_sender.get(&sender1).unwrap().pending.iter().next().unwrap().0;
+        let lowest2 = mp.per_sender.get(&sender2).unwrap().pending.iter().next().unwrap().0;
+        assert_eq!(*lowest1, 7, "Lowest nonce for sender1 is 7");
+        assert_eq!(*lowest2, 10, "Lowest nonce for sender2 is 10");
+        
+        // These assertions verify the WARN log conditions are met
+        assert_ne!(*lowest1, acc1.nonce, "Gap exists for sender1");
+        assert_ne!(*lowest2, acc2.nonce, "Gap exists for sender2");
+    }
+
+    /// T78.9: Test contiguous segments drain normally, even across multiple blocks.
+    /// Validates the 0→7, 7→11 scenario from requirements.
+    #[test]
+    fn drain_contiguous_segments_multi_block() {
+        let mut mp = test_mempool();
+        let mut accounts = Accounts::default();
+        
+        let (_, sender) = test_tx(0xCC, 0);
+        accounts.credit(sender, 100_000);
+        
+        // Insert nonces 0-7 (first segment)
+        let q = mp.per_sender.entry(sender).or_default();
+        for nonce in 0..=7 {
+            q.pending.insert(nonce, make_entry_now(test_tx(0xCC, nonce).0, 100));
+        }
+        
+        // Also insert nonces 8-11 (second segment, contiguous)
+        for nonce in 8..=11 {
+            q.pending.insert(nonce, make_entry_now(test_tx(0xCC, nonce).0, 100));
+        }
+        
+        assert_eq!(mp.len(), 12);
+        
+        // First drain: should get [0-7]
+        let drained1 = mp.drain_for_block(1000, &accounts); // Budget for ~10 txs at 100 bytes
+        assert_eq!(drained1.len(), 8, "Should drain [0-7] in first block");
+        for (i, tx) in drained1.iter().enumerate() {
+            assert_eq!(tx.core.nonce, i as u64);
+        }
+        
+        // Update account nonce after first block
+        let mut acc = accounts.get(&sender);
+        acc.nonce = 8;
+        accounts.put(sender, acc);
+        
+        // Second drain: should get [8-11] (remaining contiguous segment)
+        let drained2 = mp.drain_for_block(1000, &accounts);
+        assert_eq!(drained2.len(), 4, "Should drain [8-11] in second block");
+        assert_eq!(drained2[0].core.nonce, 8);
+        assert_eq!(drained2[1].core.nonce, 9);
+        assert_eq!(drained2[2].core.nonce, 10);
+        assert_eq!(drained2[3].core.nonce, 11);
+        
+        assert_eq!(mp.len(), 0, "Mempool should be empty");
+    }
 }

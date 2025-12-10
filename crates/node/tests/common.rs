@@ -355,6 +355,80 @@ pub fn wait_until_metric_value(
     false
 }
 
+/// Get the current value of a metric. Returns None if not found.
+#[allow(dead_code)]
+pub fn get_metric_value(port: u16, metric_name: &str) -> Option<i64> {
+    let url = format!("http://127.0.0.1:{}/metrics", port);
+    
+    let resp = reqwest::blocking::get(&url).ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    
+    let text = resp.text().ok()?;
+    for line in text.lines() {
+        // Match exact metric name (followed by space or end of line)
+        // e.g., "eezo_txs_included_total 42" should match "eezo_txs_included_total"
+        if !line.starts_with('#') && line.starts_with(metric_name) {
+            let after_name = &line[metric_name.len()..];
+            // Ensure the next char is whitespace or nothing (exact match)
+            if after_name.is_empty() || after_name.starts_with(' ') || after_name.starts_with('{') {
+                // Handle labeled metrics like foo{label="value"} 123
+                let value_str = if after_name.contains('}') {
+                    after_name.split('}').nth(1)?.split_whitespace().next()?
+                } else {
+                    after_name.split_whitespace().next()?
+                };
+                return value_str.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+/// Poll /metrics on the given port until metric value >= expected, or timeout.
+/// Returns true if the metric reaches or exceeds the expected value within timeout.
+#[allow(dead_code)]
+pub fn wait_until_metric_gte(
+    port: u16,
+    metric_name: &str,
+    min_value: i64,
+    timeout_ms: u64,
+) -> bool {
+    let start = Instant::now();
+    println!(
+        "Polling metrics at port {}, expecting {} >= {}",
+        port, metric_name, min_value
+    );
+
+    while start.elapsed() < Duration::from_millis(timeout_ms) {
+        if let Some(value) = get_metric_value(port, metric_name) {
+            println!("Found {} = {}", metric_name, value);
+            if value >= min_value {
+                return true;
+            }
+        }
+        sleep(Duration::from_millis(200));
+    }
+
+    println!(
+        "Timeout reached: {} did not reach >= {} within {} ms",
+        metric_name, min_value, timeout_ms
+    );
+    false
+}
+
+/// Poll /metrics on the given port until metric value > 0, or timeout.
+/// Returns true if the metric is greater than 0 within timeout.
+#[allow(dead_code)]
+pub fn wait_until_metric_gt_zero(
+    port: u16,
+    metric_name: &str,
+    timeout_ms: u64,
+) -> bool {
+    wait_until_metric_gte(port, metric_name, 1, timeout_ms)
+}
+
 #[allow(dead_code)]
 pub fn kill_child(child: &mut Child) {
     let _ = child.kill();
