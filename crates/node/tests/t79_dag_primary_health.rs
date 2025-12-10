@@ -184,8 +184,8 @@ fn t79_health_endpoint_healthy() {
             ("EEZO_HYBRID_STRICT_PROFILE", "1"),
             ("EEZO_EXECUTOR_MODE", "stm"),
             ("EEZO_EXEC_LANES", "16"),
-            // Short window for faster test
-            ("EEZO_DAG_PRIMARY_HEALTH_WINDOW_SECS", "120"),
+            // Shorter window for faster test
+            ("EEZO_DAG_PRIMARY_HEALTH_WINDOW_SECS", "30"),
         ],
     );
     

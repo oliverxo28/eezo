@@ -27,6 +27,8 @@ fn get_window_secs() -> u64 {
 #[derive(Debug, Clone)]
 struct MetricSnapshot {
     value: i64,
+    /// Timestamp when the value last changed.
+    /// Defaults to a time far in the past so we require actual activity.
     timestamp: Instant,
 }
 
@@ -34,7 +36,10 @@ impl Default for MetricSnapshot {
     fn default() -> Self {
         Self {
             value: 0,
-            timestamp: Instant::now(),
+            // Start with a timestamp far in the past (before node startup).
+            // This ensures we require an actual metric change before considering it "active".
+            // Using checked_sub to handle potential underflow, falling back to now().
+            timestamp: Instant::now().checked_sub(Duration::from_secs(3600)).unwrap_or_else(Instant::now),
         }
     }
 }
@@ -94,12 +99,24 @@ impl DagPrimaryHealthState {
     }
 
     /// Check if shadow_checks has increased within the window.
+    /// 
+    /// Returns true only if:
+    /// - The metric value is > 0 (activity has started)
+    /// - The metric value has changed within the last `window` duration
+    /// 
+    /// This ensures we detect both initial activity and ongoing liveness.
     pub fn shadow_checks_active(&self) -> bool {
         let guard = self.shadow_checks.read();
         guard.value > 0 && guard.timestamp.elapsed() < self.window
     }
 
     /// Check if txs_included has increased within the window.
+    /// 
+    /// Returns true only if:
+    /// - The metric value is > 0 (activity has started)
+    /// - The metric value has changed within the last `window` duration
+    /// 
+    /// This ensures we detect both initial activity and ongoing liveness.
     pub fn txs_included_active(&self) -> bool {
         let guard = self.txs_included.read();
         guard.value > 0 && guard.timestamp.elapsed() < self.window
