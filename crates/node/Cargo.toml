@@ -5,11 +5,11 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Element Zero <dev@elementzero.io>"]
-description = "Element Zero node binary and services — combines ledger, network, and wallet layers."
+description = "Element Zero node binary and services — DAG-based BFT consensus with ledger, network, and wallet layers."
 repository = "https://github.com/elementzero-labs/eezo"
 readme = "README.md"
 categories = ["cryptography", "blockchain", "networking"]
-keywords = ["eezo", "node", "pqc", "blockchain", "hotstuff"]
+keywords = ["eezo", "node", "pqc", "blockchain", "dag-consensus"]
 
 [[bin]]
 name = "eezo-node"
@@ -151,8 +151,16 @@ stm-exec = ["dashmap"]
 # Env: EEZO_DAG_CONSENSUS_MODE=off|shadow (default: off)
 dag-consensus = ["consensus-dag", "consensus-dag/metrics"]
 
-# T78.7: HotStuff shadow checker feature gate.
-# When enabled, the shadow HotStuff checker is available in dag-primary mode.
+# T78.7: HotStuff shadow checker feature gate (LAB/DEBUG ONLY).
+# HotStuff is a LEGACY consensus mechanism. In EEZO production, DAG is the canonical consensus.
+# When enabled, the shadow HotStuff checker is available in dag-primary mode for:
+# - Observability and metrics comparison
+# - Debugging and development validation
+# - Transition verification during DAG cutover
+# The shadow checker ONLY logs and emits metrics — it NEVER:
+# - Decides block finality
+# - Affects block ordering
+# - Causes panics or rollbacks
 # When disabled, HotStuff shadow code is not compiled, reducing binary size.
 # Only effective in dag-primary mode. Has no effect in other consensus modes.
 # Requires dag-consensus feature for the shadow checker to function.
@@ -167,6 +175,18 @@ hotstuff-shadow = ["dag-consensus"]
 # - T78.8: Build profile detection for startup logging and guardrails
 # Use for "official devnet" deployments. For local benchmarks, use dev-unsafe instead.
 devnet-safe = ["pq44-runtime", "metrics", "checkpoints", "dag-consensus", "stm-exec", "eezo-ledger/devnet-safe"]
+
+# T80.0: Pure DAG consensus build profile (DAG-only, no HotStuff code compiled).
+# EEZO's production consensus is pure DAG; this feature excludes all HotStuff code.
+# When enabled:
+# - DAG is the only consensus implementation (no HotStuff types or modules)
+# - Consensus mode is always dag-primary (ignores EEZO_CONSENSUS_MODE for HotStuff modes)
+# - No shadow HotStuff checker (hotstuff-shadow is not included)
+# - Reduced binary size (HotStuff code paths eliminated)
+# - All DAG integration tests pass
+# - Suitable for devnet/testnet/mainnet deployments
+# Build: cargo build --release -p eezo-node --features "dag-only"
+dag-only = ["pq44-runtime", "metrics", "checkpoints", "dag-consensus", "stm-exec", "eezo-ledger/devnet-safe"]
 
 [dev-dependencies]
 tempfile = "3.10"

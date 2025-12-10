@@ -1,6 +1,20 @@
-//! lib.rs — Consensus DAG for EEZO v2
+//! lib.rs — Consensus DAG for EEZO (Production Consensus)
 //!
-//! DAG-backed BFT consensus implementation replacing HotStuff.
+//! # EEZO's Production Consensus
+//!
+//! **DAG is the canonical consensus mechanism for EEZO networks.**
+//!
+//! This crate implements the DAG-backed BFT consensus that provides:
+//! - Block finality and ordering for all EEZO transactions
+//! - Deterministic, replay-safe execution
+//! - Lock-free hot paths for high throughput
+//!
+//! ## T80.0: Pure DAG Cutover
+//!
+//! As of T80.0, DAG is the **sole production consensus** for EEZO:
+//! - HotStuff is legacy (lab/shadow only, never decides finality)
+//! - All devnet/testnet/mainnet deployments use DAG
+//! - Shadow HotStuff checker is optional for observability
 //!
 //! ## Architecture
 //!
@@ -19,6 +33,7 @@
 //! 2. **Replay-safe**: Can replay from genesis
 //! 3. **Compatible**: Works with existing prover/relay
 //! 4. **Lock-free**: No global locks on hot paths
+//! 5. **Production-ready**: Canonical consensus for EEZO networks
 //!
 //! ## Usage
 //!
