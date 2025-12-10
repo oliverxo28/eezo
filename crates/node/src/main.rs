@@ -1178,7 +1178,7 @@ impl ConsensusMode {
 /// - `"dag-primary"`, `"dag_primary"` → DagPrimary (PRODUCTION)
 /// - `"dag-hybrid"`, `"dag_hybrid"` → DagHybrid (transition)
 /// - `"dag"` → Dag (legacy)
-/// - `"hotstuff"`, `"hs"` → **ERROR**: Legacy mode has been removed (T81.4)
+/// - `"hotstuff"`, `"hs"` → **WARNING**: Legacy mode is deprecated (T81.4)
 /// - Unknown strings log a warning and fall back to the default.
 ///
 /// # Build Profile Defaults
