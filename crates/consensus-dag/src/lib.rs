@@ -9,12 +9,12 @@
 //! - Deterministic, replay-safe execution
 //! - Lock-free hot paths for high throughput
 //!
-//! ## T80.0: Pure DAG Cutover
+//! ## T81: DAG-Only Runtime
 //!
-//! As of T80.0, DAG is the **sole production consensus** for EEZO:
-//! - HotStuff is legacy (lab/shadow only, never decides finality)
+//! As of T81, DAG is the **sole production consensus** for EEZO:
 //! - All devnet/testnet/mainnet deployments use DAG
-//! - Shadow HotStuff checker is optional for observability
+//! - No legacy consensus code is compiled in production builds
+//! - The `dag-only` feature provides the cleanest production build
 //!
 //! ## Architecture
 //!

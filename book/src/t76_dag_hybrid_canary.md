@@ -1,18 +1,20 @@
 # T76.12: DAG-Hybrid 7-Day Canary & SLO Runbook
 
+> **Note (T81)**: This document describes the historical DAG-hybrid transition mode. As of T81, EEZO uses pure DAG consensus. See [T81 Consensus History](t81_consensus_history.md) for the current production configuration.
+
 ## Overview
 
-This runbook defines the procedure for running a **7-day canary** of the DAG-Hybrid consensus mode on Element Zero (EEZO). The canary validates that the DAG ordering layer is stable, performant, and ready to become the default consensus mechanism.
+This runbook defines the procedure for running a **7-day canary** of the DAG-Hybrid consensus mode on Element Zero (EEZO). The canary validated that the DAG ordering layer was stable, performant, and ready to become the default consensus mechanism.
 
-### Background
+### Background (Historical)
 
-The DAG-Hybrid mode (`EEZO_CONSENSUS_MODE=dag-hybrid`) introduces a DAG-based transaction ordering layer that runs alongside the existing Hotstuff BFT consensus. In this mode:
+The DAG-Hybrid mode (`EEZO_CONSENSUS_MODE=dag-hybrid`) introduced a DAG-based transaction ordering layer. In this transitional mode:
 
-- Transactions are ordered via DAG consensus
-- Hotstuff provides finality and acts as a fallback if DAG ordering fails
-- The STM (Software Transactional Memory) executor processes transactions in parallel waves
+- Transactions were ordered via DAG consensus
+- Legacy BFT provided finality and acted as a fallback if DAG ordering failed
+- The STM (Software Transactional Memory) executor processed transactions in parallel waves
 
-### Goals
+### Goals (Historical)
 
 1. **Validate stability**: Zero hybrid fallbacks under normal load
 2. **Confirm ordering correctness**: No hash mismatches between DAG and canonical ordering
@@ -20,14 +22,14 @@ The DAG-Hybrid mode (`EEZO_CONSENSUS_MODE=dag-hybrid`) introduces a DAG-based tr
 4. **Measure performance**: Sustained ≥250–400 TPS on development hardware
 5. **Test durability**: No lost/duplicated batches across restarts
 
-### Roadmap Context
+### Roadmap Context (Historical)
 
 | Task | Description |
 |------|-------------|
-| **T76.11** | Current: DAG hybrid aggregation, STM executor, adaptive caps |
-| **T76.12** | This task: Canary runbook and SLO scripts |
-| **T77.x** | Future: Flip default to DAG, eventually remove Hotstuff |
-| **T78.1** | Strict Hybrid DAG Tuning - See [T78 documentation](t78_dag_only_devnet.md) |
+| **T76.11** | DAG hybrid aggregation, STM executor, adaptive caps |
+| **T76.12** | Canary runbook and SLO scripts |
+| **T78** | DAG-primary mode transition |
+| **T81** | Pure DAG consensus (current production) |
 
 ---
 

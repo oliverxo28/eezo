@@ -198,7 +198,6 @@ Use this for **official devnet deployments**. This build:
 - Defaults to `dag-primary` consensus mode when `EEZO_CONSENSUS_MODE` is unset
 - Defaults to `EEZO_DAG_ORDERING_ENABLED=1` behavior when unset
 - Includes STM executor and DAG consensus
-- HotStuff shadow checker only available with `hotstuff-shadow` feature
 
 **Build command (minimal devnet-safe):**
 ```bash
@@ -210,12 +209,6 @@ cargo build -p eezo-node --features "pq44-runtime,checkpoints,metrics,stm-exec,d
 ```bash
 # Using the devnet-safe feature which bundles recommended features
 cargo build -p eezo-node --features "devnet-safe"
-```
-
-**Build command (with HotStuff shadow checker):**
-```bash
-# Devnet-safe with shadow HotStuff for observability
-cargo build -p eezo-node --features "devnet-safe,hotstuff-shadow"
 ```
 
 **Run command:**
@@ -231,8 +224,7 @@ cargo build -p eezo-node --features "devnet-safe,hotstuff-shadow"
 | `dev-unsafe` | ✅ Included | ❌ NOT included |
 | `dag-consensus` | ✅ Included | ✅ Included |
 | `stm-exec` | ✅ Included | ✅ Included |
-| `hotstuff-shadow` | Optional | Optional |
-| Default consensus mode | Hotstuff | DagPrimary |
+| Default consensus mode | Configurable | DagPrimary |
 | Unsigned tx accepted? | Only with env var | **Never** |
 | Suitable for network? | ❌ No | ✅ Yes |
 
@@ -263,11 +255,25 @@ This section provides a comprehensive matrix of EEZO build profiles for differen
 |---------|----------|-------------|---------------------|----------------------|---------------------|
 | **dev-unsafe** | `dev-unsafe` + others | Local TPS benchmarks | Yes (env-gated) | configurable | configurable |
 | **devnet-safe** | `devnet-safe` | Official devnet | **No** | dag-primary | true |
-| **generic** | without dev-unsafe | General/CI builds | **No** | hotstuff | false |
+| **dag-only** | `dag-only` | Production | **No** | dag-primary | true |
 | **testnet** (future) | TBD | Public testnet | **No** | dag-primary | true |
 | **mainnet** (future) | TBD | Production | **No** | dag-primary | true |
 
 ### Build Commands
+
+#### DAG-Only Build (Recommended for Production)
+
+This is the recommended build profile for production deployments:
+
+```bash
+# Pure DAG consensus — recommended for production
+cargo build --release -p eezo-node --features "dag-only"
+```
+
+**Behavior in dag-only build:**
+- `EEZO_CONSENSUS_MODE` is always `dag-primary` (forced)
+- `EEZO_DAG_ORDERING_ENABLED` is always `true` (forced)
+- `EEZO_DEV_ALLOW_UNSIGNED_TX` has **no effect**
 
 #### Devnet-Safe Build (Recommended for Devnet Deployments)
 
@@ -280,16 +286,12 @@ cargo build --release -p eezo-node --features "devnet-safe"
 # Option 2: With explicit features
 cargo build --release -p eezo-node \
   --features "pq44-runtime,persistence,checkpoints,metrics,stm-exec,dag-consensus,devnet-safe"
-
-# Option 3: With HotStuff shadow checker for additional observability
-cargo build --release -p eezo-node --features "devnet-safe,hotstuff-shadow"
 ```
 
 **Behavior in devnet-safe build:**
 - `EEZO_CONSENSUS_MODE` defaults to `dag-primary` when unset
 - `EEZO_DAG_ORDERING_ENABLED` defaults to `true` when unset
 - `EEZO_DEV_ALLOW_UNSIGNED_TX` has **no effect** (warning logged if set)
-- Shadow HotStuff checker available with `hotstuff-shadow` feature
 
 **Run command (minimal config needed):**
 ```bash
@@ -337,20 +339,21 @@ curl -s http://localhost:3030/metrics | grep eezo_consensus_mode_active
 
 ### Safety Guarantees
 
-| Feature | dev-unsafe | devnet-safe | generic |
-|---------|-----------|-------------|---------|
+| Feature | dev-unsafe | devnet-safe | dag-only |
+|---------|-----------|-------------|----------|
 | `EEZO_DEV_ALLOW_UNSIGNED_TX` works | ✅ Yes | ❌ No | ❌ No |
 | Unsigned tx accepted | ✅ With env var | ❌ Never | ❌ Never |
 | Signature bypass available | ✅ Yes | ❌ No | ❌ No |
-| Safe for devnet | ❌ No | ✅ Yes | ⚠️ Limited |
+| Safe for devnet | ❌ No | ✅ Yes | ✅ Yes |
 | Safe for testnet/mainnet | ❌ No | ✅ Yes | ✅ Yes |
 
 ### Key Takeaways
 
-1. **Default devnet deployments** should use `--features devnet-safe`
-2. **Never deploy** a `dev-unsafe` build to any network
-3. **If you see `[DEV-UNSAFE]` warnings** in your logs, you have the wrong build for network deployment
-4. **Setting `EEZO_DEV_ALLOW_UNSIGNED_TX=1`** on a devnet-safe build will:
+1. **Default production deployments** should use `--features dag-only`
+2. **Default devnet deployments** should use `--features devnet-safe`
+3. **Never deploy** a `dev-unsafe` build to any network
+4. **If you see `[DEV-UNSAFE]` warnings** in your logs, you have the wrong build for network deployment
+5. **Setting `EEZO_DEV_ALLOW_UNSIGNED_TX=1`** on a devnet-safe/dag-only build will:
    - Log a loud warning at startup
    - Have **no effect** on transaction processing
    - Unsigned transactions will still be rejected
@@ -365,9 +368,9 @@ T78.9 locks in `devnet-safe + dag-primary + dag-ordering-enabled` as the **offic
 
 | Profile | Use Case | Unsigned TX? | Default Consensus | DAG Ordering |
 |---------|----------|-------------|-------------------|--------------|
+| **dag-only** (Production) | Production deployments | ❌ Never | dag-primary | true |
 | **devnet-safe** (Official) | Devnet deployments | ❌ Never | dag-primary | true |
 | **dev-unsafe** | Local TPS benchmarks | ✅ With env var | configurable | configurable |
-| **generic** | CI/general builds | ❌ Never | hotstuff | false |
 
 ### Official Devnet Profile: devnet-safe
 
@@ -376,7 +379,6 @@ This is the **recommended profile for all devnet deployments**. It provides:
 - **DAG-primary consensus** as default (when `EEZO_CONSENSUS_MODE` is unset)
 - **DAG ordering enabled** by default (when `EEZO_DAG_ORDERING_ENABLED` is unset)
 - **No unsigned transaction support** (even if `EEZO_DEV_ALLOW_UNSIGNED_TX=1` is set)
-- Shadow HotStuff checker available with `hotstuff-shadow` feature
 - STM executor and DAG consensus included
 
 **Build Command (devnet-safe):**
@@ -385,8 +387,8 @@ This is the **recommended profile for all devnet deployments**. It provides:
 cargo build --release -p eezo-node \
   --features "devnet-safe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
 
-# Option 2: With HotStuff shadow checker for additional observability
-cargo build --release -p eezo-node --features "devnet-safe,hotstuff-shadow"
+# Option 2: Using dag-only for production
+cargo build --release -p eezo-node --features "dag-only"
 ```
 
 **Run Command (devnet-safe):**
@@ -424,20 +426,20 @@ export EEZO_DAG_ORDERING_ENABLED=1
 
 | Scenario | Profile | Build Features |
 |----------|---------|----------------|
+| Production deployment | **dag-only** | `dag-only` |
 | Official devnet deployment | **devnet-safe** | `devnet-safe,metrics,...` |
 | Local TPS benchmark (unsigned tx) | **dev-unsafe** | `dev-unsafe,metrics,...` |
-| CI/testing (signed tx only) | **generic** | `pq44-runtime,metrics,...` |
-| Testnet/Mainnet (future) | **devnet-safe** or custom | No dev-unsafe |
+| CI/testing (signed tx only) | **devnet-safe** | `devnet-safe,metrics,...` |
 
 ### T78.9 Environment Variable Defaults
 
-When running with the devnet-safe feature:
+When running with the devnet-safe or dag-only feature:
 
-| Variable | Devnet-Safe Default | Dev-Unsafe Default |
-|----------|--------------------|--------------------|
-| `EEZO_CONSENSUS_MODE` | `dag-primary` | (unset = hotstuff) |
-| `EEZO_DAG_ORDERING_ENABLED` | `true` | `false` |
-| `EEZO_DEV_ALLOW_UNSIGNED_TX` | **No effect** | Works when `=1` |
+| Variable | dag-only Default | Devnet-Safe Default | Dev-Unsafe Default |
+|----------|-----------------|--------------------|--------------------|
+| `EEZO_CONSENSUS_MODE` | `dag-primary` (forced) | `dag-primary` | configurable |
+| `EEZO_DAG_ORDERING_ENABLED` | `true` (forced) | `true` | configurable |
+| `EEZO_DEV_ALLOW_UNSIGNED_TX` | **No effect** | **No effect** | Works when `=1` |
 
 ### Official Devnet Run Commands
 
@@ -464,6 +466,4 @@ curl -X POST http://127.0.0.1:8080/faucet \
 
 **Expected metrics for devnet-safe:**
 - `eezo_consensus_mode_active = 3` (dag-primary)
-- `eezo_dag_primary_shadow_checks_total > 0` and increasing
-- `eezo_dag_primary_shadow_mismatch_total = 0`
 - No `[DEV-UNSAFE]` warnings in node logs
