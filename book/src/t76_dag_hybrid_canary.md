@@ -41,8 +41,9 @@ Create or update your environment file (e.g., `devnet.env`):
 
 ```bash
 # --- Core Consensus Mode ---
-# Enable DAG-Hybrid mode (0=hotstuff, 1=hybrid, 2=dag)
-export EEZO_CONSENSUS_MODE=dag-hybrid
+# T81.5: EEZO is DAG-only. Supported modes: dag-primary, dag-hybrid, dag
+# NOTE: "hotstuff" and "hs" are NO LONGER VALID and will be rejected.
+export EEZO_CONSENSUS_MODE=dag-primary
 
 # Enable DAG ordering layer
 export EEZO_DAG_ORDERING_ENABLED=1
@@ -431,25 +432,12 @@ curl -s http://127.0.0.1:9898/metrics | grep eezo_dag_shadow
 
 ### Rollback to Pure Hotstuff
 
-If critical issues are discovered, rollback immediately:
+If critical issues are discovered, there is no rollback to "hotstuff" mode since T81.5.
+The only recovery option is to investigate and fix the DAG consensus issue.
 
-```bash
-# Stop the node
-pkill -f eezo-node  # Or use proper service stop
-
-# Switch to pure Hotstuff mode
-export EEZO_CONSENSUS_MODE=hotstuff
-export EEZO_DAG_ORDERING_ENABLED=0
-
-# Restart
-./target/release/eezo-node
-```
-
-Verify rollback:
-```bash
-curl -s http://127.0.0.1:9898/metrics | grep eezo_consensus_mode_active
-# Expected: eezo_consensus_mode_active 0  (0 = hotstuff)
-```
+> **Historical Note (pre-T81.5):** Prior to T81.5, a rollback to legacy hotstuff mode was
+> possible. This option has been removed. EEZO is now DAG-only. If you encounter consensus
+> issues, please report them with logs and metric snapshots.
 
 ---
 
@@ -457,21 +445,18 @@ curl -s http://127.0.0.1:9898/metrics | grep eezo_consensus_mode_active
 
 After the 7-day canary passes all SLOs:
 
-1. **T77.0**: Flip default consensus mode to DAG-Hybrid
-   - Change default `EEZO_CONSENSUS_MODE` from `hotstuff` to `dag-hybrid`
-   - Update documentation and deployment guides
+1. **T77.0**: ✅ Completed — Default consensus mode is now DAG-primary
+   - `EEZO_CONSENSUS_MODE=dag-primary` is the production default
+   - Documentation updated
 
-2. **T77.1**: Extended canary on testnet
-   - Run 30-day canary on public testnet
-   - Monitor with external validators
+2. **T77.1**: ✅ Completed — Extended canary on testnet passed
 
-3. **T77.2**: Mainnet rollout
-   - Gradual rollout with feature flags
-   - Canary percentage: 10% → 50% → 100%
+3. **T77.2**: ✅ Completed — Mainnet rollout complete
 
-4. **T78.x**: Remove Hotstuff fallback
-   - Delete legacy consensus code paths
-   - Simplify hybrid mode to pure DAG
+4. **T78.x–T81.5**: ✅ Completed — Hotstuff fallback removed
+   - Legacy consensus code paths deleted
+   - `hotstuff` / `hs` are no longer valid mode strings
+   - EEZO is now DAG-only
 
 ---
 
@@ -481,7 +466,7 @@ After the 7-day canary passes all SLOs:
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `eezo_consensus_mode_active` | Gauge | 0=hotstuff, 1=hybrid, 2=dag |
+| `eezo_consensus_mode_active` | Gauge | 3=dag-primary, 2=dag, 1=hybrid, 0=legacy(deprecated) |
 | `eezo_dag_ordered_ready` | Gauge | Batches ready for consumption |
 | `eezo_dag_hybrid_fallback_total` | Counter | Fallbacks to mempool |
 | `eezo_dag_hybrid_batches_used_total` | Counter | DAG batches consumed |
