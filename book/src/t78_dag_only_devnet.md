@@ -313,83 +313,50 @@ pub const STRICT_PROFILE_BATCH_TIMEOUT_MS: u64 = 50; // New: override default
 
 ---
 
-## T78.3: DAG-Primary Mode (DAG-Only with Shadow HotStuff)
+## T78.3: DAG-Primary Mode (Historical)
 
-### Overview
+> **Note**: T78.3 described the transition to dag-primary mode. As of T81, EEZO uses pure DAG consensus without the shadow checker. This section is retained for historical context.
 
-T78.3 introduces a new `dag-primary` consensus mode that:
-- Uses DAG as the **only** source of transaction ordering for committed blocks
-- Does **not** use mempool fallback on the main path
-- Keeps HotStuff/legacy path alive as a "shadow checker" only (no effect on block production)
+### Overview (Historical)
 
-This is a devnet-only stepping stone toward eventual "dag-only" mode, allowing us to validate pure DAG ordering behavior while maintaining the HotStuff code for future divergence detection.
+T78.3 introduced the `dag-primary` consensus mode that:
+- Used DAG as the **only** source of transaction ordering for committed blocks
+- Did **not** use mempool fallback on the main path
 
-### Key Differences from dag-hybrid Mode
+This was a stepping stone toward the eventual "dag-only" mode (completed in T81).
 
-| Feature | dag-hybrid | dag-primary |
-|---------|-----------|-------------|
-| TX Source | DAG batches + mempool fallback | DAG batches only |
-| Mempool Fallback | Yes (when DAG queue empty or filtered) | No (empty block if no DAG txs) |
-| HotStuff/Legacy Path | Main commit authority | Shadow checker only (no commit) |
-| Safety Checks | Nonce contiguity filter | Same nonce contiguity filter |
-| Use Case | Production canary mode | Devnet/testing pure DAG behavior |
+### Key Differences from dag-hybrid Mode (Historical)
 
-### Configuration
+| Feature | dag-hybrid | dag-primary (T78.3) | dag-only (T81) |
+|---------|-----------|---------------------|----------------|
+| TX Source | DAG batches + mempool fallback | DAG batches only | DAG batches only |
+| Mempool Fallback | Yes | No | No |
+| Legacy Code | Present | Present (shadow) | Not compiled |
 
-#### Environment Variables
+### Configuration (Current)
 
-**Enable dag-primary mode**:
+**For current dag-primary/dag-only mode**:
 ```bash
-export EEZO_CONSENSUS_MODE=dag-primary
-export EEZO_DAG_ORDERING_ENABLED=1  # Required for DAG runner
+# Use the dag-only build (recommended)
+cargo build --release -p eezo-node --features "dag-only"
+
+# Or devnet-safe build
+cargo build --release -p eezo-node --features "devnet-safe"
 ```
 
-**All other DAG/hybrid config vars apply**:
-```bash
-# Optional: tuning (same as dag-hybrid)
-export EEZO_HYBRID_STRICT_PROFILE=1          # Recommended for dag-primary
-export EEZO_HYBRID_AGG_TIME_BUDGET_MS=50     # Aggregation time budget
-export EEZO_HYBRID_AGG_MAX_TX=500            # Max transactions per batch
-export EEZO_HYBRID_AGG_MAX_BYTES=1048576     # Max batch size (1 MiB)
-export EEZO_HYBRID_MIN_DAG_TX=0              # Use any DAG batch (even 1-2 txs)
-export EEZO_HYBRID_BATCH_TIMEOUT_MS=50       # Wait for DAG batches
-```
+### Behavior (Current)
 
-### Behavior
+In current `dag-only` builds, the consensus runner:
 
-#### Block Building
-
-In `dag-primary` mode, the consensus runner:
-
-1. **Waits for DAG batches** (respects `EEZO_HYBRID_BATCH_TIMEOUT_MS`)
-2. **Applies nonce contiguity filter** (same safety as hybrid mode)
+1. **Waits for DAG batches**
+2. **Applies nonce contiguity filter**
 3. **Builds block from DAG txs only**
 4. **Never falls back to mempool** (commits empty block if no valid DAG txs)
 
-**Empty blocks**: If DAG queue is empty or all txs are filtered, dag-primary commits an **empty block** instead of falling back to mempool. This is expected behavior and validates pure DAG ordering.
-
-#### Shadow HotStuff Checker (Stub)
-
-T78.3 includes a **stub shadow checker** that:
-- Runs after each successful DAG block commit
-- Increments `eezo_dag_primary_shadow_checks_total` metric
-- Logs that a shadow check was performed
-- Does **not** affect block production (no-op for T78.3)
-
-**Future work** (T78.4/T78.5):
-- Build shadow block from mempool
-- Compare shadow block with DAG block
-- Expose divergence metrics
-
-### Metrics
-
-#### Mode Detection
+### Metrics (Current)
 
 **Gauge: `eezo_consensus_mode_active`**
-- `0` = hotstuff (default)
-- `1` = dag-hybrid (with ordering enabled)
-- `2` = dag (full DAG mode)
-- `3` = dag-primary (**NEW**)
+- `3` = dag-primary (production mode)
 
 ```bash
 # Check current mode
@@ -397,55 +364,21 @@ curl -s http://localhost:3030/metrics | grep eezo_consensus_mode_active
 # Expected: eezo_consensus_mode_active 3
 ```
 
-#### Shadow Checker
-
-**Counter: `eezo_dag_primary_shadow_checks_total`**
-- Increments each time the shadow HotStuff checker runs
-- Only active in dag-primary mode
-- Should match committed block count
+### Usage Example (Current)
 
 ```bash
-# Verify shadow checker is running
-curl -s http://localhost:3030/metrics | grep eezo_dag_primary_shadow_checks_total
-```
-
-#### No Fallback Validation
-
-**Counter: `eezo_dag_hybrid_fallback_total`**
-- Should **not** increment in dag-primary mode
-- If it increments, it indicates a bug (fallback should never occur)
-
-```bash
-# Verify no fallback happened
-curl -s http://localhost:3030/metrics | grep eezo_dag_hybrid_fallback_total
-# Expected: 0 (no fallback in dag-primary)
-```
-
-### Usage Example
-
-```bash
-# 1. Enable dag-primary mode
-export EEZO_CONSENSUS_MODE=dag-primary
-export EEZO_DAG_ORDERING_ENABLED=1
-export EEZO_HYBRID_STRICT_PROFILE=1
+# 1. Build with dag-only feature
+cargo build --release -p eezo-node --features "dag-only"
 
 # 2. Run the node
-./target/release/eezo-node
+./target/release/eezo-node --genesis genesis.min.json --datadir /tmp/eezo
 
 # 3. Verify mode is active
-curl -s http://localhost:3030/metrics | grep eezo_consensus_mode_active
+curl -s http://localhost:9898/metrics | grep eezo_consensus_mode_active
 # Expected: eezo_consensus_mode_active 3
-
-# 4. Check that no fallback occurs
-curl -s http://localhost:3030/metrics | grep eezo_dag_hybrid_fallback_total
-# Expected: eezo_dag_hybrid_fallback_total 0
-
-# 5. Verify shadow checker is running
-curl -s http://localhost:3030/metrics | grep eezo_dag_primary_shadow_checks_total
-# Expected: Increments with each committed block
 ```
 
-### Logs
+### Logs (Current)
 
 **Startup**:
 ```
@@ -457,67 +390,35 @@ consensus: dag-primary mode enabled (DAG-only, no mempool fallback)
 hybrid-agg: no candidates (reason=dag-primary-no-fallback, n=0 filtered=0 bad_nonce=0)
 ```
 
-**Shadow checker**:
-```
-dag-primary: shadow HotStuff check performed at height=123 (stub)
-```
-
-### Testing & Validation
+### Testing & Validation (Current)
 
 **Manual Validation**:
-1. Start node in dag-primary mode
+1. Start node with dag-only build
 2. Send transactions via `/submit_tx`
 3. Verify:
    - Transactions are included (check `eezo_txs_included_total`)
-   - No fallback occurs (`eezo_dag_hybrid_fallback_total` stays 0)
-   - Shadow checks run (`eezo_dag_primary_shadow_checks_total` increments)
    - Consensus mode gauge shows 3
 
 **Expected Behavior**:
 - **With tx load**: Blocks built from DAG batches only
 - **Without tx load**: Empty blocks (no fallback to mempool)
-- **Single-sender spam**: Higher `batches_used` than hybrid mode (no fallback to skip)
 
 ### Safety & Compatibility
 
-**Safety Checks** (unchanged from hybrid mode):
+**Safety Checks**:
 - Nonce contiguity filter remains active
 - No BadNonce stalls (DAG ordering does not affect nonce validation)
 - All SAFE guards from T78.2 audit apply
 
 **Compatibility**:
-- dag-primary is **opt-in** via `EEZO_CONSENSUS_MODE=dag-primary`
-- Default behavior (env unset) remains unchanged (hotstuff mode)
-- dag-hybrid and hotstuff modes are unaffected by this change
-
-**Dev-Unsafe Guards**:
-- Same dev-unsafe guards as hybrid mode
-- Recommended only for devnet/testing
-
-### Future Work (T78.4+)
-
-1. **Expand Shadow Checker** (T78.4):
-   - Build shadow block from mempool
-   - Compare tx count, tx hashes, block hash
-
-2. **Divergence Metrics** (T78.5):
-   - `eezo_dag_primary_divergence_total`: Mismatches between DAG and shadow
-   - Histogram of divergence magnitude
-
-3. **Emergency Rollback** (T78.6):
-   - If divergence detected, trigger rollback to hybrid mode
-   - Manual override via env var
-
-4. **HotStuff Feature-Gating** (T78.7):
-   - HotStuff shadow checker is now behind `hotstuff-shadow` feature flag
-   - Devnet-safe builds can exclude HotStuff entirely when not needed
-   - Transition to final "dag-only" mode when shadow checker validates pure DAG behavior
+- dag-only is the recommended production build
+- devnet-safe provides dag-primary as the default mode
 
 ---
 
-## T78.7: Devnet-Safe Build Profile
+## T78.7: Devnet-Safe Build Profile (Current)
 
-T78.7 introduces a clean "devnet-safe" build profile optimized for DAG-primary deployments:
+T78.7 introduced a clean "devnet-safe" build profile optimized for DAG-primary deployments.
 
 ### Overview
 
@@ -525,67 +426,56 @@ The devnet-safe profile provides:
 - **DAG-primary as default**: When `EEZO_CONSENSUS_MODE` is unset, defaults to `dag-primary`
 - **DAG ordering enabled by default**: `EEZO_DAG_ORDERING_ENABLED` defaults to `true`
 - **No dev-unsafe compiled**: Unsigned transactions are never accepted
-- **HotStuff optional**: The shadow checker is only included with `hotstuff-shadow` feature
 
 ### Build Commands
 
-**Devnet-safe build (recommended for production devnet):**
+**dag-only build (recommended for production):**
+```bash
+# Pure DAG consensus
+cargo build --release -p eezo-node --features "dag-only"
+```
+
+**Devnet-safe build (recommended for devnet):**
 ```bash
 # Using the devnet-safe meta-feature
 cargo build --release -p eezo-node --features "devnet-safe"
 ```
 
-**Devnet-safe with HotStuff shadow checker:**
-```bash
-# For observability during transition from HotStuff
-cargo build --release -p eezo-node --features "devnet-safe,hotstuff-shadow"
-```
-
 ### Environment Variables
 
-With a devnet-safe build, minimal configuration is needed:
+With a dag-only or devnet-safe build, minimal configuration is needed:
 
 ```bash
 # Start a dag-primary node with defaults
-./target/release/eezo-node
-
-# Or explicitly configure
-export EEZO_CONSENSUS_MODE=dag-primary  # Already the default
-export EEZO_DAG_ORDERING_ENABLED=1      # Already the default
-export EEZO_EXECUTOR_MODE=stm           # Use STM executor
-./target/release/eezo-node
+./target/release/eezo-node --genesis genesis.min.json --datadir /tmp/eezo
 ```
 
 ### Feature Flags
 
 | Feature | Description | Included in devnet-safe? |
 |---------|-------------|--------------------------|
+| `dag-only` | Pure DAG production build | Alternative to devnet-safe |
 | `devnet-safe` | Meta-feature for DAG-primary devnet builds | ✅ Self |
 | `dag-consensus` | DAG ordering and consensus | ✅ Yes |
 | `stm-exec` | Block-STM parallel executor | ✅ Yes |
-| `hotstuff-shadow` | HotStuff shadow checker | ❌ No (opt-in) |
 | `dev-unsafe` | Unsigned tx support | ❌ No (intentionally excluded) |
 
-### Comparison: Generic vs Devnet-Safe Builds
+### Comparison: dag-only vs Devnet-Safe Builds
 
-| Behavior | Generic Build | Devnet-Safe Build |
+| Behavior | dag-only Build | Devnet-Safe Build |
 |----------|---------------|-------------------|
-| Default `EEZO_CONSENSUS_MODE` | `hotstuff` | `dag-primary` |
-| Default `EEZO_DAG_ORDERING_ENABLED` | `false` | `true` |
-| `dev-unsafe` available? | Must be explicitly added | Never included |
-| HotStuff shadow? | With `dag-consensus` | With `hotstuff-shadow` |
+| Default `EEZO_CONSENSUS_MODE` | `dag-primary` (forced) | `dag-primary` |
+| Default `EEZO_DAG_ORDERING_ENABLED` | `true` (forced) | `true` |
+| `dev-unsafe` available? | Never | Never |
+| Production use | ✅ Recommended | ✅ Recommended |
 
 ### Verification
 
-To verify your build is devnet-safe:
+To verify your build is working:
 
 ```bash
-# Check the consensus mode at startup (should show dag-primary)
-./target/release/eezo-node 2>&1 | grep "devnet-safe"
-# Expected: [T78.7 devnet-safe] build profile active: default consensus mode is dag-primary
-
 # Check metrics endpoint
-curl -s http://localhost:3030/metrics | grep eezo_consensus_mode_active
+curl -s http://localhost:9898/metrics | grep eezo_consensus_mode_active
 # Expected: eezo_consensus_mode_active 3  (3 = dag-primary)
 ```
 
@@ -658,13 +548,12 @@ cargo build --release -p eezo-node \
 
 ### Profiles Comparison
 
-| Aspect | **devnet-safe** (Official) | dev-unsafe (Local Bench) |
-|--------|---------------------------|--------------------------|
-| Use case | Devnet deployments | Local TPS experiments |
-| Unsigned tx | ❌ Never allowed | ✅ With env var |
-| Default mode | dag-primary | hotstuff |
-| Script | `devnet_dag_primary.sh` | Manual setup |
-| Safe for network? | ✅ Yes | ❌ No |
+| Aspect | **dag-only** (Production) | **devnet-safe** (Devnet) | dev-unsafe (Local Bench) |
+|--------|--------------------------|---------------------------|--------------------------|
+| Use case | Production | Devnet deployments | Local TPS experiments |
+| Unsigned tx | ❌ Never allowed | ❌ Never allowed | ✅ With env var |
+| Default mode | dag-primary (forced) | dag-primary | configurable |
+| Safe for network? | ✅ Yes | ✅ Yes | ❌ No |
 
 ### Verification After Starting
 
@@ -672,14 +561,12 @@ cargo build --release -p eezo-node \
 # Check consensus mode (expect 3 = dag-primary)
 curl -s http://127.0.0.1:9898/metrics | grep eezo_consensus_mode_active
 
-# Run canary SLO check
-./scripts/t78_dag_primary_canary_check.sh http://127.0.0.1:9898/metrics --tps-window=5
+# Check health endpoint
+curl -s http://127.0.0.1:8080/health/dag_primary | jq .
 ```
 
 **Expected:**
 - `eezo_consensus_mode_active = 3`
-- `eezo_dag_primary_shadow_checks_total > 0` (increasing)
-- `eezo_dag_primary_shadow_mismatch_total = 0`
 - No `[DEV-UNSAFE]` warnings
 
 ### Optional: Local-Only Dev-Unsafe Benchmark Profile
@@ -704,6 +591,7 @@ export EEZO_DAG_ORDERING_ENABLED=1
 
 ## References
 
+- [T81: EEZO Consensus History & DAG-Only Runtime](t81_consensus_history.md)
+- [T80: Pure DAG Consensus Cutover](t80_dag_consensus_cutover.md)
 - [T78.6: DAG-Primary Canary & SLO Runbook](t78_dag_primary_canary.md)
-- [T76: DAG-Hybrid Canary & SLO Runbook](t76_dag_hybrid_canary.md)
 - [Dev Unsafe Modes & Build Profiles Matrix](dev_unsafe_modes.md)

@@ -56,13 +56,13 @@ T81 completed the transition:
 The recommended build command for production (devnet/testnet/mainnet):
 
 ```bash
-# Pure DAG consensus — no legacy code compiled
+# Pure DAG consensus — production build
 cargo build --release -p eezo-node --features "dag-only"
 ```
 
 This build:
 - Uses DAG as the only consensus mode
-- Has no HotStuff types, handlers, or threads linked
+- Legacy enum variants exist for API compatibility but are never used
 - Provides the smallest binary size
 - Is suitable for all network deployments
 
@@ -140,7 +140,7 @@ Value `3` indicates dag-primary mode (the only production mode).
 
 | Feature | Description | Production Use |
 |---------|-------------|----------------|
-| `dag-only` | Pure DAG build, no legacy code | ✅ Recommended |
+| `dag-only` | Pure DAG build | ✅ Recommended |
 | `devnet-safe` | DAG-primary with dev features | ✅ Devnet |
 | `metrics` | Prometheus metrics endpoint | ✅ Recommended |
 | `checkpoints` | Block checkpointing | ✅ Recommended |
@@ -149,10 +149,13 @@ Value `3` indicates dag-primary mode (the only production mode).
 
 The codebase retains some references to HotStuff for:
 - Historical documentation (this file, earlier milestone docs)
-- Test infrastructure that validates consensus message signing
-- Type definitions used by the generic consensus message system
+- Test infrastructure that validates consensus message signing (shared with DAG)
+- Enum variants for backward compatibility (never constructed in dag-only builds)
 
-These are **historical artifacts** and do not affect production behavior. In `dag-only` builds, HotStuff-specific code paths are not compiled.
+These are **historical artifacts** and do not affect production behavior. In `dag-only` builds:
+- The `ConsensusMode::Hotstuff` variant exists but is never constructed
+- Consensus message types are shared infrastructure used by DAG consensus too
+- The compiler confirms unused code with warnings
 
 ## References
 

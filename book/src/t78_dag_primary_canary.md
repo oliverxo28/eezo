@@ -571,7 +571,7 @@ The `/health/dag_primary` endpoint differs from the general `/health` endpoint:
 The dag-primary health endpoint checks:
 
 1. **Consensus mode**: Must be `dag-primary` (mode value `3`)
-2. **Shadow checker activity**: `eezo_dag_primary_shadow_checks_total` must have increased recently
+2. **Block height progress**: `eezo_block_height` must have increased recently
 3. **Transaction liveness**: `eezo_txs_included_total` must have increased recently
 
 ### HTTP Response Codes
@@ -588,7 +588,7 @@ The dag-primary health endpoint checks:
 {
   "status": "healthy",
   "consensus_mode": 3,
-  "shadow_checks_total": 1234,
+  "block_height": 1234,
   "txs_included_total": 5678,
   "window_secs": 60
 }
@@ -600,7 +600,7 @@ The dag-primary health endpoint checks:
   "status": "degraded",
   "reason": "wrong_mode",
   "consensus_mode": 1,
-  "shadow_checks_total": 0,
+  "block_height": 0,
   "txs_included_total": 0,
   "window_secs": 60
 }
@@ -611,7 +611,7 @@ The dag-primary health endpoint checks:
 | Reason | Meaning |
 |--------|---------|
 | `wrong_mode` | Consensus mode is not dag-primary (mode ≠ 3) |
-| `no_shadow_checks_recently` | Shadow checker has not run within the window |
+| `no_blocks_recently` | No blocks committed within the window |
 | `no_txs_recently` | No transactions included within the window |
 
 ### Configuration
