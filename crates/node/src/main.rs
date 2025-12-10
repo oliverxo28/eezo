@@ -1276,7 +1276,6 @@ fn env_consensus_mode() -> ConsensusMode {
 ///
 /// Note: In dag-only builds, explicit "0"/"false"/"no"/"off" is ignored and
 /// ordering remains enabled (logs a warning).
-#[allow(unreachable_code)]
 fn env_dag_ordering_enabled() -> bool {
     // T80.0: dag-only builds always have ordering enabled
     #[cfg(feature = "dag-only")]
@@ -1289,28 +1288,31 @@ fn env_dag_ordering_enabled() -> bool {
                 );
             }
         }
-        return true;
+        true
     }
 
-    // T78.7: Determine the default value based on build profile
-    #[cfg(feature = "devnet-safe")]
-    let default_enabled = true;
-    #[cfg(not(feature = "devnet-safe"))]
-    let default_enabled = false;
+    #[cfg(not(feature = "dag-only"))]
+    {
+        // T78.7: Determine the default value based on build profile
+        #[cfg(feature = "devnet-safe")]
+        let default_enabled = true;
+        #[cfg(not(feature = "devnet-safe"))]
+        let default_enabled = false;
 
-    match env::var("EEZO_DAG_ORDERING_ENABLED") {
-        Ok(raw) => {
-            let s = raw.trim().to_ascii_lowercase();
-            match s.as_str() {
-                "1" | "true" | "yes" | "on" => true,
-                "0" | "false" | "no" | "off" => false,
-                // Empty string ("") or unrecognized values use the build-profile default
-                // In devnet-safe builds: default is true
-                // In generic builds: default is false
-                _ => default_enabled,
+        match env::var("EEZO_DAG_ORDERING_ENABLED") {
+            Ok(raw) => {
+                let s = raw.trim().to_ascii_lowercase();
+                match s.as_str() {
+                    "1" | "true" | "yes" | "on" => true,
+                    "0" | "false" | "no" | "off" => false,
+                    // Empty string ("") or unrecognized values use the build-profile default
+                    // In devnet-safe builds: default is true
+                    // In generic builds: default is false
+                    _ => default_enabled,
+                }
             }
+            Err(_) => default_enabled,
         }
-        Err(_) => default_enabled,
     }
 }
 
