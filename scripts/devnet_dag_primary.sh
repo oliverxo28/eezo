@@ -109,7 +109,7 @@ echo ""
 # ───────────────────────────────────────────────────────────────────────────────
 # Run the node with devnet-safe feature set
 # ───────────────────────────────────────────────────────────────────────────────
-exec cargo run -p eezo-node \
+exec cargo run -p eezo-node --bin eezo-node \
   --features "devnet-safe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus" -- \
   --genesis genesis.min.json \
   --datadir "$EEZO_DATADIR"
