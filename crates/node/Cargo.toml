@@ -145,9 +145,8 @@ gpu-hash = ["eezo-prover", "eezo-prover/gpu-hash", "eezo-prover/stark-air"]
 # Note: This only adds the modules; wiring into consensus_runner is T73.3+
 stm-exec = ["dashmap"]
 
-# T75.0: DAG consensus mode (required for production).
+# T75.0/T81.1: DAG consensus mode (required for production).
 # EEZO's production consensus is pure DAG; this feature enables the DAG infrastructure.
-# Env: EEZO_DAG_CONSENSUS_MODE=off|shadow (default: off for legacy; dag-primary for production)
 dag-consensus = ["consensus-dag", "consensus-dag/metrics"]
 
 # T78.7/T78.8/T81.1: Devnet-safe build profile (DAG-only production profile).
