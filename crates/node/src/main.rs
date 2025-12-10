@@ -1136,10 +1136,9 @@ enum ConsensusMode {
     /// EEZO is now DAG-only; use `DagPrimary` instead.
     /// 
     /// This variant remains in the enum for backward compatibility during the
-    /// transition period (T81.0–T81.4). It is not constructed in DAG-only builds
-    /// and attempting to use `EEZO_CONSENSUS_MODE=hotstuff` or `hs` will result
-    /// in a hard error (dag-only builds) or a deprecation warning with fallback
-    /// to `DagPrimary` (non-dag-only builds).
+    /// transition period (T81.0–T81.4). It is not constructed in any build;
+    /// attempting to use `EEZO_CONSENSUS_MODE=hotstuff` or `hs` will result
+    /// in an error log and fallback to `DagPrimary`.
     #[deprecated(since = "T81.5", note = "EEZO is DAG-only; use DagPrimary instead")]
     Legacy0,
     /// DAG mode: DAG is used for tx source + dry-run + shadow consensus,
@@ -1221,9 +1220,7 @@ fn env_consensus_mode() -> ConsensusMode {
     };
     
     // T81.5: Generic builds now also default to DagPrimary (DAG-only era)
-    // Legacy0 is deprecated and should not be used.
     #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
-    #[allow(deprecated)]
     let default_mode = {
         log::info!(
             "[T81.5] Generic build: default consensus mode is dag-primary (EEZO is DAG-only)"

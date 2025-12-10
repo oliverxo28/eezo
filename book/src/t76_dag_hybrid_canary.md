@@ -41,7 +41,8 @@ Create or update your environment file (e.g., `devnet.env`):
 
 ```bash
 # --- Core Consensus Mode ---
-# T81.5: EEZO is DAG-only. Supported modes: dag-primary, dag-hybrid, dag
+# T81.5: EEZO is DAG-only. Use dag-primary for production.
+# Supported modes: dag-primary (recommended), dag-hybrid (historical), dag
 # NOTE: "hotstuff" and "hs" are NO LONGER VALID and will be rejected.
 export EEZO_CONSENSUS_MODE=dag-primary
 
