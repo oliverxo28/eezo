@@ -1,18 +1,18 @@
 {
-  "title": "EEZO – DAG-Hybrid Canary",
-  "description": "T76.12: DAG-Hybrid 7-Day Canary SLO Dashboard",
-  "tags": ["eezo", "dag", "hybrid", "canary", "slo"],
+  "title": "EEZO – DAG-Hybrid Canary (Historical)",
+  "description": "T76.12: DAG-Hybrid 7-Day Canary SLO Dashboard. HISTORICAL: As of T81, EEZO uses pure DAG consensus. This dashboard is retained for reference.",
+  "tags": ["eezo", "dag", "hybrid", "canary", "slo", "historical"],
   "panels": [
     {
       "type": "stat",
       "title": "Consensus Mode",
-      "description": "0=hotstuff, 1=hybrid, 2=dag",
+      "description": "0=legacy (pre-T81), 1=hybrid, 2=dag, 3=dag-primary",
       "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
       "targets": [{"expr": "eezo_consensus_mode_active"}],
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "0": { "text": "Hotstuff", "color": "orange" } } },
+            { "type": "value", "options": { "0": { "text": "Legacy", "color": "orange" } } },
             { "type": "value", "options": { "1": { "text": "Hybrid", "color": "green" } } },
             { "type": "value", "options": { "2": { "text": "DAG", "color": "blue" } } }
           ]

@@ -36,6 +36,6 @@ pub use crate::secure::FramedSession;
 
 #[cfg(feature = "pq44-runtime")]
 pub use eezo_ledger::consensus;
-// Re-export new HotStuff message types for convenience
+// Re-export legacy consensus message types for convenience (historical — see T81)
 #[cfg(feature = "pq44-runtime")]
 pub use eezo_ledger::consensus_msg;

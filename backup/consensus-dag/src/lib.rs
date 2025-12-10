@@ -1,6 +1,6 @@
 //! lib.rs — Consensus DAG for EEZO v2
 //!
-//! DAG-backed BFT consensus implementation replacing HotStuff.
+//! DAG-backed BFT consensus implementation (replaces legacy pre-DAG consensus).
 //!
 //! ## Architecture
 //!

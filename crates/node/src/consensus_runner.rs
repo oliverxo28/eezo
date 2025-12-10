@@ -3520,9 +3520,10 @@ mod executor_mode_tests {
     }
 
     #[test]
-    fn test_hybrid_mode_config_standard_when_hotstuff() {
+    fn test_hybrid_mode_config_standard_when_legacy() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         
+        // T81.4: Test with legacy mode (previously called hotstuff)
         std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
         
