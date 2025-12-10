@@ -355,6 +355,106 @@ pub fn wait_until_metric_value(
     false
 }
 
+/// Get the current value of a metric. Returns None if not found.
+/// Handles both simple metrics (e.g., "metric 42") and labeled metrics (e.g., "metric{label=\"value\"} 42").
+#[allow(dead_code)]
+pub fn get_metric_value(port: u16, metric_name: &str) -> Option<i64> {
+    let url = format!("http://127.0.0.1:{}/metrics", port);
+    
+    let resp = reqwest::blocking::get(&url).ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    
+    let text = resp.text().ok()?;
+    for line in text.lines() {
+        // Skip comment lines
+        if line.starts_with('#') {
+            continue;
+        }
+        
+        // Check for exact metric name match
+        // Must be followed by space, '{', or end of line
+        if !line.starts_with(metric_name) {
+            continue;
+        }
+        
+        let after_name = &line[metric_name.len()..];
+        
+        // Ensure exact match: next char must be space, '{', or nothing
+        let first_char = after_name.chars().next();
+        let is_exact_match = match first_char {
+            None => true,                          // End of line
+            Some(' ') => true,                     // Simple metric: "metric 42"
+            Some('{') => true,                     // Labeled metric: "metric{label=\"value\"} 42"
+            _ => false,                            // Partial match like "foobar" when searching "foo"
+        };
+        
+        if !is_exact_match {
+            continue;
+        }
+        
+        // Extract the value
+        let value_str = if let Some('{') = first_char {
+            // Labeled metric: find value after '}'
+            // e.g., "{label=\"value\"} 42" -> after '}' we have " 42"
+            after_name.find('}')
+                .and_then(|pos| {
+                    after_name[pos + 1..].split_whitespace().next()
+                })?
+        } else {
+            // Simple metric: value is after space
+            after_name.split_whitespace().next()?
+        };
+        
+        return value_str.parse().ok();
+    }
+    None
+}
+
+/// Poll /metrics on the given port until metric value >= expected, or timeout.
+/// Returns true if the metric reaches or exceeds the expected value within timeout.
+#[allow(dead_code)]
+pub fn wait_until_metric_gte(
+    port: u16,
+    metric_name: &str,
+    min_value: i64,
+    timeout_ms: u64,
+) -> bool {
+    let start = Instant::now();
+    println!(
+        "Polling metrics at port {}, expecting {} >= {}",
+        port, metric_name, min_value
+    );
+
+    while start.elapsed() < Duration::from_millis(timeout_ms) {
+        if let Some(value) = get_metric_value(port, metric_name) {
+            println!("Found {} = {}", metric_name, value);
+            if value >= min_value {
+                return true;
+            }
+        }
+        sleep(Duration::from_millis(200));
+    }
+
+    println!(
+        "Timeout reached: {} did not reach >= {} within {} ms",
+        metric_name, min_value, timeout_ms
+    );
+    false
+}
+
+/// Poll /metrics on the given port until metric value > 0, or timeout.
+/// Returns true if the metric is greater than 0 within timeout.
+#[allow(dead_code)]
+pub fn wait_until_metric_gt_zero(
+    port: u16,
+    metric_name: &str,
+    timeout_ms: u64,
+) -> bool {
+    wait_until_metric_gte(port, metric_name, 1, timeout_ms)
+}
+
 #[allow(dead_code)]
 pub fn kill_child(child: &mut Child) {
     let _ = child.kill();

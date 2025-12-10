@@ -490,6 +490,148 @@ scripts/t78_dag_primary_canary_check.sh http://127.0.0.1:9898/metrics --tps-wind
 
 ---
 
+## T78.9: Nonce-Gap Pitfall
+
+### Understanding Nonce Gaps
+
+A **nonce gap** occurs when transactions are submitted with non-contiguous nonces. For example, if you submit transactions with nonces [0, 1, 7, 8], there is a gap at nonces 2-6.
+
+**Why does this matter?**
+
+The mempool uses strict nonce ordering to prevent double-spending and maintain transaction ordering guarantees. When a gap exists:
+
+1. **Transactions before the gap are processed normally**: nonces 0 and 1 are included in blocks
+2. **Transactions after the gap are queued but NOT processed**: nonces 7 and 8 wait in the mempool
+3. **A WARN log is emitted**: `mempool: X sender(s) skipped due to nonce gaps`
+
+### Common Causes of Nonce Gaps
+
+1. **Faucet funding wrong address**: If you fund `0xABC` but submit transactions from `0xDEF`, the transactions from `0xDEF` will have insufficient funds for nonce 0, but higher nonces may be admitted. This creates a gap.
+
+2. **Transaction nonce 0 rejected**: If the first transaction (nonce=0) is rejected due to `InsufficientFunds`, but subsequent transactions with higher nonces are admitted (via `admit_signed_tx` future nonce allowance), a gap is created.
+
+3. **Parallel submission race**: If you submit transactions in parallel and some fail while others succeed, gaps may form.
+
+### How to Avoid Nonce Gaps
+
+> ⚠️ **Always fund the EXACT address that will submit transactions.**
+
+```bash
+# 1. Generate keypair and get address
+./target/release/ml_dsa_keygen
+# Output: EEZO_TX_FROM=0x<your_address>
+
+# 2. Fund THIS EXACT address via faucet
+curl -X POST "http://127.0.0.1:8080/faucet" \
+  -H "Content-Type: application/json" \
+  -d '{"to":"0x<your_address>","amount":"1000000000000"}'
+
+# 3. Verify balance BEFORE submitting transactions
+curl "http://127.0.0.1:8080/account/0x<your_address>"
+
+# 4. Only then submit transactions
+scripts/spam_tps.sh 1000 http://127.0.0.1:8080
+```
+
+### Diagnosing Nonce Gaps
+
+**Symptoms:**
+- `eezo_mempool_len` stays > 0 but `eezo_txs_included_total` is flat
+- WARN log: `mempool: N sender(s) skipped due to nonce gaps`
+
+**Check metrics:**
+```bash
+# Check for nonce gap drops
+curl -s http://127.0.0.1:9898/metrics | grep nonce
+
+# Expected metrics:
+# eezo_dag_hybrid_nonce_gap_dropped_total - transactions dropped due to gaps
+# eezo_dag_hybrid_bad_nonce_prefilter_total - transactions with nonce too low
+```
+
+---
+
+## T78.9: dev-unsafe vs devnet-safe Differences
+
+### Build Profile Comparison
+
+| Aspect | **devnet-safe** | **dev-unsafe** |
+|--------|-----------------|----------------|
+| **Use case** | Official devnet deployments | Local TPS benchmarks only |
+| **Unsigned tx** | ❌ Never allowed | ✅ With `EEZO_DEV_ALLOW_UNSIGNED_TX=1` |
+| **Signature verification** | ✅ Always enforced | ⚠️ Can be bypassed |
+| **Default consensus mode** | dag-primary | hotstuff |
+| **Safe for network?** | ✅ Yes | ❌ **NEVER** deploy |
+
+### Build Commands
+
+**Devnet-safe (recommended for any networked deployment):**
+```bash
+cargo build --release -p eezo-node \
+  --features "devnet-safe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
+```
+
+**Dev-unsafe (local benchmarks ONLY):**
+```bash
+cargo build -p eezo-node \
+  --features "dev-unsafe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
+```
+
+### Key Differences in Behavior
+
+1. **Signature verification**
+   - `devnet-safe`: All transactions MUST have valid ML-DSA signatures
+   - `dev-unsafe`: With `EEZO_DEV_ALLOW_UNSIGNED_TX=1`, signature verification is skipped
+
+2. **Startup logging**
+   - `devnet-safe`: `[T78.8] Build profile: devnet-safe`
+   - `dev-unsafe`: `[DEV-UNSAFE]` warnings visible
+
+3. **Transaction rejection**
+   - `devnet-safe`: Unsigned transactions are rejected with `BadSig`
+   - `dev-unsafe`: Unsigned transactions are accepted when env var is set
+
+### Security Warning
+
+> 🚨 **NEVER** deploy a dev-unsafe build to any network (devnet, testnet, or mainnet).
+> Dev-unsafe builds bypass critical security checks and should only be used for local TPS experiments.
+
+---
+
+## T78.9: Understanding eezo_block_tx_count Metric
+
+### Behavior Between Blocks
+
+The `eezo_block_tx_count` metric is a **gauge** that reports the number of transactions in the **most recently committed block**. It is updated when a new block is committed.
+
+**Important notes:**
+
+1. **May show 0 between blocks**: If the last committed block was empty (no transactions), the gauge will show 0 until a non-empty block is committed.
+
+2. **Empty blocks are normal in dag-primary mode**: In dag-primary mode without mempool fallback, empty blocks can occur when:
+   - No transactions in the DAG queue
+   - All DAG transactions were filtered by nonce contiguity
+
+3. **Use `eezo_txs_included_total` for transaction counts**: This counter monotonically increases and provides a more reliable view of total throughput.
+
+### Metrics Interpretation
+
+```bash
+# Check current block tx count (may be 0 between non-empty blocks)
+curl -s http://127.0.0.1:9898/metrics | grep eezo_block_tx_count
+
+# Better: Check total transactions included (always increasing)
+curl -s http://127.0.0.1:9898/metrics | grep eezo_txs_included_total
+
+# Check TPS over time window
+BEFORE=$(curl -s http://127.0.0.1:9898/metrics | grep '^eezo_txs_included_total ' | awk '{print $2}')
+sleep 10
+AFTER=$(curl -s http://127.0.0.1:9898/metrics | grep '^eezo_txs_included_total ' | awk '{print $2}')
+echo "TPS: $(echo "scale=2; ($AFTER - $BEFORE) / 10" | bc)"
+```
+
+---
+
 ## References
 
 - [T78: DAG-Only Devnet & Strict Hybrid Tuning](t78_dag_only_devnet.md)
