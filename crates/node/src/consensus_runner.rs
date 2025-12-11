@@ -260,8 +260,9 @@ fn build_executor(threads: usize) -> Box<dyn Executor> {
             match ExecutorMode::from_env() {
                 Some(m) => m,
                 None => {
+                    // When unrecognized, fall back to default_mode (Parallel)
                     log::warn!(
-                        "executor: EEZO_EXECUTOR_MODE='{}' is not recognized, using default",
+                        "executor: EEZO_EXECUTOR_MODE='{}' is not recognized, using default: parallel",
                         v
                     );
                     ExecutorMode::default_mode()

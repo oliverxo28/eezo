@@ -133,7 +133,7 @@ get_metric() {
 # Fetch multiple metrics at once (single HTTP request)
 # Usage: fetch_all_metrics
 # Sets global variables: TXS_INCLUDED, BLOCK_APPLIED, STM_WAVES, STM_CONFLICTS, STM_RETRIES
-# T82.4b: Also fetches waves_built and prescreen hit/miss counters
+# T82.4b: Also fetches waves_built and conflict pre-screen hit/miss counters
 fetch_all_metrics() {
     local metrics_output
     metrics_output="$(curl -sf "$METRICS_URL" 2>/dev/null)" || {
@@ -147,7 +147,7 @@ fetch_all_metrics() {
     STM_CONFLICTS="$(echo "$metrics_output" | grep_cmd '^eezo_exec_stm_conflicts_total ' | awk '{print $2}')"
     STM_RETRIES="$(echo "$metrics_output" | grep_cmd '^eezo_exec_stm_retries_total ' | awk '{print $2}')"
     STM_ABORTED="$(echo "$metrics_output" | grep_cmd '^eezo_exec_stm_aborted_total ' | awk '{print $2}')"
-    # T82.4b: New wave building and pre-screen metrics
+    # T82.4b: New wave building and conflict pre-screen metrics
     STM_WAVES_BUILT="$(echo "$metrics_output" | grep_cmd '^eezo_exec_stm_waves_built_total ' | awk '{print $2}')"
     STM_PRESCREEN_HITS="$(echo "$metrics_output" | grep_cmd '^eezo_exec_stm_conflict_prescreen_hits_total ' | awk '{print $2}')"
     STM_PRESCREEN_MISSES="$(echo "$metrics_output" | grep_cmd '^eezo_exec_stm_conflict_prescreen_misses_total ' | awk '{print $2}')"
