@@ -84,6 +84,8 @@ mod accounts;
 mod executor;
 // T71.0: GPU hashing adapter
 mod gpu_hash;
+// T83.2: Async persistence pipeline
+mod persistence_worker;
 
 use peers::{parse_peers_from_env, peers_handler, PeerMap, PeerService};
 use accounts::{Accounts, AccountView, FaucetReq};

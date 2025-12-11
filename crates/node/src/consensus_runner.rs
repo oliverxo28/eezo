@@ -353,6 +353,14 @@ use crate::metrics::{
 use eezo_ledger::persistence::Persistence;
 #[cfg(feature = "persistence")]
 use eezo_ledger::persistence::StateSnapshot;
+
+// T83.2: Async persistence imports
+#[cfg(feature = "persistence")]
+use crate::persistence_worker::{
+    is_async_persist_enabled, log_async_persist_status,
+    CommittedMemHead, PersistenceWorker, PersistenceWorkerHandle,
+};
+
 // --------------------
 // T41.4: strict consumption toggle
 // Enabled only when the build has `--features qc-sidecar-v2-enforce` AND env EEZO_QC_SIDECAR_ENFORCE=1/true/on/yes
@@ -474,6 +482,14 @@ pub struct CoreRunnerHandle {
     #[cfg(feature = "persistence")]
     #[allow(dead_code)]
     db: Option<Arc<Persistence>>,
+    // T83.2: Async persistence - CommittedMemHead for read-after-write consistency
+    #[cfg(feature = "persistence")]
+    #[allow(dead_code)]
+    mem_head: Arc<CommittedMemHead>,
+    // T83.2: Async persistence - worker handle for background RocksDB writes
+    #[cfg(feature = "persistence")]
+    #[allow(dead_code)]
+    persist_worker: Option<PersistenceWorkerHandle>,
     // T67.0: optional DAG runner handle for future DAG-aware block building
     // Stored behind a Mutex so we can attach it after construction.
     #[allow(dead_code)]
@@ -1240,6 +1256,11 @@ impl CoreRunnerHandle {
             // db field is not present when persistence is off
             #[cfg(feature = "persistence")] // Ensure db is only included when feature is on
             db: None, // This branch explicitly lacks persistence
+            // T83.2: Create empty CommittedMemHead (disabled for non-persistence variant)
+            #[cfg(feature = "persistence")]
+            mem_head: Arc::new(CommittedMemHead::new()),
+            #[cfg(feature = "persistence")]
+            persist_worker: None,
             dag,
             #[cfg(feature = "dag-consensus")]
             shadow_dag_sender,
@@ -1342,6 +1363,28 @@ impl CoreRunnerHandle {
             // Any DAG batch with round <= this value is considered stale.
             hybrid_dedup_cache.set_node_start_round(initial_committed_height);
         }
+
+        // T83.2: Initialize async persistence components
+        log_async_persist_status();
+        let async_persist_enabled = is_async_persist_enabled();
+        let mem_head = Arc::new(CommittedMemHead::new());
+        let persist_worker = if async_persist_enabled {
+            if let Some(ref db_ref) = db {
+                mem_head.set_enabled(true);
+                log::info!("consensus: async persistence enabled, spawning worker");
+                Some(PersistenceWorker::spawn(db_ref.clone(), mem_head.clone()))
+            } else {
+                log::warn!("consensus: async persistence requested but no DB handle available");
+                None
+            }
+        } else {
+            None
+        };
+        // NOTE: mem_head and async_persist_enabled will be used in block commit
+        // path when the full integration is complete. For now they are stored
+        // in the struct for future use.
+        let _mem_head_c = mem_head.clone();
+        let _async_persist_enabled_c = async_persist_enabled;
 
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
@@ -2400,6 +2443,9 @@ impl CoreRunnerHandle {
             shadow_dag_sender,
             #[cfg(feature = "dag-consensus")]
             hybrid_dag: hybrid_dag_store,
+            // T83.2: Async persistence components
+            mem_head,
+            persist_worker,
             join,
         })
     }
