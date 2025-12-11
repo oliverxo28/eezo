@@ -66,18 +66,36 @@ impl TxEntry {
     /// This is the preferred constructor for the zero-copy pipeline.
     /// The sender, hash, nonce, and fee are extracted from the SharedTx,
     /// ensuring consistency and avoiding duplicate computation.
+    ///
+    /// # Notes
+    ///
+    /// - If the SharedTx has no valid sender (pubkey too short), the sender
+    ///   field is set to a marker address `[0xff; 20]` to distinguish from
+    ///   valid zero addresses. Transactions with invalid senders will be
+    ///   rejected during execution.
+    /// - If fee exceeds u64::MAX, it is saturated to u64::MAX with a debug log.
+    ///   This is acceptable for priority ordering since such fees are extremely
+    ///   unlikely in practice.
     pub fn from_shared_tx(
         shared_tx: Arc<SharedTx>,
         bytes: Vec<u8>,
         received_at: Instant,
     ) -> Self {
         let hash = shared_tx.hash();
+        
+        // Use a marker address for invalid senders (distinguishable from zero address)
         let sender_addr = shared_tx.sender()
             .map(|a| a.0)
-            .unwrap_or([0u8; 20]);
+            .unwrap_or([0xff; 20]); // T83.4: Marker for invalid sender, not zero
+            
         let nonce = shared_tx.core().nonce;
+        
         // T83.4: Convert u128 fee to u64 for priority ordering (saturation on overflow)
         let fee = if shared_tx.core().fee > u64::MAX as u128 {
+            log::debug!(
+                "T83.4: fee {} exceeds u64::MAX, saturating for priority ordering",
+                shared_tx.core().fee
+            );
             u64::MAX
         } else {
             shared_tx.core().fee as u64
@@ -1313,10 +1331,10 @@ mod tests {
         assert_eq!(entry.nonce, 42);
         assert_eq!(entry.fee, 10); // fee from core
         
-        // Sender should be derived from pubkey
+        // Sender should be derived from pubkey (valid sender case)
         let expected_sender = shared_tx.sender()
             .map(|a| a.0)
-            .unwrap_or([0u8; 20]);
+            .unwrap_or([0xff; 20]); // Marker for invalid sender
         assert_eq!(entry.sender, expected_sender);
 
         // SharedTx should be accessible

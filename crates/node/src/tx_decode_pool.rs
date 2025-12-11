@@ -205,7 +205,19 @@ impl SharedTx {
     }
 
     /// Create a SharedTx without domain message computation.
-    /// Useful when signature verification has already been done.
+    ///
+    /// # Security Warning
+    ///
+    /// This constructor does NOT compute domain-separated message bytes.
+    /// The `domain_msg()` method will return an empty slice.
+    ///
+    /// Use this method ONLY when:
+    /// - Signature verification has ALREADY been completed (e.g., by sigpool)
+    /// - The transaction is being indexed/stored after validation
+    /// - Read-only access to tx fields is needed
+    ///
+    /// For transactions that still need signature verification, use
+    /// `SharedTx::new(tx, chain_id)` instead.
     pub fn new_without_domain(tx: SignedTx) -> Self {
         let hash = tx.hash();
         let sender = sender_from_pubkey_first20(&tx);
@@ -276,8 +288,18 @@ impl SharedTx {
 }
 
 impl From<SignedTx> for SharedTx {
-    /// Create a SharedTx from a SignedTx using a zero chain_id.
-    /// For full domain separation, use `SharedTx::new()` with the actual chain_id.
+    /// Create a SharedTx from a SignedTx without domain separation.
+    ///
+    /// # Security Warning
+    ///
+    /// This constructor does NOT compute domain-separated message bytes.
+    /// The resulting SharedTx is suitable ONLY for:
+    /// - Internal indexing by hash
+    /// - Read-only access to tx fields
+    /// - Cases where signature verification has ALREADY been completed
+    ///
+    /// For new transactions that need signature verification, use
+    /// `SharedTx::new(tx, chain_id)` instead to ensure proper domain separation.
     fn from(tx: SignedTx) -> Self {
         SharedTx::new_without_domain(tx)
     }
