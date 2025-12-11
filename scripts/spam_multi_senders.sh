@@ -272,76 +272,8 @@ echo ""
 # Standard chain_id for devnet (20 bytes of 0x01)
 CHAIN_ID="0x0101010101010101010101010101010101010101"
 
-# Function to select receiver based on pattern
-select_receiver() {
-    local sender_idx=$1
-    local tx_idx=$2
-    
-    if [[ "$PATTERN" == "disjoint" ]]; then
-        # Disjoint: each sender uses receivers in round-robin from their own pool
-        # If we have enough hot_receivers, each sender gets unique ones
-        # Otherwise, distribute evenly
-        local receiver_idx=$(( (sender_idx + tx_idx) % NUM_HOT_RECEIVERS ))
-        echo "${HOT_RECEIVERS[$receiver_idx]}"
-    else
-        # Hotspot: all senders target the same small pool of receivers
-        local receiver_idx=$(( tx_idx % NUM_HOT_RECEIVERS ))
-        echo "${HOT_RECEIVERS[$receiver_idx]}"
-    fi
-}
-
 # Track progress
-TOTAL_TX=0
-FAILED_TX=0
 START_TIME=$(date +%s)
-
-# Run senders in parallel (up to NUM_SENDERS concurrent jobs)
-run_sender() {
-    local s=$1
-    local sender_addr="${SENDER_ADDRS[$s]}"
-    local pk_hex="${SENDER_PKS[$s]}"
-    local sk_hex="${SENDER_SKS[$s]}"
-    local local_sent=0
-    local local_failed=0
-    
-    # Get current nonce for this sender
-    ACCT_JSON="$(curl -sf "$NODE/account/${sender_addr,,}" 2>/dev/null || echo "{}")"
-    NON_HEX="$(echo "$ACCT_JSON" | jq -r '.nonce // "0x0"')"
-    NON_DEC=$((NON_HEX))
-    
-    for (( i=0; i < TX_PER_SENDER; i++ )); do
-        local nonce_dec=$((NON_DEC + i))
-        local receiver=$(select_receiver $s $i)
-        
-        # Set environment for eezo-txgen
-        export EEZO_TX_FROM="$sender_addr"
-        export EEZO_TX_TO="$receiver"
-        export EEZO_TX_CHAIN_ID="$CHAIN_ID"
-        export EEZO_TX_AMOUNT="1"
-        export EEZO_TX_FEE="1"
-        export EEZO_TX_PK_HEX="$pk_hex"
-        export EEZO_TX_SK_HEX="$sk_hex"
-        
-        # Generate signed tx
-        BODY=$("$TXGEN_BIN" "$nonce_dec" 2>/dev/null) || {
-            ((local_failed++))
-            continue
-        }
-        
-        # Submit tx
-        curl -sf -X POST "$NODE/tx" \
-            -H "Content-Type: application/json" \
-            -d "$BODY" >/dev/null 2>&1 && ((local_sent++)) || ((local_failed++))
-    done
-    
-    echo "sender_${s}_sent=$local_sent"
-    echo "sender_${s}_failed=$local_failed"
-}
-
-# Export functions and variables for subshells
-export -f run_sender select_receiver
-export TXGEN_BIN NODE TX_PER_SENDER PATTERN NUM_HOT_RECEIVERS CHAIN_ID
-export SENDER_ADDRS SENDER_PKS SENDER_SKS HOT_RECEIVERS
 
 # Run senders in parallel with a reasonable job limit
 MAX_PARALLEL_JOBS=$NUM_SENDERS
