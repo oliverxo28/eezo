@@ -78,6 +78,7 @@ use std::time::Duration;
 mod metrics;
 mod peers;
 mod mempool;
+mod mempool_actor;  // T82.2: Lock-free mempool actor
 mod sigpool;
 mod accounts;
 mod executor;

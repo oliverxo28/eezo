@@ -1,0 +1,1022 @@
+// crates/node/src/mempool_actor.rs
+//! T82.2: Mempool "Lock-Free Actor" implementation.
+//!
+//! This module implements an Actor-based mempool that:
+//! - Eliminates lock contention on the internal queues
+//! - Uses bucketed structure (virtual sharding) by sender address hash
+//! - Tracks in-flight transactions to avoid zombie tx reuse
+//! - Supports prefetch for building batches ahead of time
+//!
+//! The actor owns all mempool state and communicates via async channels.
+//! Other parts of the node send messages instead of locking the mempool directly.
+
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    net::IpAddr,
+    sync::Arc,
+    time::Instant,
+};
+
+use tokio::sync::{mpsc, oneshot};
+
+#[cfg(feature = "metrics")]
+use crate::metrics::{EEZO_MEMPOOL_BYTES, EEZO_MEMPOOL_LEN, EEZO_TX_REJECTED_TOTAL};
+
+/// 32-byte transaction hash.
+pub type TxHash = [u8; 32];
+
+/// 20-byte sender address (first 20 bytes of pubkey hash).
+pub type SenderAddress = [u8; 20];
+
+/// Number of buckets for virtual sharding (power of 2 for fast modulo).
+const NUM_BUCKETS: usize = 256;
+
+/// Default in-flight expiry in seconds (after which in-flight txs are returned to ready).
+const IN_FLIGHT_EXPIRY_SECS: u64 = 30;
+
+// ============================================================================
+// Core types
+// ============================================================================
+
+/// Runtime view of a transaction stored in the mempool.
+#[derive(Debug, Clone)]
+pub struct TxEntry {
+    pub hash: TxHash,
+    pub sender: SenderAddress,
+    pub bytes: Arc<Vec<u8>>,
+    pub received_at: Instant,
+    pub requeue_count: u32,
+    pub nonce: u64,
+    pub fee: u64,
+}
+
+/// Public status exposed to `/tx/{hash}`.
+#[derive(Debug, Clone)]
+pub enum TxStatus {
+    Pending,
+    InFlight,
+    Included { block_height: u64 },
+    Rejected { error: String },
+}
+
+/// Error type for submit operations.
+#[derive(Debug)]
+pub enum SubmitError {
+    RateLimited,
+    QueueFull,
+    BytesCapReached,
+    Duplicate,
+    ActorClosed,
+}
+
+impl std::fmt::Display for SubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubmitError::RateLimited => write!(f, "rate limited"),
+            SubmitError::QueueFull => write!(f, "mempool full"),
+            SubmitError::BytesCapReached => write!(f, "mempool byte cap reached"),
+            SubmitError::Duplicate => write!(f, "duplicate transaction"),
+            SubmitError::ActorClosed => write!(f, "mempool actor closed"),
+        }
+    }
+}
+impl std::error::Error for SubmitError {}
+
+/// Response for GetBatch request.
+#[derive(Debug)]
+pub struct BatchResponse {
+    /// Transactions in the batch (in priority order).
+    pub txs: Vec<Arc<TxEntry>>,
+    /// Total size in bytes.
+    pub total_bytes: usize,
+}
+
+// ============================================================================
+// Actor messages
+// ============================================================================
+
+/// Messages that can be sent to the mempool actor.
+pub enum MempoolMsg {
+    /// Submit a new transaction.
+    Submit {
+        ip: IpAddr,
+        entry: TxEntry,
+        reply: oneshot::Sender<Result<(), SubmitError>>,
+    },
+    /// Get a batch of transactions for block building.
+    GetBatch {
+        max_bytes: usize,
+        max_txs: usize,
+        reply: oneshot::Sender<BatchResponse>,
+    },
+    /// Prefetch a batch (prepare ahead of time).
+    Prefetch {
+        max_bytes: usize,
+        max_txs: usize,
+    },
+    /// Notify that a block was committed with these transaction hashes.
+    OnBlockCommit {
+        height: u64,
+        applied_txs: Vec<TxHash>,
+    },
+    /// Return in-flight txs back to ready queues (on rollback/failure).
+    ReturnInFlight {
+        tx_hashes: Vec<TxHash>,
+    },
+    /// Get status of a transaction.
+    GetStatus {
+        hash: TxHash,
+        reply: oneshot::Sender<Option<TxStatus>>,
+    },
+    /// Get mempool stats (len, bytes, max_len, max_bytes).
+    GetStats {
+        reply: oneshot::Sender<MempoolStats>,
+    },
+    /// Shutdown the actor.
+    Shutdown,
+}
+
+/// Mempool statistics.
+#[derive(Debug, Clone)]
+pub struct MempoolStats {
+    pub len: usize,
+    pub cur_bytes: usize,
+    pub max_len: usize,
+    pub max_bytes: usize,
+    pub in_flight_count: usize,
+    pub bucket_count: usize,
+}
+
+// ============================================================================
+// Internal bucket structure
+// ============================================================================
+
+/// A single bucket in the virtual-sharded mempool.
+/// Each bucket holds transactions for senders whose address hash maps to this bucket.
+#[derive(Debug, Default)]
+struct MempoolBucket {
+    /// Transactions in this bucket, ordered by (fee desc, received_at asc).
+    queue: VecDeque<Arc<TxEntry>>,
+}
+
+/// Simple token-bucket per IP for rate limiting.
+#[derive(Debug, Clone)]
+struct RateBucket {
+    capacity: u32,
+    tokens: f64,
+    refill_per_sec: f64,
+    last_refill: Instant,
+}
+
+impl RateBucket {
+    fn new(capacity: u32, refill_per_sec: f64) -> Self {
+        Self {
+            capacity,
+            tokens: capacity as f64,
+            refill_per_sec,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn allow(&mut self, cost: u32) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        if elapsed > 0.0 {
+            self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity as f64);
+            self.last_refill = now;
+        }
+        if self.tokens >= cost as f64 {
+            self.tokens -= cost as f64;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// In-flight entry with timestamp for expiry.
+#[derive(Debug)]
+struct InFlightEntry {
+    entry: Arc<TxEntry>,
+    reserved_at: Instant,
+}
+
+// ============================================================================
+// MempoolActor
+// ============================================================================
+
+/// Configuration for the mempool actor.
+#[derive(Debug, Clone)]
+pub struct MempoolActorConfig {
+    pub max_len: usize,
+    pub max_bytes: usize,
+    pub rate_bucket_capacity: u32,
+    pub rate_refill_per_minute: u32,
+    pub in_flight_expiry_secs: u64,
+}
+
+impl Default for MempoolActorConfig {
+    fn default() -> Self {
+        Self {
+            max_len: 10_000,
+            max_bytes: 10 * 1024 * 1024, // 10 MB
+            rate_bucket_capacity: 100,
+            rate_refill_per_minute: 600,
+            in_flight_expiry_secs: IN_FLIGHT_EXPIRY_SECS,
+        }
+    }
+}
+
+/// The mempool actor that owns all internal state.
+pub struct MempoolActor {
+    /// Bucketed queues by sender address hash.
+    buckets: Vec<MempoolBucket>,
+    /// Index from tx hash to bucket index (for fast lookup).
+    hash_to_bucket: HashMap<TxHash, usize>,
+    /// In-flight transactions (reserved for a pending block).
+    in_flight: HashMap<TxHash, InFlightEntry>,
+    /// Transaction statuses (survives even after tx is removed).
+    statuses: HashMap<TxHash, TxStatus>,
+    /// Current byte count.
+    cur_bytes: usize,
+    /// Configuration.
+    config: MempoolActorConfig,
+    /// Per-IP rate buckets.
+    ip_buckets: HashMap<IpAddr, RateBucket>,
+    /// Prefetched batch (if any).
+    prefetched: Option<BatchResponse>,
+    /// Channel receiver for messages.
+    receiver: mpsc::Receiver<MempoolMsg>,
+}
+
+impl MempoolActor {
+    /// Create a new mempool actor.
+    pub fn new(config: MempoolActorConfig, receiver: mpsc::Receiver<MempoolMsg>) -> Self {
+        let mut buckets = Vec::with_capacity(NUM_BUCKETS);
+        for _ in 0..NUM_BUCKETS {
+            buckets.push(MempoolBucket::default());
+        }
+
+        Self {
+            buckets,
+            hash_to_bucket: HashMap::new(),
+            in_flight: HashMap::new(),
+            statuses: HashMap::new(),
+            cur_bytes: 0,
+            config,
+            ip_buckets: HashMap::new(),
+            prefetched: None,
+            receiver,
+        }
+    }
+
+    /// Run the actor event loop.
+    pub async fn run(mut self) {
+        log::info!(
+            "mempool-actor: starting (max_len={}, max_bytes={}, buckets={})",
+            self.config.max_len,
+            self.config.max_bytes,
+            NUM_BUCKETS
+        );
+
+        while let Some(msg) = self.receiver.recv().await {
+            match msg {
+                MempoolMsg::Submit { ip, entry, reply } => {
+                    let result = self.handle_submit(ip, entry);
+                    let _ = reply.send(result);
+                }
+                MempoolMsg::GetBatch { max_bytes, max_txs, reply } => {
+                    let response = self.handle_get_batch(max_bytes, max_txs);
+                    let _ = reply.send(response);
+                }
+                MempoolMsg::Prefetch { max_bytes, max_txs } => {
+                    self.handle_prefetch(max_bytes, max_txs);
+                }
+                MempoolMsg::OnBlockCommit { height, applied_txs } => {
+                    self.handle_block_commit(height, &applied_txs);
+                }
+                MempoolMsg::ReturnInFlight { tx_hashes } => {
+                    self.handle_return_in_flight(&tx_hashes);
+                }
+                MempoolMsg::GetStatus { hash, reply } => {
+                    let status = self.statuses.get(&hash).cloned();
+                    let _ = reply.send(status);
+                }
+                MempoolMsg::GetStats { reply } => {
+                    let stats = self.get_stats();
+                    let _ = reply.send(stats);
+                }
+                MempoolMsg::Shutdown => {
+                    log::info!("mempool-actor: shutting down");
+                    break;
+                }
+            }
+
+            // Periodically expire old in-flight entries
+            self.expire_in_flight();
+        }
+
+        log::info!("mempool-actor: stopped");
+    }
+
+    /// Get bucket index for a sender address.
+    #[inline]
+    fn bucket_index(sender: &SenderAddress) -> usize {
+        // Use first byte of sender address as bucket index
+        // This provides a simple, fast hash distribution
+        sender[0] as usize % NUM_BUCKETS
+    }
+
+    /// Handle submit message.
+    fn handle_submit(&mut self, ip: IpAddr, entry: TxEntry) -> Result<(), SubmitError> {
+        // Check for duplicates
+        if self.hash_to_bucket.contains_key(&entry.hash) || self.in_flight.contains_key(&entry.hash) {
+            return Err(SubmitError::Duplicate);
+        }
+        if self.statuses.contains_key(&entry.hash) {
+            return Err(SubmitError::Duplicate);
+        }
+
+        // Rate limit check
+        let bucket = self.ip_buckets.entry(ip).or_insert_with(|| {
+            RateBucket::new(
+                self.config.rate_bucket_capacity,
+                self.config.rate_refill_per_minute as f64 / 60.0,
+            )
+        });
+        if !bucket.allow(1) {
+            return Err(SubmitError::RateLimited);
+        }
+
+        // Capacity checks
+        let total_len: usize = self.buckets.iter().map(|b| b.queue.len()).sum();
+        if total_len >= self.config.max_len {
+            return Err(SubmitError::QueueFull);
+        }
+
+        let entry_bytes = entry.bytes.len();
+        if self.cur_bytes + entry_bytes > self.config.max_bytes {
+            return Err(SubmitError::BytesCapReached);
+        }
+
+        // Insert into bucket
+        let bucket_idx = Self::bucket_index(&entry.sender);
+        let entry_arc = Arc::new(entry.clone());
+        
+        self.buckets[bucket_idx].queue.push_back(entry_arc);
+        self.hash_to_bucket.insert(entry.hash, bucket_idx);
+        self.statuses.insert(entry.hash, TxStatus::Pending);
+        self.cur_bytes += entry_bytes;
+
+        // Invalidate prefetch (new tx may change optimal batch)
+        self.prefetched = None;
+
+        #[cfg(feature = "metrics")]
+        self.refresh_gauges();
+
+        log::debug!(
+            "mempool-actor: submitted tx hash=0x{} bucket={} total_len={}",
+            hex::encode(&entry.hash[..4]),
+            bucket_idx,
+            total_len + 1
+        );
+
+        Ok(())
+    }
+
+    /// Handle get batch message.
+    fn handle_get_batch(&mut self, max_bytes: usize, max_txs: usize) -> BatchResponse {
+        // Check if we have a valid prefetched batch
+        if let Some(prefetched) = self.prefetched.take() {
+            if prefetched.total_bytes <= max_bytes && prefetched.txs.len() <= max_txs {
+                // Move prefetched txs to in-flight
+                for tx in &prefetched.txs {
+                    self.move_to_in_flight(tx.clone());
+                }
+                return prefetched;
+            }
+        }
+
+        // Build a new batch
+        self.build_batch(max_bytes, max_txs)
+    }
+
+    /// Build a batch from ready queues.
+    fn build_batch(&mut self, max_bytes: usize, max_txs: usize) -> BatchResponse {
+        let mut txs = Vec::new();
+        let mut total_bytes = 0;
+
+        // Collect candidates from all buckets (round-robin for fairness)
+        let mut candidates: Vec<Arc<TxEntry>> = Vec::new();
+        for bucket in &self.buckets {
+            candidates.extend(bucket.queue.iter().cloned());
+        }
+
+        // Sort by fee (descending), then by received_at (ascending)
+        candidates.sort_by(|a, b| {
+            b.fee.cmp(&a.fee)
+                .then_with(|| a.received_at.cmp(&b.received_at))
+        });
+
+        // Pick txs up to limits
+        for entry in candidates {
+            // Skip if already in-flight (shouldn't happen, but defensive)
+            if self.in_flight.contains_key(&entry.hash) {
+                continue;
+            }
+
+            let entry_bytes = entry.bytes.len();
+            if txs.len() >= max_txs {
+                break;
+            }
+            if total_bytes + entry_bytes > max_bytes && !txs.is_empty() {
+                break;
+            }
+
+            // Move to in-flight
+            self.move_to_in_flight(entry.clone());
+
+            total_bytes += entry_bytes;
+            txs.push(entry);
+        }
+
+        log::debug!(
+            "mempool-actor: built batch with {} txs, {} bytes",
+            txs.len(),
+            total_bytes
+        );
+
+        BatchResponse { txs, total_bytes }
+    }
+
+    /// Move a transaction from ready queue to in-flight.
+    fn move_to_in_flight(&mut self, entry: Arc<TxEntry>) {
+        let hash = entry.hash;
+        
+        // Remove from bucket
+        if let Some(bucket_idx) = self.hash_to_bucket.remove(&hash) {
+            let bucket = &mut self.buckets[bucket_idx];
+            bucket.queue.retain(|e| e.hash != hash);
+        }
+
+        // Add to in-flight
+        self.in_flight.insert(hash, InFlightEntry {
+            entry,
+            reserved_at: Instant::now(),
+        });
+
+        // Update status
+        self.statuses.insert(hash, TxStatus::InFlight);
+    }
+
+    /// Handle prefetch message.
+    fn handle_prefetch(&mut self, max_bytes: usize, max_txs: usize) {
+        // Build prefetched batch WITHOUT moving to in-flight
+        let mut txs = Vec::new();
+        let mut total_bytes = 0;
+
+        // Collect candidates from all buckets
+        let mut candidates: Vec<Arc<TxEntry>> = Vec::new();
+        for bucket in &self.buckets {
+            candidates.extend(bucket.queue.iter().cloned());
+        }
+
+        // Sort by fee (descending), then by received_at (ascending)
+        candidates.sort_by(|a, b| {
+            b.fee.cmp(&a.fee)
+                .then_with(|| a.received_at.cmp(&b.received_at))
+        });
+
+        // Pick txs up to limits (but don't include in-flight txs)
+        for entry in candidates {
+            if self.in_flight.contains_key(&entry.hash) {
+                continue;
+            }
+
+            let entry_bytes = entry.bytes.len();
+            if txs.len() >= max_txs {
+                break;
+            }
+            if total_bytes + entry_bytes > max_bytes && !txs.is_empty() {
+                break;
+            }
+
+            total_bytes += entry_bytes;
+            txs.push(entry);
+        }
+
+        log::debug!(
+            "mempool-actor: prefetched batch with {} txs, {} bytes",
+            txs.len(),
+            total_bytes
+        );
+
+        self.prefetched = Some(BatchResponse { txs, total_bytes });
+    }
+
+    /// Handle block commit message.
+    fn handle_block_commit(&mut self, height: u64, applied_txs: &[TxHash]) {
+        for hash in applied_txs {
+            // Remove from in-flight
+            if let Some(entry) = self.in_flight.remove(hash) {
+                self.cur_bytes = self.cur_bytes.saturating_sub(entry.entry.bytes.len());
+            }
+
+            // Remove from ready queues (in case it wasn't in-flight)
+            if let Some(bucket_idx) = self.hash_to_bucket.remove(hash) {
+                let bucket = &mut self.buckets[bucket_idx];
+                if let Some(pos) = bucket.queue.iter().position(|e| &e.hash == hash) {
+                    if let Some(entry) = bucket.queue.remove(pos) {
+                        self.cur_bytes = self.cur_bytes.saturating_sub(entry.bytes.len());
+                    }
+                }
+            }
+
+            // Update status
+            self.statuses.insert(*hash, TxStatus::Included { block_height: height });
+        }
+
+        // Invalidate prefetch (state changed)
+        self.prefetched = None;
+
+        #[cfg(feature = "metrics")]
+        self.refresh_gauges();
+
+        log::debug!(
+            "mempool-actor: block commit h={}, removed {} txs",
+            height,
+            applied_txs.len()
+        );
+    }
+
+    /// Handle return in-flight message (on rollback/failure).
+    fn handle_return_in_flight(&mut self, tx_hashes: &[TxHash]) {
+        for hash in tx_hashes {
+            if let Some(in_flight_entry) = self.in_flight.remove(hash) {
+                let entry = in_flight_entry.entry;
+                let bucket_idx = Self::bucket_index(&entry.sender);
+
+                // Return to bucket
+                self.buckets[bucket_idx].queue.push_back(entry.clone());
+                self.hash_to_bucket.insert(*hash, bucket_idx);
+                self.statuses.insert(*hash, TxStatus::Pending);
+
+                log::debug!(
+                    "mempool-actor: returned in-flight tx hash=0x{} to bucket={}",
+                    hex::encode(&hash[..4]),
+                    bucket_idx
+                );
+            }
+        }
+
+        // Invalidate prefetch
+        self.prefetched = None;
+    }
+
+    /// Expire old in-flight entries.
+    fn expire_in_flight(&mut self) {
+        let now = Instant::now();
+        let expiry_duration = std::time::Duration::from_secs(self.config.in_flight_expiry_secs);
+
+        let expired: Vec<TxHash> = self.in_flight
+            .iter()
+            .filter(|(_, e)| now.duration_since(e.reserved_at) > expiry_duration)
+            .map(|(h, _)| *h)
+            .collect();
+
+        if !expired.is_empty() {
+            log::warn!(
+                "mempool-actor: expiring {} stale in-flight txs",
+                expired.len()
+            );
+            self.handle_return_in_flight(&expired);
+        }
+    }
+
+    /// Get mempool stats.
+    fn get_stats(&self) -> MempoolStats {
+        let len: usize = self.buckets.iter().map(|b| b.queue.len()).sum();
+        MempoolStats {
+            len,
+            cur_bytes: self.cur_bytes,
+            max_len: self.config.max_len,
+            max_bytes: self.config.max_bytes,
+            in_flight_count: self.in_flight.len(),
+            bucket_count: NUM_BUCKETS,
+        }
+    }
+
+    /// Refresh Prometheus gauges.
+    #[cfg(feature = "metrics")]
+    fn refresh_gauges(&self) {
+        let len: usize = self.buckets.iter().map(|b| b.queue.len()).sum();
+        EEZO_MEMPOOL_LEN.set(len as i64);
+        EEZO_MEMPOOL_BYTES.set(self.cur_bytes as i64);
+    }
+}
+
+// ============================================================================
+// MempoolActorHandle
+// ============================================================================
+
+/// Handle for sending messages to the mempool actor.
+/// 
+/// This is the main interface used by other parts of the node.
+/// All operations are essentially wait-free (just channel send).
+#[derive(Clone)]
+pub struct MempoolActorHandle {
+    sender: mpsc::Sender<MempoolMsg>,
+}
+
+impl MempoolActorHandle {
+    /// Create a new mempool actor and return the handle.
+    /// 
+    /// The actor is spawned as a background Tokio task.
+    pub fn spawn(config: MempoolActorConfig) -> Self {
+        // Use bounded channel with reasonable backpressure
+        let (sender, receiver) = mpsc::channel(1024);
+        
+        let actor = MempoolActor::new(config, receiver);
+        tokio::spawn(actor.run());
+
+        Self { sender }
+    }
+
+    /// Submit a new transaction to the mempool.
+    pub async fn submit(&self, ip: IpAddr, entry: TxEntry) -> Result<(), SubmitError> {
+        let (tx, rx) = oneshot::channel();
+        
+        if self.sender.send(MempoolMsg::Submit { ip, entry, reply: tx }).await.is_err() {
+            return Err(SubmitError::ActorClosed);
+        }
+
+        rx.await.unwrap_or(Err(SubmitError::ActorClosed))
+    }
+
+    /// Get a batch of transactions for block building.
+    pub async fn get_batch(&self, max_bytes: usize, max_txs: usize) -> BatchResponse {
+        let (tx, rx) = oneshot::channel();
+        
+        if self.sender.send(MempoolMsg::GetBatch { max_bytes, max_txs, reply: tx }).await.is_err() {
+            return BatchResponse { txs: vec![], total_bytes: 0 };
+        }
+
+        rx.await.unwrap_or(BatchResponse { txs: vec![], total_bytes: 0 })
+    }
+
+    /// Request prefetch of next batch (non-blocking).
+    pub fn prefetch(&self, max_bytes: usize, max_txs: usize) {
+        let _ = self.sender.try_send(MempoolMsg::Prefetch { max_bytes, max_txs });
+    }
+
+    /// Notify that a block was committed.
+    pub async fn on_block_commit(&self, height: u64, applied_txs: Vec<TxHash>) {
+        let _ = self.sender.send(MempoolMsg::OnBlockCommit { height, applied_txs }).await;
+    }
+
+    /// Return in-flight txs back to ready queues (on rollback).
+    pub async fn return_in_flight(&self, tx_hashes: Vec<TxHash>) {
+        let _ = self.sender.send(MempoolMsg::ReturnInFlight { tx_hashes }).await;
+    }
+
+    /// Get status of a transaction.
+    pub async fn get_status(&self, hash: TxHash) -> Option<TxStatus> {
+        let (tx, rx) = oneshot::channel();
+        
+        if self.sender.send(MempoolMsg::GetStatus { hash, reply: tx }).await.is_err() {
+            return None;
+        }
+
+        rx.await.unwrap_or(None)
+    }
+
+    /// Get mempool stats.
+    pub async fn get_stats(&self) -> MempoolStats {
+        let (tx, rx) = oneshot::channel();
+        
+        if self.sender.send(MempoolMsg::GetStats { reply: tx }).await.is_err() {
+            return MempoolStats {
+                len: 0,
+                cur_bytes: 0,
+                max_len: 0,
+                max_bytes: 0,
+                in_flight_count: 0,
+                bucket_count: 0,
+            };
+        }
+
+        rx.await.unwrap_or(MempoolStats {
+            len: 0,
+            cur_bytes: 0,
+            max_len: 0,
+            max_bytes: 0,
+            in_flight_count: 0,
+            bucket_count: 0,
+        })
+    }
+
+    /// Shutdown the actor.
+    pub async fn shutdown(&self) {
+        let _ = self.sender.send(MempoolMsg::Shutdown).await;
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn test_entry(hash_byte: u8, sender_byte: u8, nonce: u64, fee: u64) -> TxEntry {
+        let mut hash = [0u8; 32];
+        hash[0] = hash_byte;
+        
+        let mut sender = [0u8; 20];
+        sender[0] = sender_byte;
+
+        TxEntry {
+            hash,
+            sender,
+            bytes: Arc::new(vec![0u8; 100]),
+            received_at: Instant::now(),
+            requeue_count: 0,
+            nonce,
+            fee,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_submit_and_get_batch() {
+        let config = MempoolActorConfig {
+            max_len: 100,
+            max_bytes: 100_000,
+            rate_bucket_capacity: 100,
+            rate_refill_per_minute: 6000,
+            in_flight_expiry_secs: 30,
+        };
+
+        let handle = MempoolActorHandle::spawn(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Submit some transactions
+        for i in 0..5 {
+            let entry = test_entry(i, i, i as u64, 100 - i as u64);
+            let result = handle.submit(ip, entry).await;
+            assert!(result.is_ok(), "Submit {} failed: {:?}", i, result);
+        }
+
+        // Get batch
+        let batch = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch.txs.len(), 5);
+        assert!(batch.total_bytes > 0);
+
+        // Txs should be sorted by fee (descending)
+        for i in 0..4 {
+            assert!(batch.txs[i].fee >= batch.txs[i + 1].fee, 
+                "Batch not sorted by fee: {} < {}", batch.txs[i].fee, batch.txs[i + 1].fee);
+        }
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_in_flight_tracking() {
+        let config = MempoolActorConfig {
+            max_len: 100,
+            max_bytes: 100_000,
+            rate_bucket_capacity: 100,
+            rate_refill_per_minute: 6000,
+            in_flight_expiry_secs: 30,
+        };
+
+        let handle = MempoolActorHandle::spawn(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Submit transactions
+        let entry1 = test_entry(1, 1, 0, 100);
+        let entry2 = test_entry(2, 2, 0, 90);
+        let hash1 = entry1.hash;
+        let hash2 = entry2.hash;
+
+        handle.submit(ip, entry1).await.unwrap();
+        handle.submit(ip, entry2).await.unwrap();
+
+        // Get first batch - moves txs to in-flight
+        let batch1 = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch1.txs.len(), 2);
+
+        // Get second batch - should be empty (txs are in-flight)
+        let batch2 = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch2.txs.len(), 0, "Second batch should be empty (txs in-flight)");
+
+        // Commit block with tx1
+        handle.on_block_commit(1, vec![hash1]).await;
+
+        // tx2 is still in-flight, batch should be empty
+        let batch3 = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch3.txs.len(), 0);
+
+        // Commit tx2
+        handle.on_block_commit(2, vec![hash2]).await;
+
+        // Check statuses
+        let status1 = handle.get_status(hash1).await;
+        let status2 = handle.get_status(hash2).await;
+        assert!(matches!(status1, Some(TxStatus::Included { block_height: 1 })));
+        assert!(matches!(status2, Some(TxStatus::Included { block_height: 2 })));
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_no_zombie_tx_across_blocks() {
+        let config = MempoolActorConfig {
+            max_len: 100,
+            max_bytes: 100_000,
+            rate_bucket_capacity: 100,
+            rate_refill_per_minute: 6000,
+            in_flight_expiry_secs: 30,
+        };
+
+        let handle = MempoolActorHandle::spawn(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Submit tx
+        let entry = test_entry(1, 1, 0, 100);
+        let hash = entry.hash;
+        handle.submit(ip, entry).await.unwrap();
+
+        // Block N: get batch containing tx
+        let batch_n = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch_n.txs.len(), 1);
+        assert_eq!(batch_n.txs[0].hash, hash);
+
+        // Block N+1: try to get batch while tx is still in-flight
+        // This should NOT include the same tx
+        let batch_n1 = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch_n1.txs.len(), 0, "Block N+1 should not include in-flight tx");
+
+        // Commit block N
+        handle.on_block_commit(1, vec![hash]).await;
+
+        // Block N+2: tx should still not appear (it's committed)
+        let batch_n2 = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch_n2.txs.len(), 0, "Committed tx should not reappear");
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_return_in_flight_on_failure() {
+        let config = MempoolActorConfig {
+            max_len: 100,
+            max_bytes: 100_000,
+            rate_bucket_capacity: 100,
+            rate_refill_per_minute: 6000,
+            in_flight_expiry_secs: 30,
+        };
+
+        let handle = MempoolActorHandle::spawn(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Submit tx
+        let entry = test_entry(1, 1, 0, 100);
+        let hash = entry.hash;
+        handle.submit(ip, entry).await.unwrap();
+
+        // Get batch (moves to in-flight)
+        let batch1 = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch1.txs.len(), 1);
+
+        // Simulate failure: return tx to ready queue
+        handle.return_in_flight(vec![hash]).await;
+
+        // Get batch again - should include the returned tx
+        let batch2 = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch2.txs.len(), 1);
+        assert_eq!(batch2.txs[0].hash, hash);
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_prefetch() {
+        let config = MempoolActorConfig {
+            max_len: 100,
+            max_bytes: 100_000,
+            rate_bucket_capacity: 100,
+            rate_refill_per_minute: 6000,
+            in_flight_expiry_secs: 30,
+        };
+
+        let handle = MempoolActorHandle::spawn(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Submit transactions
+        for i in 0..3 {
+            let entry = test_entry(i, i, i as u64, 100);
+            handle.submit(ip, entry).await.unwrap();
+        }
+
+        // Request prefetch
+        handle.prefetch(10_000, 10);
+        
+        // Small delay for prefetch to complete
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Get batch - should use prefetched data
+        let batch = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch.txs.len(), 3);
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_rejection() {
+        let config = MempoolActorConfig {
+            max_len: 100,
+            max_bytes: 100_000,
+            rate_bucket_capacity: 100,
+            rate_refill_per_minute: 6000,
+            in_flight_expiry_secs: 30,
+        };
+
+        let handle = MempoolActorHandle::spawn(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        let entry1 = test_entry(1, 1, 0, 100);
+        let entry2 = test_entry(1, 1, 0, 100); // Same hash
+
+        // First submit succeeds
+        let result1 = handle.submit(ip, entry1).await;
+        assert!(result1.is_ok());
+
+        // Second submit with same hash fails
+        let result2 = handle.submit(ip, entry2).await;
+        assert!(matches!(result2, Err(SubmitError::Duplicate)));
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_capacity_limits() {
+        let config = MempoolActorConfig {
+            max_len: 2,
+            max_bytes: 100_000,
+            rate_bucket_capacity: 100,
+            rate_refill_per_minute: 6000,
+            in_flight_expiry_secs: 30,
+        };
+
+        let handle = MempoolActorHandle::spawn(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Fill to capacity
+        handle.submit(ip, test_entry(1, 1, 0, 100)).await.unwrap();
+        handle.submit(ip, test_entry(2, 2, 0, 100)).await.unwrap();
+
+        // Third submit should fail
+        let result = handle.submit(ip, test_entry(3, 3, 0, 100)).await;
+        assert!(matches!(result, Err(SubmitError::QueueFull)));
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_stats() {
+        let config = MempoolActorConfig {
+            max_len: 100,
+            max_bytes: 100_000,
+            rate_bucket_capacity: 100,
+            rate_refill_per_minute: 6000,
+            in_flight_expiry_secs: 30,
+        };
+
+        let handle = MempoolActorHandle::spawn(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Submit 3 transactions
+        for i in 0..3 {
+            handle.submit(ip, test_entry(i, i, i as u64, 100)).await.unwrap();
+        }
+
+        let stats = handle.get_stats().await;
+        assert_eq!(stats.len, 3);
+        assert_eq!(stats.cur_bytes, 300);
+        assert_eq!(stats.max_len, 100);
+        assert_eq!(stats.in_flight_count, 0);
+        assert_eq!(stats.bucket_count, 256);
+
+        // Get batch (moves to in-flight)
+        let _ = handle.get_batch(10_000, 10).await;
+
+        let stats2 = handle.get_stats().await;
+        assert_eq!(stats2.len, 0);
+        assert_eq!(stats2.in_flight_count, 3);
+
+        handle.shutdown().await;
+    }
+}
