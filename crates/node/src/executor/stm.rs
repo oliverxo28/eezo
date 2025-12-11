@@ -5,6 +5,8 @@
 //!
 //! T73.6: Multi-wave parallelism using rayon's par_iter() for speculative execution.
 //!
+//! T82.1: AnalyzedTx & BlockOverlay groundwork for higher TPS.
+//!
 //! ## Conflict Model
 //!
 //! A conflict occurs when:
@@ -25,8 +27,16 @@
 //! 3. Detect conflicts between concurrent transactions
 //! 4. Conflicting transactions (higher index) are scheduled for retry
 //! 5. Continue until all transactions are committed or max retries reached
+//!
+//! ## T82.1 Enhancements
+//!
+//! - `AnalyzedTx`: Pre-computed conflict metadata per transaction (once per block).
+//! - `BlockOverlay`: Block-level state overlay to avoid cloning full state per wave.
+//!   Waves read from overlay first, fall back to base snapshot.
+//! - Conflict detection uses `ConflictMetadata` fingerprints for efficient comparison.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
@@ -38,6 +48,192 @@ use eezo_ledger::tx::{apply_tx, validate_tx_stateful, TxStateError};
 use eezo_ledger::sender_from_pubkey_first20;
 
 use crate::executor::{ExecInput, ExecOutcome, Executor};
+
+// =============================================================================
+// T82.1: AnalyzedTx & ConflictMetadata
+// =============================================================================
+
+/// Pre-computed conflict metadata for a transaction.
+///
+/// T82.1: This is computed once per tx at block start and used for all
+/// conflict comparisons, avoiding repeated inspection of raw tx data.
+///
+/// For simple transfers, we store 64-bit fingerprints of sender and receiver.
+/// TODO(T82.4): Add `Complex { bloom: SmallBloom }` variant for multi-touch txs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConflictMetadata {
+    /// Simple transfer: sender writes to from_key, receiver gets to_key.
+    /// Keys are 64-bit fingerprints derived from addresses for fast comparison.
+    Simple {
+        /// 64-bit fingerprint of sender address
+        from_key: u64,
+        /// 64-bit fingerprint of receiver address  
+        to_key: u64,
+    },
+    // TODO(T82.4): Add Complex variant with bloom filter for multi-account txs
+    // Complex { bloom: SmallBloom },
+}
+
+impl ConflictMetadata {
+    /// Check if this tx might conflict with another based on metadata.
+    ///
+    /// Two txs conflict if they touch overlapping keys (addresses).
+    /// For Simple metadata, we compare fingerprints directly.
+    /// Supply conflicts are always assumed (all txs burn fees).
+    #[inline]
+    pub fn conflicts_with(&self, other: &ConflictMetadata) -> bool {
+        match (self, other) {
+            (
+                ConflictMetadata::Simple { from_key: f1, to_key: t1 },
+                ConflictMetadata::Simple { from_key: f2, to_key: t2 },
+            ) => {
+                // Conflict if any key overlaps:
+                // - from1 == from2 (same sender)
+                // - from1 == to2 (sender is receiver of other)
+                // - to1 == from2 (receiver is sender of other)
+                // - to1 == to2 (same receiver)
+                // Note: Supply conflicts are implicit (all txs write Supply)
+                f1 == f2 || f1 == t2 || t1 == f2 || t1 == t2
+            }
+            // TODO(T82.4): Handle Complex metadata with bloom filter intersection
+        }
+    }
+}
+
+/// Analyzed transaction with pre-computed conflict metadata.
+///
+/// T82.1: Internal representation that caches conflict-relevant data
+/// computed once at block start. Does not change wire format.
+#[derive(Clone, Debug)]
+pub struct AnalyzedTx {
+    /// The original signed transaction
+    pub tx: Arc<SignedTx>,
+    /// Index in the block's tx list
+    pub tx_idx: usize,
+    /// Pre-computed sender address (derived from pubkey)
+    pub sender: Address,
+    /// Pre-computed conflict metadata
+    pub meta: ConflictMetadata,
+}
+
+/// Compute a 64-bit fingerprint from an Address for conflict detection.
+///
+/// Uses first 8 bytes of the address as a fast fingerprint.
+/// This is sufficient for conflict detection since full address
+/// comparison happens during actual state operations.
+#[inline]
+fn address_fingerprint(addr: &Address) -> u64 {
+    // Take first 8 bytes of address as u64 (little-endian)
+    let bytes = addr.as_bytes();
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
+}
+
+/// Analyze a signed transaction to build AnalyzedTx with conflict metadata.
+///
+/// Returns None if sender cannot be derived from pubkey.
+pub fn analyze_tx(tx: &SignedTx, tx_idx: usize) -> Option<AnalyzedTx> {
+    let sender = sender_from_pubkey_first20(tx)?;
+    let from_key = address_fingerprint(&sender);
+    let to_key = address_fingerprint(&tx.core.to);
+    
+    Some(AnalyzedTx {
+        tx: Arc::new(tx.clone()),
+        tx_idx,
+        sender,
+        meta: ConflictMetadata::Simple { from_key, to_key },
+    })
+}
+
+/// Analyze a batch of transactions into AnalyzedTx representations.
+///
+/// T82.1: Called once at block start. Txs that fail analysis (invalid sender)
+/// are excluded and will be skipped during execution.
+pub fn analyze_batch(txs: &[SignedTx]) -> Vec<AnalyzedTx> {
+    txs.iter()
+        .enumerate()
+        .filter_map(|(idx, tx)| analyze_tx(tx, idx))
+        .collect()
+}
+
+// =============================================================================
+// T82.1: BlockOverlay - Block-level state overlay
+// =============================================================================
+
+/// Block-level state overlay for efficient wave execution.
+///
+/// T82.1: Instead of cloning full state for each wave, we maintain an overlay
+/// of accounts modified within this block. Reads check overlay first, then
+/// fall back to the base snapshot.
+///
+/// This reduces per-wave allocation from O(total_accounts) to O(touched_accounts).
+#[derive(Clone, Debug, Default)]
+pub struct BlockOverlay {
+    /// Accounts modified within this block (address -> current state)
+    modified_accounts: HashMap<Address, Account>,
+    /// Total fees burned in this block (applied to Supply at block commit)
+    total_fees_burned: u128,
+}
+
+impl BlockOverlay {
+    /// Create a new empty overlay.
+    pub fn new() -> Self {
+        Self {
+            modified_accounts: HashMap::new(),
+            total_fees_burned: 0,
+        }
+    }
+
+    /// Get an account, checking overlay first then base snapshot.
+    #[inline]
+    pub fn get_account(&self, addr: &Address, base: &Accounts) -> Account {
+        self.modified_accounts
+            .get(addr)
+            .cloned()
+            .unwrap_or_else(|| base.get(addr))
+    }
+
+    /// Put an account into the overlay.
+    #[inline]
+    pub fn put_account(&mut self, addr: Address, acct: Account) {
+        self.modified_accounts.insert(addr, acct);
+    }
+
+    /// Record a fee burn (accumulated and applied to Supply at block commit).
+    #[inline]
+    pub fn record_fee_burn(&mut self, fee: u128) {
+        self.total_fees_burned = self.total_fees_burned.saturating_add(fee);
+    }
+
+    /// Get the total fees burned in this block.
+    #[inline]
+    pub fn total_fees_burned(&self) -> u128 {
+        self.total_fees_burned
+    }
+
+    /// Apply all overlay changes to the base state (called at block commit).
+    ///
+    /// This transfers modified accounts to the actual Accounts state and
+    /// applies accumulated fee burns to Supply.
+    pub fn apply_to_state(&self, accounts: &mut Accounts, supply: &mut Supply) {
+        for (addr, acct) in &self.modified_accounts {
+            accounts.put(*addr, acct.clone());
+        }
+        supply.apply_burn(self.total_fees_burned);
+    }
+
+    /// Get the number of accounts in the overlay (for diagnostics).
+    pub fn len(&self) -> usize {
+        self.modified_accounts.len()
+    }
+
+    /// Check if overlay is empty.
+    pub fn is_empty(&self) -> bool {
+        self.modified_accounts.is_empty()
+    }
+}
 
 /// State key for conflict tracking.
 /// 
@@ -267,6 +463,69 @@ impl StmExecutor {
     /// Get the configuration.
     pub fn config(&self) -> &StmConfig {
         &self.config
+    }
+
+    /// T82.1: Execute a transaction speculatively using AnalyzedTx and BlockOverlay.
+    ///
+    /// This version reads from overlay first, falls back to base snapshot.
+    /// Uses pre-computed sender from AnalyzedTx to avoid re-derivation.
+    fn execute_tx_with_overlay(
+        analyzed: &AnalyzedTx,
+        attempt: u16,
+        overlay: &BlockOverlay,
+        base_accounts: &Accounts,
+    ) -> TxContext {
+        let mut ctx = TxContext::new(analyzed.tx_idx);
+        ctx.attempt = attempt;
+        
+        let sender = analyzed.sender;
+        let receiver = analyzed.tx.core.to;
+        
+        // Record read set using StateKey (for compatibility with conflict detection)
+        ctx.read_set.insert(StateKey::Account(sender));
+        ctx.read_set.insert(StateKey::Account(receiver));
+        
+        // Read from overlay first, fall back to base
+        let sender_acc = overlay.get_account(&sender, base_accounts);
+        let receiver_acc = overlay.get_account(&receiver, base_accounts);
+        
+        // Validate nonce and balance
+        let core = &analyzed.tx.core;
+        if sender_acc.nonce != core.nonce {
+            // Temporary failure - may succeed after earlier txs commit
+            ctx.status = TxStatus::NeedsRetry;
+            return ctx;
+        }
+        
+        let need = core.amount.saturating_add(core.fee);
+        if sender_acc.balance < need {
+            ctx.status = TxStatus::NeedsRetry;
+            return ctx;
+        }
+        
+        // Compute new states
+        let mut new_sender = sender_acc.clone();
+        new_sender.balance = new_sender.balance.saturating_sub(need);
+        new_sender.nonce = new_sender.nonce.saturating_add(1);
+        
+        let mut new_receiver = receiver_acc.clone();
+        new_receiver.balance = new_receiver.balance.saturating_add(core.amount);
+        
+        // Record write set
+        ctx.write_set.insert(StateKey::Account(sender));
+        ctx.write_set.insert(StateKey::Account(receiver));
+        ctx.write_set.insert(StateKey::Supply);
+        
+        ctx.spec_result = Some(SpeculativeResult {
+            sender,
+            receiver,
+            sender_account: new_sender,
+            receiver_account: new_receiver,
+            fee: core.fee,
+        });
+        
+        ctx.status = TxStatus::Committed;
+        ctx
     }
 
     /// Execute a single transaction speculatively against a snapshot.
@@ -652,6 +911,206 @@ impl StmExecutor {
         (contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block)
     }
 
+    /// T82.1: Execute all transactions using wave-based STM with BlockOverlay.
+    ///
+    /// This version uses:
+    /// - `AnalyzedTx` for pre-computed conflict metadata (avoids re-deriving sender each time)
+    /// - `BlockOverlay` to track modified accounts (avoids cloning full state per wave)
+    ///
+    /// The base snapshot is read-only; all writes go to the overlay.
+    /// At block commit, overlay changes are applied to the actual state.
+    ///
+    /// TODO(T82.4): Use ConflictMetadata fingerprints for faster conflict detection.
+    /// TODO(T82.4): Introduce per-wave bloom filters for conflict pre-screening.
+    ///
+    /// Returns (contexts, committed_txs, waves, conflicts, retries, aborted)
+    fn execute_stm_with_overlay(
+        &self,
+        txs: &[SignedTx],
+        accounts: &mut Accounts,
+        supply: &mut Supply,
+    ) -> (Vec<TxContext>, Vec<SignedTx>, u64, u64, u64, u64) {
+        let n = txs.len();
+        if n == 0 {
+            return (Vec::new(), Vec::new(), 0, 0, 0, 0);
+        }
+
+        // T82.1: Pre-analyze all transactions once at block start
+        let analyzed_txs = analyze_batch(txs);
+        
+        // Map from tx_idx to AnalyzedTx for quick lookup
+        let analyzed_map: HashMap<usize, &AnalyzedTx> = analyzed_txs
+            .iter()
+            .map(|a| (a.tx_idx, a))
+            .collect();
+
+        // Initialize contexts for all transactions
+        // Txs that failed analysis (invalid sender) start as Failed
+        let mut contexts: Vec<TxContext> = (0..n)
+            .map(|idx| {
+                if analyzed_map.contains_key(&idx) {
+                    TxContext::new(idx)
+                } else {
+                    let mut ctx = TxContext::new(idx);
+                    ctx.status = TxStatus::Failed("Invalid sender (cannot derive from pubkey)".to_string());
+                    ctx
+                }
+            })
+            .collect();
+
+        // STM metrics tracking
+        let mut waves_this_block: u64 = 0;
+        let mut conflicts_this_block: u64 = 0;
+        let mut retries_this_block: u64 = 0;
+        let mut aborted_this_block: u64 = 0;
+
+        // Track which txs have been finally committed
+        let mut finally_committed: HashSet<usize> = HashSet::new();
+
+        // T82.1: Block-level overlay (starts empty)
+        let mut overlay = BlockOverlay::new();
+
+        // Take a read-only base snapshot of accounts
+        // (we don't clone supply since we track fees in overlay)
+        let base_accounts = accounts.clone();
+
+        // Wave-based execution loop
+        loop {
+            waves_this_block += 1;
+            log::debug!("STM(overlay): starting wave {}", waves_this_block);
+
+            // Find transactions that need execution in this wave
+            let pending: Vec<(usize, u16)> = contexts
+                .iter()
+                .filter(|c| c.status == TxStatus::NeedsRetry)
+                .map(|c| (c.tx_idx, c.attempt))
+                .collect();
+
+            if pending.is_empty() {
+                break;
+            }
+
+            // Check for max retries before execution
+            for &(tx_idx, attempt) in &pending {
+                if attempt >= self.config.max_retries as u16 {
+                    contexts[tx_idx].status = TxStatus::Aborted;
+                    log::warn!("STM(overlay): tx {} aborted after {} retries", tx_idx, attempt);
+                    aborted_this_block += 1;
+                }
+            }
+            
+            // Filter out aborted txs
+            let pending: Vec<(usize, u16)> = pending
+                .into_iter()
+                .filter(|&(tx_idx, _)| contexts[tx_idx].status == TxStatus::NeedsRetry)
+                .collect();
+            
+            if pending.is_empty() {
+                break;
+            }
+
+            // Count retries
+            for &(_, attempt) in &pending {
+                if attempt > 0 {
+                    retries_this_block += 1;
+                }
+            }
+
+            // T82.1: Execute transactions in parallel using overlay
+            // Each tx reads from overlay (with base fallback) and computes speculative results.
+            // The overlay is shared read-only during parallel execution.
+            let overlay_ref = &overlay;
+            let base_ref = &base_accounts;
+            
+            let wave_results: Vec<TxContext> = pending
+                .par_iter()
+                .filter_map(|&(tx_idx, attempt)| {
+                    analyzed_map.get(&tx_idx).map(|analyzed| {
+                        Self::execute_tx_with_overlay(
+                            analyzed,
+                            attempt,
+                            overlay_ref,
+                            base_ref,
+                        )
+                    })
+                })
+                .collect();
+
+            // Update contexts with parallel results
+            for result in wave_results {
+                let tx_idx = result.tx_idx;
+                contexts[tx_idx] = result;
+            }
+
+            // Detect conflicts deterministically
+            let mut pending_indices: Vec<usize> = pending.iter().map(|&(idx, _)| idx).collect();
+            pending_indices.sort();
+
+            // TODO(T82.4): Use ConflictMetadata for faster conflict pre-screening
+            // Currently using existing StateKey-based conflict detection for correctness
+            let conflicts = Self::detect_conflicts_in_wave(&contexts, &pending_indices);
+            let conflict_set: HashSet<usize> = conflicts.into_iter().collect();
+            conflicts_this_block += conflict_set.len() as u64;
+
+            // Process results in tx index order and apply to overlay
+            for tx_idx in pending_indices {
+                let ctx = &mut contexts[tx_idx];
+                
+                if ctx.status != TxStatus::Committed {
+                    continue;
+                }
+
+                if conflict_set.contains(&tx_idx) {
+                    ctx.status = TxStatus::NeedsRetry;
+                    ctx.attempt += 1;
+                    ctx.spec_result = None;
+                    log::debug!("STM(overlay): tx {} conflicts, scheduling retry (attempt {})", tx_idx, ctx.attempt);
+                } else {
+                    // Apply speculative result to overlay (not to base state)
+                    if let Some(ref spec) = ctx.spec_result {
+                        overlay.put_account(spec.sender, spec.sender_account.clone());
+                        overlay.put_account(spec.receiver, spec.receiver_account.clone());
+                        overlay.record_fee_burn(spec.fee);
+                    }
+                    
+                    finally_committed.insert(tx_idx);
+                }
+            }
+
+            // Break if no more pending txs
+            let still_pending = contexts
+                .iter()
+                .filter(|c| c.status == TxStatus::NeedsRetry)
+                .count();
+            if still_pending == 0 {
+                break;
+            }
+        }
+
+        // T82.1: Apply overlay to actual state at block commit
+        overlay.apply_to_state(accounts, supply);
+
+        // Build committed_txs
+        let mut committed_indices: Vec<usize> = finally_committed.into_iter().collect();
+        committed_indices.sort();
+        let committed_txs: Vec<SignedTx> = committed_indices
+            .into_iter()
+            .map(|idx| txs[idx].clone())
+            .collect();
+
+        log::debug!(
+            "STM(overlay): completed {} waves, {} committed, {} failed/aborted, {} conflicts, {} retries, overlay_size={}",
+            waves_this_block,
+            committed_txs.len(),
+            n - committed_txs.len(),
+            conflicts_this_block,
+            retries_this_block,
+            overlay.len()
+        );
+
+        (contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block)
+    }
+
     /// Build a block header from the committed transactions.
     fn build_block_header(
         height: u64,
@@ -683,12 +1142,18 @@ impl StmExecutor {
 impl Executor for StmExecutor {
     /// Execute a block using Block-STM parallel execution.
     ///
+    /// T82.1: Uses BlockOverlay and AnalyzedTx for efficient execution:
+    /// - Transactions are analyzed once at block start (pre-computed sender/metadata)
+    /// - State changes tracked in overlay (no full state clone per wave)
+    /// - Overlay applied to base state at block commit
+    ///
     /// The implementation:
-    /// 1. Clones the current node state for speculative execution
-    /// 2. Runs STM scheduling loop (wave-based execution)
-    /// 3. Detects and resolves conflicts deterministically
-    /// 4. Builds the Block from committed transactions
-    /// 5. Returns the result (node state is NOT modified - caller handles that)
+    /// 1. Takes a read-only base snapshot of accounts
+    /// 2. Analyzes all txs to build AnalyzedTx with conflict metadata
+    /// 3. Runs STM scheduling loop (wave-based execution with overlay)
+    /// 4. Detects and resolves conflicts deterministically
+    /// 5. Applies overlay to base state at block commit
+    /// 6. Builds the Block from committed transactions
     fn execute_block(
         &self,
         node: &mut SingleNode,
@@ -716,9 +1181,10 @@ impl Executor for StmExecutor {
         let mut accounts = node.accounts.clone();
         let mut supply = node.supply.clone();
 
-        // Execute transactions using STM
+        // T82.1: Execute transactions using STM with overlay
+        // This uses AnalyzedTx and BlockOverlay for efficient execution
         let (_contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block) = 
-            self.execute_stm(&input.txs, &mut accounts, &mut supply);
+            self.execute_stm_with_overlay(&input.txs, &mut accounts, &mut supply);
         let tx_count = committed_txs.len();
 
         // T73.4: Emit STM-specific metrics (legacy eezo_stm_* prefix)
@@ -1006,5 +1472,268 @@ mod tests {
         
         // The test passes if we can access the metric without panicking
         // A full test with transactions would require setting up valid signed txs
+    }
+
+    // =========================================================================
+    // T82.1: AnalyzedTx & BlockOverlay Tests
+    // =========================================================================
+
+    #[test]
+    fn test_address_fingerprint_deterministic() {
+        let addr1 = Address([1u8; 20]);
+        let addr2 = Address([2u8; 20]);
+        
+        // Same address produces same fingerprint
+        let fp1a = address_fingerprint(&addr1);
+        let fp1b = address_fingerprint(&addr1);
+        assert_eq!(fp1a, fp1b);
+        
+        // Different addresses produce different fingerprints
+        let fp2 = address_fingerprint(&addr2);
+        assert_ne!(fp1a, fp2);
+    }
+
+    #[test]
+    fn test_analyzed_tx_construction_simple_transfer() {
+        use eezo_ledger::TxCore;
+        
+        // Create a test transaction
+        let sender_bytes: [u8; 20] = [0x11; 20];
+        let receiver_bytes: [u8; 20] = [0x22; 20];
+        
+        let tx = SignedTx {
+            core: TxCore {
+                to: Address(receiver_bytes),
+                amount: 1000,
+                fee: 1,
+                nonce: 0,
+            },
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+        
+        // Analyze the transaction
+        let analyzed = analyze_tx(&tx, 0).expect("analyze should succeed");
+        
+        // Check that sender was derived correctly
+        assert_eq!(analyzed.sender, Address(sender_bytes));
+        assert_eq!(analyzed.tx_idx, 0);
+        
+        // Check that ConflictMetadata is Simple with correct fingerprints
+        match &analyzed.meta {
+            ConflictMetadata::Simple { from_key, to_key } => {
+                assert_eq!(*from_key, address_fingerprint(&Address(sender_bytes)));
+                assert_eq!(*to_key, address_fingerprint(&Address(receiver_bytes)));
+            }
+        }
+    }
+
+    #[test]
+    fn test_analyzed_tx_invalid_sender_returns_none() {
+        use eezo_ledger::TxCore;
+        
+        // Create a transaction with pubkey too short
+        let tx = SignedTx {
+            core: TxCore {
+                to: Address([0x22; 20]),
+                amount: 1000,
+                fee: 1,
+                nonce: 0,
+            },
+            pubkey: vec![1, 2, 3], // Only 3 bytes, need at least 20
+            sig: vec![],
+        };
+        
+        let result = analyze_tx(&tx, 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_conflict_metadata_conflicts_with_same_sender() {
+        let addr1 = Address([1u8; 20]);
+        let addr2 = Address([2u8; 20]);
+        let addr3 = Address([3u8; 20]);
+        
+        let meta1 = ConflictMetadata::Simple {
+            from_key: address_fingerprint(&addr1),
+            to_key: address_fingerprint(&addr2),
+        };
+        
+        // Same sender, different receiver
+        let meta2 = ConflictMetadata::Simple {
+            from_key: address_fingerprint(&addr1),
+            to_key: address_fingerprint(&addr3),
+        };
+        
+        // Should conflict (same sender)
+        assert!(meta1.conflicts_with(&meta2));
+    }
+
+    #[test]
+    fn test_conflict_metadata_conflicts_with_overlapping_accounts() {
+        let addr1 = Address([1u8; 20]);
+        let addr2 = Address([2u8; 20]);
+        let addr3 = Address([3u8; 20]);
+        
+        // tx1: addr1 -> addr2
+        let meta1 = ConflictMetadata::Simple {
+            from_key: address_fingerprint(&addr1),
+            to_key: address_fingerprint(&addr2),
+        };
+        
+        // tx2: addr2 -> addr3 (sender is tx1's receiver)
+        let meta2 = ConflictMetadata::Simple {
+            from_key: address_fingerprint(&addr2),
+            to_key: address_fingerprint(&addr3),
+        };
+        
+        // Should conflict (tx2's sender is tx1's receiver)
+        assert!(meta1.conflicts_with(&meta2));
+    }
+
+    #[test]
+    fn test_conflict_metadata_no_conflict_independent() {
+        let addr1 = Address([1u8; 20]);
+        let addr2 = Address([2u8; 20]);
+        let addr3 = Address([3u8; 20]);
+        let addr4 = Address([4u8; 20]);
+        
+        // tx1: addr1 -> addr2
+        let meta1 = ConflictMetadata::Simple {
+            from_key: address_fingerprint(&addr1),
+            to_key: address_fingerprint(&addr2),
+        };
+        
+        // tx2: addr3 -> addr4 (completely independent)
+        let meta2 = ConflictMetadata::Simple {
+            from_key: address_fingerprint(&addr3),
+            to_key: address_fingerprint(&addr4),
+        };
+        
+        // Should NOT conflict
+        assert!(!meta1.conflicts_with(&meta2));
+    }
+
+    #[test]
+    fn test_block_overlay_new_is_empty() {
+        let overlay = BlockOverlay::new();
+        assert!(overlay.is_empty());
+        assert_eq!(overlay.len(), 0);
+        assert_eq!(overlay.total_fees_burned(), 0);
+    }
+
+    #[test]
+    fn test_block_overlay_read_falls_back_to_base() {
+        use eezo_ledger::Account;
+        
+        let addr = Address([0x42; 20]);
+        let mut base = Accounts::default();
+        
+        // Set up base account with balance
+        base.put(addr, Account { balance: 1000, nonce: 5 });
+        
+        let overlay = BlockOverlay::new();
+        
+        // Read from overlay should fall back to base
+        let acct = overlay.get_account(&addr, &base);
+        assert_eq!(acct.balance, 1000);
+        assert_eq!(acct.nonce, 5);
+    }
+
+    #[test]
+    fn test_block_overlay_read_prefers_overlay() {
+        use eezo_ledger::Account;
+        
+        let addr = Address([0x42; 20]);
+        let mut base = Accounts::default();
+        
+        // Set up base account
+        base.put(addr, Account { balance: 1000, nonce: 5 });
+        
+        // Put modified account in overlay
+        let mut overlay = BlockOverlay::new();
+        overlay.put_account(addr, Account { balance: 500, nonce: 6 });
+        
+        // Read should prefer overlay
+        let acct = overlay.get_account(&addr, &base);
+        assert_eq!(acct.balance, 500);
+        assert_eq!(acct.nonce, 6);
+    }
+
+    #[test]
+    fn test_block_overlay_tracks_fee_burns() {
+        let mut overlay = BlockOverlay::new();
+        
+        overlay.record_fee_burn(10);
+        overlay.record_fee_burn(25);
+        overlay.record_fee_burn(5);
+        
+        assert_eq!(overlay.total_fees_burned(), 40);
+    }
+
+    #[test]
+    fn test_block_overlay_apply_to_state() {
+        use eezo_ledger::Account;
+        
+        let addr1 = Address([1u8; 20]);
+        let addr2 = Address([2u8; 20]);
+        
+        let mut accounts = Accounts::default();
+        let mut supply = Supply::default();
+        
+        // Set up overlay with some modifications
+        let mut overlay = BlockOverlay::new();
+        overlay.put_account(addr1, Account { balance: 900, nonce: 1 });
+        overlay.put_account(addr2, Account { balance: 100, nonce: 0 });
+        overlay.record_fee_burn(10);
+        
+        // Apply to state
+        overlay.apply_to_state(&mut accounts, &mut supply);
+        
+        // Check accounts were updated
+        let acct1 = accounts.get(&addr1);
+        assert_eq!(acct1.balance, 900);
+        assert_eq!(acct1.nonce, 1);
+        
+        let acct2 = accounts.get(&addr2);
+        assert_eq!(acct2.balance, 100);
+        assert_eq!(acct2.nonce, 0);
+        
+        // Check supply was updated
+        assert_eq!(supply.burn_total, 10);
+    }
+
+    #[test]
+    fn test_analyze_batch_filters_invalid_senders() {
+        use eezo_ledger::TxCore;
+        
+        let valid_tx = SignedTx {
+            core: TxCore {
+                to: Address([0x22; 20]),
+                amount: 1000,
+                fee: 1,
+                nonce: 0,
+            },
+            pubkey: [0x11u8; 20].to_vec(), // Valid pubkey (20 bytes)
+            sig: vec![],
+        };
+        
+        let invalid_tx = SignedTx {
+            core: TxCore {
+                to: Address([0x33; 20]),
+                amount: 500,
+                fee: 1,
+                nonce: 0,
+            },
+            pubkey: vec![1, 2, 3], // Invalid pubkey (too short)
+            sig: vec![],
+        };
+        
+        let txs = vec![valid_tx, invalid_tx];
+        let analyzed = analyze_batch(&txs);
+        
+        // Only the valid tx should be analyzed
+        assert_eq!(analyzed.len(), 1);
+        assert_eq!(analyzed[0].tx_idx, 0);
     }
 }
