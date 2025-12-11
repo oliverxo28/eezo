@@ -30,6 +30,7 @@
 #   - eezo-txgen binary (built from crates/node)
 #   - jq command for JSON processing
 #   - curl for HTTP requests
+#   - openssl (optional, for better randomness in receiver addresses)
 #   - Running eezo-node in dag-primary mode (scripts/devnet_dag_primary.sh)
 #
 # EXAMPLES:
@@ -319,8 +320,11 @@ for (( s=0; s < NUM_SENDERS; s++ )); do
             export EEZO_TX_PK_HEX="$pk_hex"
             export EEZO_TX_SK_HEX="$sk_hex"
             
-            # Generate signed tx
-            BODY=$("$TXGEN_BIN" "$nonce_dec" 2>/dev/null) || continue
+            # Generate signed tx (skip if txgen fails)
+            BODY=$("$TXGEN_BIN" "$nonce_dec" 2>/dev/null) || {
+                echo "[sender $((s+1))] Warning: txgen failed for nonce $nonce_dec" >&2
+                continue
+            }
             
             # Submit tx in background
             curl -sf -X POST "$NODE/tx" \
