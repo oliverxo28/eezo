@@ -87,7 +87,7 @@ mod gpu_hash;
 
 use peers::{parse_peers_from_env, peers_handler, PeerMap, PeerService};
 use accounts::{Accounts, AccountView, FaucetReq};
-use crate::sigpool::SigPool;
+use crate::sigpool::{SigPool, SigVerifyJob, SigVerifyResult};
 mod addr;
 use crate::addr::parse_account_addr;
 use std::net::SocketAddr;
@@ -1727,19 +1727,7 @@ async fn post_tx(
         }
     };
 
-    // T51.5a: send through sigpool (parallel verification/preprocessing).
-    let raw = match state.sigpool.verify(raw).await {
-        Ok(bytes) => bytes,
-        Err(()) => {
-            // If the sigpool is down or overloaded, treat as a server error.
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "sigpool unavailable"})),
-            );
-        }
-    };
-
-    // Hash after sigpool so we always hash what we actually submit.
+    // Hash the raw envelope for dedup/logging.
     let hash32: [u8; 32] = *blake3::hash(&raw).as_bytes();
     let hash_hex = format!("0x{}", hex::encode(hash32));
 
@@ -1830,6 +1818,42 @@ async fn post_tx(
             fee,
             nonce,
         };
+
+        // T83.0b: Use the sigpool micro-batch pipeline for signature verification.
+        // This ensures that batch metrics (batches_total, batch_size, batch_latency)
+        // are correctly updated. The sigpool batches verification requests and
+        // uses a replay cache to avoid re-verifying duplicate signatures.
+        //
+        // ## Invariant
+        // All signatures for transactions that enter the executor must still pass
+        // the existing ML-DSA verification logic. The sigpool only changes how
+        // verification work is scheduled and batched, not whether a signature is checked.
+        if !pubkey_bytes.is_empty() && !sig_bytes.is_empty() {
+            // Compute the canonical message for signature verification
+            use eezo_ledger::tx_domain_bytes;
+            let message = tx_domain_bytes(state.chain_id, &core);
+
+            // Create a SigVerifyJob with the tx hash for cache lookup
+            let job = SigVerifyJob::with_tx_hash(
+                pubkey_bytes.clone(),
+                message,
+                sig_bytes.clone(),
+                hash32,
+            );
+
+            // Verify through the micro-batch pipeline
+            match state.sigpool.verify_job(job).await {
+                SigVerifyResult::Ok | SigVerifyResult::CacheHit => {
+                    // Signature verified successfully (fresh or cached)
+                }
+                SigVerifyResult::Failed => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "signature verification failed"})),
+                    );
+                }
+            }
+        }
 
         let stx = LedgerSignedTx {
             core,
@@ -2000,9 +2024,14 @@ async fn post_tx_batch(
     // pq44-runtime: convert to ledger SignedTx and submit via core runner
     #[cfg(feature = "pq44-runtime")]
     {
+        use eezo_ledger::tx_domain_bytes;
+
         // Pre-parse all envelopes to ledger objects. Fail fast on first bad item.
         let mut parsed: Vec<eezo_ledger::SignedTx> = Vec::with_capacity(batch.txs.len());
-        for env in batch.txs.iter() {
+        let mut sig_jobs: Vec<SigVerifyJob> = Vec::with_capacity(batch.txs.len());
+        let mut job_indices: Vec<usize> = Vec::with_capacity(batch.txs.len()); // indices of txs with sigs
+
+        for (idx, env) in batch.txs.iter().enumerate() {
             // numeric fields
             let amount: u128 = match env.tx.amount.parse() {
                 Ok(v) => v,
@@ -2073,7 +2102,46 @@ async fn post_tx_batch(
             };
 
             let core = eezo_ledger::TxCore { to: to_addr, amount, fee, nonce };
+
+            // T83.0b: Build signature verification jobs for batch verification
+            if !pubkey_bytes.is_empty() && !sig_bytes.is_empty() {
+                let message = tx_domain_bytes(state.chain_id, &core);
+                // Compute tx hash from (pubkey || message || sig) for cache key
+                // This is more reliable than re-serializing the envelope
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(&pubkey_bytes);
+                hasher.update(&message);
+                hasher.update(&sig_bytes);
+                let tx_hash: [u8; 32] = *hasher.finalize().as_bytes();
+                
+                let job = SigVerifyJob::with_tx_hash(
+                    pubkey_bytes.clone(),
+                    message,
+                    sig_bytes.clone(),
+                    tx_hash,
+                );
+                sig_jobs.push(job);
+                job_indices.push(idx);
+            }
+
             parsed.push(eezo_ledger::SignedTx { core, pubkey: pubkey_bytes, sig: sig_bytes });
+        }
+
+        // T83.0b: Verify all signatures through the micro-batch pipeline
+        // This ensures batch metrics are updated for batch submissions
+        if !sig_jobs.is_empty() {
+            let results = state.sigpool.verify_jobs(sig_jobs).await;
+            for (i, result) in results.into_iter().enumerate() {
+                if matches!(result, SigVerifyResult::Failed) {
+                    let tx_idx = job_indices[i];
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": format!("signature verification failed for tx at index {}", tx_idx)
+                        })),
+                    );
+                }
+            }
         }
 
         // Only use CoreRunnerHandle (legacy path); DAG mode doesn't support batch tx yet

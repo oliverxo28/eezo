@@ -138,6 +138,18 @@ impl SigPoolConfig {
 }
 
 // =============================================================================
+// T83.0b: Debug logging helper
+// =============================================================================
+
+/// Check if sigpool debug logging is enabled via EEZO_SIGPOOL_DEBUG env var.
+/// When enabled, logs batch formation, sizes, latencies, and cache hit ratios.
+fn is_debug_enabled() -> bool {
+    std::env::var("EEZO_SIGPOOL_DEBUG")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+// =============================================================================
 // T83.0: Signature Verification Job
 // =============================================================================
 
@@ -532,10 +544,32 @@ impl SigPool {
 
     /// Submit a structured verification job.
     /// Returns the verification result.
+    ///
+    /// ## Metrics Invariant (T83.0b)
+    ///
+    /// Every call to verify_job increments `queued_total`. The outcome is then
+    /// tracked via `verified_total`, `failed_total`, or cache hit/miss counters.
+    /// All signatures for transactions that enter the executor still pass real
+    /// ML-DSA verification logic. The sigpool only changes how verification work
+    /// is scheduled and batched, not whether a signature is checked.
     pub async fn verify_job(&self, job: SigVerifyJob) -> SigVerifyResult {
+        // T83.0b: Increment queued counter for every verification request
+        #[cfg(feature = "metrics")]
+        EEZO_SIGPOOL_QUEUED_TOTAL.inc();
+
         // Check cache first (fast path)
+        // Note: cache.get() already increments CACHE_HITS_TOTAL or CACHE_MISSES_TOTAL
         let key = job.cache_key();
         if let Some(ok) = self.cache.get(&key) {
+            // T83.0b: Cache hit counts as verified (signature was already checked)
+            #[cfg(feature = "metrics")]
+            {
+                if ok {
+                    EEZO_SIGPOOL_VERIFIED_TOTAL.inc();
+                } else {
+                    EEZO_SIGPOOL_FAILED_TOTAL.inc();
+                }
+            }
             return if ok { SigVerifyResult::CacheHit } else { SigVerifyResult::Failed };
         }
 
@@ -544,6 +578,8 @@ impl SigPool {
         let req = VerifyJobRequest { job, resp: resp_tx };
 
         if self.job_tx.send(req).await.is_err() {
+            #[cfg(feature = "metrics")]
+            EEZO_SIGPOOL_FAILED_TOTAL.inc();
             return SigVerifyResult::Failed;
         }
 
@@ -552,12 +588,21 @@ impl SigPool {
 
     /// Submit multiple jobs and wait for all results.
     /// Returns results in the same order as input jobs.
+    ///
+    /// ## Metrics Invariant (T83.0b)
+    ///
+    /// Every job increments `queued_total`. Each outcome is tracked via
+    /// `verified_total`, `failed_total`, or cache counters in dispatch_batch.
     pub async fn verify_jobs(&self, jobs: Vec<SigVerifyJob>) -> Vec<SigVerifyResult> {
         use tokio::sync::oneshot;
 
         if jobs.is_empty() {
             return Vec::new();
         }
+
+        // T83.0b: Increment queued counter for each job submitted
+        #[cfg(feature = "metrics")]
+        EEZO_SIGPOOL_QUEUED_TOTAL.inc_by(jobs.len() as u64);
 
         // Send all jobs and collect receivers
         let mut receivers = Vec::with_capacity(jobs.len());
@@ -567,6 +612,8 @@ impl SigPool {
             let req = VerifyJobRequest { job, resp: resp_tx };
 
             if self.job_tx.send(req).await.is_err() {
+                #[cfg(feature = "metrics")]
+                EEZO_SIGPOOL_FAILED_TOTAL.inc();
                 receivers.push(None);
             } else {
                 receivers.push(Some(resp_rx));
@@ -601,6 +648,15 @@ impl SigPool {
 }
 
 /// Dispatch a batch of jobs for verification.
+///
+/// ## T83.0b: Metrics and Logging
+///
+/// This function:
+/// - Increments `batches_total` once per batch
+/// - Records batch size in the histogram
+/// - Tracks per-job verified/failed outcomes
+/// - Records batch latency
+/// - Logs batch stats when EEZO_SIGPOOL_DEBUG=1
 fn dispatch_batch(batch: &mut Vec<VerifyJobRequest>, cache: &Arc<SigVerifyCache>) {
     if batch.is_empty() {
         return;
@@ -615,14 +671,33 @@ fn dispatch_batch(batch: &mut Vec<VerifyJobRequest>, cache: &Arc<SigVerifyCache>
         EEZO_SIGPOOL_BATCH_SIZE.observe(batch_len as f64);
     }
 
+    // T83.0b: Debug log when batch is built
+    if is_debug_enabled() {
+        log::debug!(
+            "sigpool: batch built with {} jobs",
+            batch_len
+        );
+    }
+
     // Extract jobs for verification
     let jobs: Vec<SigVerifyJob> = batch.iter().map(|r| r.job.clone()).collect();
 
     // Verify batch
     let results = verify_batch(&jobs, cache);
 
+    // Count outcomes for debug logging
+    let mut cache_hits = 0u32;
+    let mut verified_ok = 0u32;
+    let mut failed = 0u32;
+
     // Send results back
     for (req, result) in batch.drain(..).zip(results.into_iter()) {
+        match result {
+            SigVerifyResult::CacheHit => cache_hits += 1,
+            SigVerifyResult::Ok => verified_ok += 1,
+            SigVerifyResult::Failed => failed += 1,
+        }
+
         #[cfg(feature = "metrics")]
         {
             // Note: EEZO_SIGPOOL_QUEUED_TOTAL is incremented at job submission time,
@@ -639,10 +714,23 @@ fn dispatch_batch(batch: &mut Vec<VerifyJobRequest>, cache: &Arc<SigVerifyCache>
         let _ = req.resp.send(result);
     }
 
+    let elapsed = start.elapsed();
+
     #[cfg(feature = "metrics")]
     {
-        let elapsed = start.elapsed().as_secs_f64();
-        EEZO_SIGPOOL_BATCH_LATENCY_SECONDS.observe(elapsed);
+        EEZO_SIGPOOL_BATCH_LATENCY_SECONDS.observe(elapsed.as_secs_f64());
+    }
+
+    // T83.0b: Debug log when batch is executed
+    if is_debug_enabled() {
+        log::debug!(
+            "sigpool: batch executed size={} latency={:.3}ms cache_hits={} fresh_verifies={} failed={}",
+            batch_len,
+            elapsed.as_secs_f64() * 1000.0,
+            cache_hits,
+            verified_ok,
+            failed
+        );
     }
 }
 
