@@ -3466,11 +3466,126 @@ pub fn register_t82_exec_metrics() {
     let _ = &*EEZO_EXEC_STM_WAVES_PER_BLOCK;
     let _ = &*EEZO_EXEC_STM_CONFLICTS_PER_BLOCK;
     let _ = &*EEZO_EXEC_STM_RETRIES_PER_BLOCK;
+    // T82.4: Also register wave building and pre-screen metrics
+    register_t82_4_wave_metrics();
 }
 
 /// No-op version when metrics feature is disabled.
 #[cfg(not(feature = "metrics"))]
 pub fn register_t82_exec_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
+// T82.4 — Conflict-Aware STM Wave Building & Pre-Screening metrics
+// -----------------------------------------------------------------------------
+//
+// These metrics track the performance of the T82.4 wave building optimization:
+// - Waves built total (how many waves were formed)
+// - Wave size distribution (histogram of txs per wave)
+// - Pre-screen hits/misses (effectiveness of the bloom filter pre-screening)
+
+/// Counter: Total number of STM waves built across all blocks.
+/// This counts the number of waves formed by the wave builder, not retries.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_WAVES_BUILT_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_exec_stm_waves_built_total",
+        "Total STM waves built across all blocks (T82.4)"
+    )
+    .unwrap()
+});
+
+/// Histogram: Distribution of transactions per wave.
+/// Tracks how well the wave builder is packing non-conflicting txs together.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_WAVE_SIZE: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_stm_wave_size",
+        "Distribution of transactions per wave (T82.4)",
+        vec![1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0]
+    )
+    .unwrap()
+});
+
+/// Counter: Pre-screen indicated "may conflict" (bloom filter hit).
+/// When this fires, we fall back to precise conflict detection.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_PRESCREEN_HITS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_exec_stm_conflict_prescreen_hits_total",
+        "Pre-screen indicated 'may conflict' - fell back to precise check (T82.4)"
+    )
+    .unwrap()
+});
+
+/// Counter: Pre-screen indicated "no conflict" (bloom filter miss).
+/// The tx was safely added to the wave without precise conflict checking.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_PRESCREEN_MISSES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_exec_stm_conflict_prescreen_misses_total",
+        "Pre-screen indicated 'no conflict' - tx added to wave safely (T82.4)"
+    )
+    .unwrap()
+});
+
+/// Helper: Increment waves built counter (T82.4).
+#[inline]
+pub fn exec_stm_waves_built_inc(by: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_WAVES_BUILT_TOTAL.inc_by(by);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = by;
+    }
+}
+
+/// Helper: Observe wave size (T82.4).
+#[inline]
+pub fn exec_stm_observe_wave_size(size: usize) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_WAVE_SIZE.observe(size as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = size;
+    }
+}
+
+/// Helper: Increment pre-screen hits counter (T82.4).
+#[inline]
+pub fn exec_stm_prescreen_hit_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_PRESCREEN_HITS_TOTAL.inc();
+    }
+}
+
+/// Helper: Increment pre-screen misses counter (T82.4).
+#[inline]
+pub fn exec_stm_prescreen_miss_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_PRESCREEN_MISSES_TOTAL.inc();
+    }
+}
+
+/// Eagerly register T82.4 wave building metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t82_4_wave_metrics() {
+    let _ = &*EEZO_EXEC_STM_WAVES_BUILT_TOTAL;
+    let _ = &*EEZO_EXEC_STM_WAVE_SIZE;
+    let _ = &*EEZO_EXEC_STM_PRESCREEN_HITS_TOTAL;
+    let _ = &*EEZO_EXEC_STM_PRESCREEN_MISSES_TOTAL;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t82_4_wave_metrics() {
     // No metrics to register when the feature is off.
 }
 

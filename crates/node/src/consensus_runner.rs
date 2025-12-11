@@ -250,6 +250,8 @@ impl ExecutorMode {
 ///
 /// - If STM mode is requested but `stm-exec` feature is not enabled,
 ///   logs a warning and falls back to Parallel.
+/// - T82.4b: When `stm-exec` feature is enabled and EEZO_EXECUTOR_MODE is not set,
+///   defaults to STM executor to ensure STM metrics are recorded.
 /// - Logs the selected mode at startup.
 fn build_executor(threads: usize) -> Box<dyn Executor> {
     let env_val = std::env::var("EEZO_EXECUTOR_MODE").ok();
@@ -258,6 +260,7 @@ fn build_executor(threads: usize) -> Box<dyn Executor> {
             match ExecutorMode::from_env() {
                 Some(m) => m,
                 None => {
+                    // When unrecognized, fall back to default_mode (Parallel)
                     log::warn!(
                         "executor: EEZO_EXECUTOR_MODE='{}' is not recognized, using default: parallel",
                         v
@@ -267,8 +270,18 @@ fn build_executor(threads: usize) -> Box<dyn Executor> {
             }
         }
         None => {
-            log::info!("executor: EEZO_EXECUTOR_MODE not set, using default: parallel");
-            ExecutorMode::default_mode()
+            // T82.4b: When stm-exec feature is enabled, default to STM executor
+            // This ensures the STM code path (with T82.0/T82.4 metrics) is used
+            #[cfg(feature = "stm-exec")]
+            {
+                log::info!("executor: EEZO_EXECUTOR_MODE not set, defaulting to STM (stm-exec feature enabled)");
+                ExecutorMode::Stm
+            }
+            #[cfg(not(feature = "stm-exec"))]
+            {
+                log::info!("executor: EEZO_EXECUTOR_MODE not set, using default: parallel");
+                ExecutorMode::default_mode()
+            }
         }
     };
 
