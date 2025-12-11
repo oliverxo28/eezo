@@ -811,6 +811,12 @@ impl CoreRunnerHandle {
                                     EEZO_BLOCK_UNDERFILLED_TOTAL.inc();
                                 }
                             }
+                            
+                            // T82.2c: Reset in-flight count after block is committed.
+                            // This reflects that txs are no longer in-flight (they've been included).
+                            if crate::mempool_actor::is_mempool_actor_enabled() {
+                                crate::metrics::mempool_inflight_len_set(0);
+                            }
                         }
                         // --- END METRICS ---
 
@@ -1509,6 +1515,14 @@ impl CoreRunnerHandle {
                                         hybrid_batch_used = true;
                                         crate::metrics::dag_hybrid_batches_used_inc();
                                         
+                                        // T82.2c: Increment mempool_batches_served_total when actor is enabled.
+                                        // This ensures the metric reflects batches used for DAG-primary block building.
+                                        if crate::mempool_actor::is_mempool_actor_enabled() {
+                                            crate::metrics::mempool_batches_served_inc();
+                                            // Track in-flight count (txs currently being built into a block)
+                                            crate::metrics::mempool_inflight_len_set(hybrid_aggregated_txs.len());
+                                        }
+                                        
                                         // T77.1: Record DAG ordering latency (time from wait start to successful batch consumption)
                                         let ordering_latency_secs = wait_start.elapsed().as_secs_f64();
                                         crate::metrics::observe_dag_ordering_latency_seconds(ordering_latency_secs);
@@ -1915,6 +1929,13 @@ impl CoreRunnerHandle {
                                         guard.accounts = accounts;
                                         guard.supply   = supply;
                                     }
+                                    // T82.2c: Reset in-flight count on rollback (txs returned to pool)
+                                    #[cfg(feature = "metrics")]
+                                    {
+                                        if crate::mempool_actor::is_mempool_actor_enabled() {
+                                            crate::metrics::mempool_inflight_len_set(0);
+                                        }
+                                    }
                                     log::warn!("executor: block apply failed: {:?}", e);
                                     Ok(SlotOutcome::Skipped(NoOpReason::Unknown))
                                 }
@@ -1927,6 +1948,13 @@ impl CoreRunnerHandle {
                                 guard.supply = sup;
                                 guard.height = h;
                                 guard.prev_hash = ph;
+                            }
+                            // T82.2c: Reset in-flight count on rollback (txs returned to pool)
+                            #[cfg(feature = "metrics")]
+                            {
+                                if crate::mempool_actor::is_mempool_actor_enabled() {
+                                    crate::metrics::mempool_inflight_len_set(0);
+                                }
                             }
                             // Convert the executor's internal String error to a ConsensusError
                             log::warn!("executor: block execution failed: {}", e);
@@ -1977,6 +2005,12 @@ impl CoreRunnerHandle {
                                     EEZO_BLOCK_UNDERFILLED_TOTAL.inc();
                                 }
                             }
+                            
+                            // T82.2c: Reset in-flight count after block is committed.
+                            // This reflects that txs are no longer in-flight (they've been included).
+                            if crate::mempool_actor::is_mempool_actor_enabled() {
+                                crate::metrics::mempool_inflight_len_set(0);
+                            }
                         }
                         // --- END METRICS ---
 
@@ -1997,10 +2031,11 @@ impl CoreRunnerHandle {
                                 let block_hash = blk.header.hash();
                                 let tx_hashes: Vec<[u8; 32]> = blk.txs.iter().map(|tx| tx.hash()).collect();
                                 
-                                // T76.5: Record committed tx hashes in the de-dup cache.
+                                // T76.5/T82.2c: Record committed tx hashes in the de-dup cache.
                                 // This prevents re-processing of the same txs in future batches.
                                 // Uses canonical SignedTx.hash() as required by the spec.
-                                if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled) && !tx_hashes.is_empty() {
+                                // Now also applies to DagPrimary mode.
+                                if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled | HybridModeConfig::DagPrimary) && !tx_hashes.is_empty() {
                                     hybrid_dedup_cache.record_committed_batch(&tx_hashes, height);
                                     log::debug!(
                                         "dag-hybrid: recorded {} committed tx hashes in de-dup cache at height={}",
