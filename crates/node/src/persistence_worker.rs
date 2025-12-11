@@ -284,6 +284,7 @@ pub enum PersistenceMsg {
 
 /// Handle for sending messages to the persistence worker.
 #[cfg(feature = "persistence")]
+#[derive(Clone)]
 pub struct PersistenceWorkerHandle {
     /// Channel sender for persistence messages.
     sender: mpsc::Sender<PersistenceMsg>,
