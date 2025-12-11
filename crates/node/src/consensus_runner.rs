@@ -356,6 +356,24 @@ fn qc_sidecar_enforce_on() -> bool {
     { false }
 }
 
+/// T82.2d: Helper to increment mempool actor metrics on block commit.
+///
+/// Increments `eezo_mempool_batches_served_total` when:
+/// 1. The mempool actor is enabled (EEZO_MEMPOOL_ACTOR_ENABLED=1)
+/// 2. The committed block contains at least one transaction
+///
+/// In this context, a "batch" represents the set of transactions included in a
+/// single committed block. The metric counts committed blocks with transactions,
+/// which correlates with the number of times the mempool served transactions
+/// for block building.
+#[cfg(feature = "metrics")]
+#[inline]
+fn record_mempool_batch_served_if_enabled(tx_count: u32) {
+    if crate::mempool_actor::is_mempool_actor_enabled() && tx_count > 0 {
+        crate::metrics::mempool_batches_served_inc();
+    }
+}
+
 /// T76.1/T78.3: Consensus mode enum for determining tx source behavior.
 /// This is separate from the top-level ConsensusMode in main.rs.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -723,6 +741,9 @@ impl CoreRunnerHandle {
                                         // Emit block applied and supply metrics
                                         ledger_observe_block_applied();
                                         ledger_observe_supply(&guard.supply);
+                                        
+                                        // T82.2d: Increment mempool batch metric on block commit
+                                        record_mempool_batch_served_if_enabled(blk.header.tx_count);
                                     }
 
                                     // Update node pointers
@@ -1792,6 +1813,13 @@ impl CoreRunnerHandle {
                     );
 
                     let next_height = guard.height + 1;
+                    
+                    // T82.2d: Track in-flight count for ALL tx collection paths when actor is enabled.
+                    // This shows txs currently being built into a block, regardless of source.
+                    #[cfg(feature = "metrics")]
+                    if crate::mempool_actor::is_mempool_actor_enabled() && !txs.is_empty() {
+                        crate::metrics::mempool_inflight_len_set(txs.len());
+                    }
 
                     // 3. Create executor input
                     // T76.4: Use partial failure tolerance for hybrid DAG batches to avoid
@@ -1881,6 +1909,9 @@ impl CoreRunnerHandle {
                                         // Emit block applied and supply metrics
                                         ledger_observe_block_applied();
                                         ledger_observe_supply(&guard.supply);
+                                        
+                                        // T82.2d: Increment mempool batch metric on block commit
+                                        record_mempool_batch_served_if_enabled(blk.header.tx_count);
                                     }
 
                                     // Update node pointers
