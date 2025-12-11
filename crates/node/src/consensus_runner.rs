@@ -356,6 +356,24 @@ fn qc_sidecar_enforce_on() -> bool {
     { false }
 }
 
+/// T82.2d: Helper to increment mempool actor metrics on block commit.
+///
+/// Increments `eezo_mempool_batches_served_total` when:
+/// 1. The mempool actor is enabled (EEZO_MEMPOOL_ACTOR_ENABLED=1)
+/// 2. The committed block contains at least one transaction
+///
+/// In this context, a "batch" represents the set of transactions included in a
+/// single committed block. The metric counts committed blocks with transactions,
+/// which correlates with the number of times the mempool served transactions
+/// for block building.
+#[cfg(feature = "metrics")]
+#[inline]
+fn record_mempool_batch_served_if_enabled(tx_count: u32) {
+    if crate::mempool_actor::is_mempool_actor_enabled() && tx_count > 0 {
+        crate::metrics::mempool_batches_served_inc();
+    }
+}
+
 /// T76.1/T78.3: Consensus mode enum for determining tx source behavior.
 /// This is separate from the top-level ConsensusMode in main.rs.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -724,11 +742,8 @@ impl CoreRunnerHandle {
                                         ledger_observe_block_applied();
                                         ledger_observe_supply(&guard.supply);
                                         
-                                        // T82.2d: Increment mempool_batches_served_total when actor is enabled
-                                        // and block contains transactions.
-                                        if crate::mempool_actor::is_mempool_actor_enabled() && blk.header.tx_count > 0 {
-                                            crate::metrics::mempool_batches_served_inc();
-                                        }
+                                        // T82.2d: Increment mempool batch metric on block commit
+                                        record_mempool_batch_served_if_enabled(blk.header.tx_count);
                                     }
 
                                     // Update node pointers
@@ -1887,15 +1902,8 @@ impl CoreRunnerHandle {
                                         ledger_observe_block_applied();
                                         ledger_observe_supply(&guard.supply);
                                         
-                                        // T82.2d: Increment mempool_batches_served_total when:
-                                        // 1. Mempool actor is enabled
-                                        // 2. Block contains non-empty transactions
-                                        // This metric reflects batches served for block building in DAG-primary mode.
-                                        // The metric is incremented at commit time to ensure it only counts
-                                        // batches that actually resulted in committed blocks.
-                                        if crate::mempool_actor::is_mempool_actor_enabled() && blk.header.tx_count > 0 {
-                                            crate::metrics::mempool_batches_served_inc();
-                                        }
+                                        // T82.2d: Increment mempool batch metric on block commit
+                                        record_mempool_batch_served_if_enabled(blk.header.tx_count);
                                     }
 
                                     // Update node pointers
