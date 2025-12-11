@@ -8,9 +8,6 @@
 
 #![cfg(all(feature = "pq44-runtime", feature = "metrics"))]
 
-use std::sync::Arc;
-use std::time::Duration;
-
 // Re-export modules from the main crate for testing
 use eezo_node::sigpool::{SigPool, SigPoolConfig, SigVerifyJob, SigVerifyResult};
 
@@ -22,6 +19,9 @@ use eezo_node::metrics::{
     EEZO_SIGPOOL_CACHE_HITS_TOTAL,
     EEZO_SIGPOOL_CACHE_MISSES_TOTAL,
     EEZO_SIGPOOL_BATCH_LATENCY_SECONDS,
+    EEZO_SIGPOOL_QUEUED_TOTAL,
+    EEZO_SIGPOOL_VERIFIED_TOTAL,
+    EEZO_SIGPOOL_FAILED_TOTAL,
 };
 
 /// Test that SigPool can be created with default configuration.
@@ -262,4 +262,246 @@ fn t83_metrics_registered() {
     let _ = &*EEZO_SIGPOOL_CACHE_HITS_TOTAL;
     let _ = &*EEZO_SIGPOOL_CACHE_MISSES_TOTAL;
     let _ = &*EEZO_SIGPOOL_BATCH_LATENCY_SECONDS;
+}
+
+// =============================================================================
+// T83.0b: Batch Metrics & Micro-Batching Sanity Tests
+// =============================================================================
+
+/// T83.0b: Test that batch metrics increment when using verify_job API.
+/// This test verifies that:
+/// - queued_total increments
+/// - verified_total increments
+/// - batches_total increments
+/// - batch_size_count > 0
+/// - batch_latency_count > 0
+#[cfg(feature = "metrics")]
+#[tokio::test]
+async fn t83_0b_batch_metrics_increment() {
+    use eezo_node::metrics::{
+        EEZO_SIGPOOL_QUEUED_TOTAL,
+        EEZO_SIGPOOL_VERIFIED_TOTAL,
+        EEZO_SIGPOOL_BATCHES_TOTAL,
+        EEZO_SIGPOOL_BATCH_SIZE,
+        EEZO_SIGPOOL_BATCH_LATENCY_SECONDS,
+    };
+
+    // Force metric registration
+    register_t83_sigpool_metrics();
+
+    // Record initial values
+    let initial_queued = EEZO_SIGPOOL_QUEUED_TOTAL.get();
+    let initial_verified = EEZO_SIGPOOL_VERIFIED_TOTAL.get();
+    let initial_batches = EEZO_SIGPOOL_BATCHES_TOTAL.get();
+    let initial_batch_size_count = EEZO_SIGPOOL_BATCH_SIZE.get_sample_count();
+    let initial_batch_latency_count = EEZO_SIGPOOL_BATCH_LATENCY_SECONDS.get_sample_count();
+
+    // Create pool with small batch size and short timeout to ensure batching happens
+    let config = SigPoolConfig {
+        threads: 2,
+        batch_size: 4,  // Small batch size to trigger batching quickly
+        batch_timeout_ms: 10,  // Short timeout to flush partial batches
+        cache_size: 100,
+        queue_size: 100,
+    };
+    
+    let pool = SigPool::new_with_config(config);
+
+    // Submit multiple jobs to ensure at least one batch is formed
+    let num_jobs = 10;
+    for i in 0..num_jobs {
+        let job = SigVerifyJob::new(
+            vec![i as u8; 32],
+            vec![(i + 1) as u8; 32],
+            vec![(i + 2) as u8; 32],
+        );
+        let _ = pool.verify_job(job).await;
+    }
+
+    // Allow time for batch processing
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Verify metrics incremented
+    let final_queued = EEZO_SIGPOOL_QUEUED_TOTAL.get();
+    let final_verified = EEZO_SIGPOOL_VERIFIED_TOTAL.get();
+    let final_batches = EEZO_SIGPOOL_BATCHES_TOTAL.get();
+    let final_batch_size_count = EEZO_SIGPOOL_BATCH_SIZE.get_sample_count();
+    let final_batch_latency_count = EEZO_SIGPOOL_BATCH_LATENCY_SECONDS.get_sample_count();
+
+    // queued_total should have incremented by at least num_jobs
+    assert!(
+        final_queued >= initial_queued + num_jobs,
+        "queued_total should increment: initial={}, final={}, expected at least +{}",
+        initial_queued, final_queued, num_jobs
+    );
+
+    // verified_total should have incremented (some may fail if sig is invalid, but metrics still increment)
+    assert!(
+        final_verified > initial_verified || 
+        eezo_node::metrics::EEZO_SIGPOOL_FAILED_TOTAL.get() > 0,
+        "verified_total or failed_total should increment: initial_verified={}, final_verified={}",
+        initial_verified, final_verified
+    );
+
+    // batches_total should have incremented
+    assert!(
+        final_batches > initial_batches,
+        "batches_total should increment: initial={}, final={}",
+        initial_batches, final_batches
+    );
+
+    // batch_size histogram should have observations
+    assert!(
+        final_batch_size_count > initial_batch_size_count,
+        "batch_size_count should increment: initial={}, final={}",
+        initial_batch_size_count, final_batch_size_count
+    );
+
+    // batch_latency histogram should have observations
+    assert!(
+        final_batch_latency_count > initial_batch_latency_count,
+        "batch_latency_count should increment: initial={}, final={}",
+        initial_batch_latency_count, final_batch_latency_count
+    );
+}
+
+/// T83.0b: Test that cache metrics increment when same tx is verified twice.
+#[cfg(feature = "metrics")]
+#[tokio::test]
+async fn t83_0b_cache_metrics_increment() {
+    use eezo_node::metrics::{
+        EEZO_SIGPOOL_CACHE_HITS_TOTAL,
+        EEZO_SIGPOOL_CACHE_MISSES_TOTAL,
+    };
+
+    // Force metric registration
+    register_t83_sigpool_metrics();
+
+    // Record initial cache values
+    let initial_hits = EEZO_SIGPOOL_CACHE_HITS_TOTAL.get();
+    let initial_misses = EEZO_SIGPOOL_CACHE_MISSES_TOTAL.get();
+
+    // Create pool with small batch size
+    let config = SigPoolConfig {
+        threads: 2,
+        batch_size: 4,
+        batch_timeout_ms: 10,
+        cache_size: 100,
+        queue_size: 100,
+    };
+    
+    let pool = SigPool::new_with_config(config);
+
+    // Create a unique job that we'll submit twice
+    let unique_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    
+    let job1 = SigVerifyJob::new(
+        vec![((unique_id >> 0) & 0xFF) as u8; 32],
+        vec![((unique_id >> 8) & 0xFF) as u8; 32],
+        vec![((unique_id >> 16) & 0xFF) as u8; 32],
+    );
+    
+    // Submit first time - should be a cache miss
+    let result1 = pool.verify_job(job1.clone()).await;
+    
+    // Wait for batch to process
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    
+    // Record values after first submission
+    let after_first_hits = EEZO_SIGPOOL_CACHE_HITS_TOTAL.get();
+    let after_first_misses = EEZO_SIGPOOL_CACHE_MISSES_TOTAL.get();
+    
+    // Submit same job again - should get a cache hit
+    let job2 = SigVerifyJob::new(
+        vec![((unique_id >> 0) & 0xFF) as u8; 32],
+        vec![((unique_id >> 8) & 0xFF) as u8; 32],
+        vec![((unique_id >> 16) & 0xFF) as u8; 32],
+    );
+    
+    let result2 = pool.verify_job(job2).await;
+    
+    // Wait for processing
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    
+    let final_hits = EEZO_SIGPOOL_CACHE_HITS_TOTAL.get();
+    let final_misses = EEZO_SIGPOOL_CACHE_MISSES_TOTAL.get();
+    
+    // First submission should have caused a cache miss
+    assert!(
+        after_first_misses > initial_misses,
+        "First submission should cause cache miss: initial={}, after={}",
+        initial_misses, after_first_misses
+    );
+    
+    // Second submission should cause a cache hit (either in verify_job fast path or in verify_batch)
+    assert!(
+        final_hits > after_first_hits || matches!(result2, SigVerifyResult::CacheHit),
+        "Second submission should hit cache: after_first_hits={}, final_hits={}, result2={:?}",
+        after_first_hits, final_hits, result2
+    );
+    
+    // The results should be consistent
+    // Note: result1 could be Ok or Failed depending on actual verification
+    // result2 should be CacheHit if cache worked, or same result as result1
+}
+
+/// T83.0b: Test that verify_jobs (batch API) also increments metrics.
+#[cfg(feature = "metrics")]
+#[tokio::test]
+async fn t83_0b_verify_jobs_batch_metrics() {
+    use eezo_node::metrics::{
+        EEZO_SIGPOOL_QUEUED_TOTAL,
+        EEZO_SIGPOOL_BATCHES_TOTAL,
+    };
+
+    // Force metric registration
+    register_t83_sigpool_metrics();
+
+    let initial_queued = EEZO_SIGPOOL_QUEUED_TOTAL.get();
+    let initial_batches = EEZO_SIGPOOL_BATCHES_TOTAL.get();
+
+    let config = SigPoolConfig {
+        threads: 2,
+        batch_size: 8,
+        batch_timeout_ms: 10,
+        cache_size: 100,
+        queue_size: 100,
+    };
+    
+    let pool = SigPool::new_with_config(config);
+
+    // Create batch of jobs
+    let jobs: Vec<SigVerifyJob> = (0..20)
+        .map(|i| SigVerifyJob::new(
+            vec![(i * 3) as u8; 32],
+            vec![(i * 3 + 1) as u8; 32],
+            vec![(i * 3 + 2) as u8; 32],
+        ))
+        .collect();
+
+    // Submit batch
+    let _results = pool.verify_jobs(jobs).await;
+
+    // Wait for processing
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let final_queued = EEZO_SIGPOOL_QUEUED_TOTAL.get();
+    let final_batches = EEZO_SIGPOOL_BATCHES_TOTAL.get();
+
+    // queued_total should have incremented by 20
+    assert!(
+        final_queued >= initial_queued + 20,
+        "queued_total should increment by 20: initial={}, final={}",
+        initial_queued, final_queued
+    );
+
+    // batches_total should have incremented (20 jobs with batch_size=8 -> at least 2-3 batches)
+    assert!(
+        final_batches > initial_batches,
+        "batches_total should increment: initial={}, final={}",
+        initial_batches, final_batches
+    );
 }
