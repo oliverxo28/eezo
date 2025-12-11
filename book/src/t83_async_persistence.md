@@ -217,3 +217,46 @@ cargo test --features "pq44-runtime,metrics,checkpoints,stm-exec,dag-consensus" 
 2. **Adaptive batching**: Group multiple blocks per RocksDB write
 3. **Background compaction**: Trigger RocksDB compaction during low activity
 4. **Memory limits**: Cap CommittedMemHead size with LRU eviction
+
+## Operator Notes
+
+### When to Enable Async Persistence
+
+Enable `EEZO_PERSIST_ASYNC=1` when:
+- Running high-TPS workloads (devnet, testnet under load)
+- Block latency is more important than immediate disk durability
+- Node is a validator focused on throughput
+
+### When to Prefer Sync Mode
+
+Keep async disabled (default) when:
+- Running archival nodes where disk durability is critical
+- Operating in production with strict recovery requirements
+- Debugging persistence-related issues
+
+### Monitoring Async Persistence
+
+Key metrics to watch:
+
+| Metric | Normal Range | Warning Signs |
+|--------|--------------|---------------|
+| `eezo_persist_queue_len` | 0-10 | >100 sustained = worker falling behind |
+| `eezo_persist_blocks_total` | Increasing | Flat = worker stalled |
+| `eezo_persist_block_latency_seconds` | <100ms p99 | >500ms = slow disk |
+| `eezo_persist_head_entries` | <10000 | >100000 = memory pressure |
+
+If `queue_len` grows unbounded:
+1. Check disk I/O metrics
+2. Consider reducing block production rate
+3. Verify RocksDB is not compacting heavily
+
+### Crash Recovery
+
+In async mode, the node may lose the last few blocks on crash:
+- RocksDB contains the last confirmed state
+- On restart, node resumes from RocksDB tip
+- Missing blocks are re-fetched via state sync or replay
+
+This is acceptable for devnet/testnet. For production:
+- Consider enabling write-ahead logging (future work)
+- Use synchronous mode for critical validators
