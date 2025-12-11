@@ -28,6 +28,42 @@
 #
 # For TPS load generation, use spam_tps.sh in a separate terminal:
 #   ./scripts/spam_tps.sh 5000
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-sender TPS Benchmarking (T83.1)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# For multi-sender load with configurable conflict patterns, use spam_multi_senders.sh:
+#
+# Example workflow:
+#   # Terminal 1: Start the DAG-primary devnet node
+#   ./scripts/devnet_dag_primary.sh
+#
+#   # Terminal 2: Generate multi-sender load with high conflict (hotspot)
+#   ./scripts/spam_multi_senders.sh \
+#     --senders 16 \
+#     --per-sender 200 \
+#     --hot-receivers 1 \
+#     --pattern hotspot
+#
+#   # Terminal 3: Run TPS benchmark to measure throughput and conflicts
+#   ./scripts/tps_benchmark.sh --duration 60 --warmup 10 --verbose
+#
+# For low-conflict pattern (disjoint receivers):
+#   ./scripts/spam_multi_senders.sh \
+#     --senders 16 \
+#     --per-sender 200 \
+#     --hot-receivers 16 \
+#     --pattern disjoint
+#
+# Key metrics to compare between patterns:
+#   - TPS: Should be similar or higher with disjoint pattern
+#   - eezo_exec_stm_conflicts_total: Higher with hotspot pattern
+#   - eezo_exec_stm_retries_total: Higher with hotspot pattern
+#   - eezo_exec_stm_waves_built_total: More waves needed with hotspot pattern
+#
+# See book/src/t83_multi_sender_baseline.md for detailed documentation.
+# ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
