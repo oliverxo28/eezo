@@ -563,26 +563,43 @@ pub fn checkpoint_filename(height: u64) -> String {
 /// 
 /// This prevents cryptic "Not a directory (os error 20)" errors by diagnosing
 /// the problem upfront.
+/// 
+/// # Arguments
+/// 
+/// * `dir` - The directory path to validate
+/// 
+/// # Returns
+/// 
+/// * `Ok(())` - If the path is valid (all existing components are directories)
+/// * `Err(io::Error)` - If any path component exists as a file instead of a directory
 fn ensure_dir_path_valid(dir: &Path) -> std::io::Result<()> {
     let mut current = PathBuf::new();
     for component in dir.components() {
         current.push(component);
-        if current.exists() {
-            let meta = fs::metadata(&current)?;
-            if meta.is_file() {
-                let msg = format!(
-                    "checkpoint path conflict: '{}' exists as a file but should be a directory. \
-                     Please remove the file or rename it, then restart the node. \
-                     Full target path: {}",
-                    current.display(),
-                    dir.display()
-                );
-                log::error!("{}", msg);
-                return Err(std::io::Error::new(ErrorKind::Other, msg));
+        // Use metadata directly to avoid duplicate filesystem operations
+        match fs::metadata(&current) {
+            Ok(meta) => {
+                if meta.is_file() {
+                    let msg = format!(
+                        "checkpoint path conflict: '{}' exists as a file but should be a directory. \
+                         Please remove the file or rename it, then restart the node. \
+                         Full target path: {}",
+                        current.display(),
+                        dir.display()
+                    );
+                    log::error!("{}", msg);
+                    return Err(std::io::Error::new(ErrorKind::Other, msg));
+                }
+                // If it's a directory, continue checking the next component
             }
-        } else {
-            // Path doesn't exist yet, no conflict
-            break;
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                // Path doesn't exist yet, no conflict possible for remaining components
+                break;
+            }
+            Err(e) => {
+                // Propagate other errors (permissions, etc.)
+                return Err(e);
+            }
         }
     }
     Ok(())

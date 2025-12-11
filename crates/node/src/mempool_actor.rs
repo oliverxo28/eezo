@@ -239,6 +239,8 @@ pub struct MempoolActor {
     statuses: HashMap<TxHash, TxStatus>,
     /// Current byte count.
     cur_bytes: usize,
+    /// Total pending transaction count (maintained for O(1) access).
+    total_len: usize,
     /// Configuration.
     config: MempoolActorConfig,
     /// Per-IP rate buckets.
@@ -263,11 +265,18 @@ impl MempoolActor {
             in_flight: HashMap::new(),
             statuses: HashMap::new(),
             cur_bytes: 0,
+            total_len: 0,
             config,
             ip_buckets: HashMap::new(),
             prefetched: None,
             receiver,
         }
+    }
+
+    /// Get the total number of pending transactions (O(1)).
+    #[inline]
+    fn len(&self) -> usize {
+        self.total_len
     }
 
     /// Run the actor event loop.
@@ -319,12 +328,19 @@ impl MempoolActor {
         log::info!("mempool-actor: stopped");
     }
 
-    /// Get bucket index for a sender address.
+    /// Get bucket index for a sender address using proper hashing.
+    /// 
+    /// Uses FNV-1a inspired mixing for better distribution across buckets.
     #[inline]
     fn bucket_index(sender: &SenderAddress) -> usize {
-        // Use first byte of sender address as bucket index
-        // This provides a simple, fast hash distribution
-        sender[0] as usize % NUM_BUCKETS
+        // FNV-1a-inspired mixing for better distribution
+        // Uses multiple bytes to avoid patterns in first byte
+        let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+        for &byte in sender.iter() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+        }
+        (hash as usize) % NUM_BUCKETS
     }
 
     /// Handle submit message.
@@ -348,9 +364,8 @@ impl MempoolActor {
             return Err(SubmitError::RateLimited);
         }
 
-        // Capacity checks
-        let total_len: usize = self.buckets.iter().map(|b| b.queue.len()).sum();
-        if total_len >= self.config.max_len {
+        // Capacity checks (O(1) using total_len counter)
+        if self.total_len >= self.config.max_len {
             return Err(SubmitError::QueueFull);
         }
 
@@ -367,6 +382,7 @@ impl MempoolActor {
         self.hash_to_bucket.insert(entry.hash, bucket_idx);
         self.statuses.insert(entry.hash, TxStatus::Pending);
         self.cur_bytes += entry_bytes;
+        self.total_len += 1;
 
         // Invalidate prefetch (new tx may change optimal batch)
         self.prefetched = None;
@@ -378,7 +394,7 @@ impl MempoolActor {
             "mempool-actor: submitted tx hash=0x{} bucket={} total_len={}",
             hex::encode(&entry.hash[..4]),
             bucket_idx,
-            total_len + 1
+            self.total_len
         );
 
         Ok(())
@@ -457,6 +473,7 @@ impl MempoolActor {
         if let Some(bucket_idx) = self.hash_to_bucket.remove(&hash) {
             let bucket = &mut self.buckets[bucket_idx];
             bucket.queue.retain(|e| e.hash != hash);
+            self.total_len = self.total_len.saturating_sub(1);
         }
 
         // Add to in-flight
@@ -528,6 +545,7 @@ impl MempoolActor {
                 if let Some(pos) = bucket.queue.iter().position(|e| &e.hash == hash) {
                     if let Some(entry) = bucket.queue.remove(pos) {
                         self.cur_bytes = self.cur_bytes.saturating_sub(entry.bytes.len());
+                        self.total_len = self.total_len.saturating_sub(1);
                     }
                 }
             }
@@ -560,6 +578,7 @@ impl MempoolActor {
                 self.buckets[bucket_idx].queue.push_back(entry.clone());
                 self.hash_to_bucket.insert(*hash, bucket_idx);
                 self.statuses.insert(*hash, TxStatus::Pending);
+                self.total_len += 1;
 
                 log::debug!(
                     "mempool-actor: returned in-flight tx hash=0x{} to bucket={}",
@@ -595,9 +614,8 @@ impl MempoolActor {
 
     /// Get mempool stats.
     fn get_stats(&self) -> MempoolStats {
-        let len: usize = self.buckets.iter().map(|b| b.queue.len()).sum();
         MempoolStats {
-            len,
+            len: self.total_len,
             cur_bytes: self.cur_bytes,
             max_len: self.config.max_len,
             max_bytes: self.config.max_bytes,
@@ -609,8 +627,7 @@ impl MempoolActor {
     /// Refresh Prometheus gauges.
     #[cfg(feature = "metrics")]
     fn refresh_gauges(&self) {
-        let len: usize = self.buckets.iter().map(|b| b.queue.len()).sum();
-        EEZO_MEMPOOL_LEN.set(len as i64);
+        EEZO_MEMPOOL_LEN.set(self.total_len as i64);
         EEZO_MEMPOOL_BYTES.set(self.cur_bytes as i64);
     }
 }
