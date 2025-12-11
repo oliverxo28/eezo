@@ -45,4 +45,5 @@ crates/node/test-ops-*/
 crates/node/src/backup/
 
 # Temp directories
-/tmp/
+/tmp/.lock
+crates/node/t29_9-*

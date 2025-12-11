@@ -133,6 +133,7 @@ get_metric() {
 # Fetch multiple metrics at once (single HTTP request)
 # Usage: fetch_all_metrics
 # Sets global variables: TXS_INCLUDED, BLOCK_APPLIED, STM_WAVES, STM_CONFLICTS, STM_RETRIES
+# T82.4b: Also fetches waves_built and conflict pre-screen hit/miss counters
 fetch_all_metrics() {
     local metrics_output
     metrics_output="$(curl -sf "$METRICS_URL" 2>/dev/null)" || {
@@ -146,6 +147,10 @@ fetch_all_metrics() {
     STM_CONFLICTS="$(echo "$metrics_output" | grep_cmd '^eezo_exec_stm_conflicts_total ' | awk '{print $2}')"
     STM_RETRIES="$(echo "$metrics_output" | grep_cmd '^eezo_exec_stm_retries_total ' | awk '{print $2}')"
     STM_ABORTED="$(echo "$metrics_output" | grep_cmd '^eezo_exec_stm_aborted_total ' | awk '{print $2}')"
+    # T82.4b: New wave building and conflict pre-screen metrics
+    STM_WAVES_BUILT="$(echo "$metrics_output" | grep_cmd '^eezo_exec_stm_waves_built_total ' | awk '{print $2}')"
+    STM_PRESCREEN_HITS="$(echo "$metrics_output" | grep_cmd '^eezo_exec_stm_conflict_prescreen_hits_total ' | awk '{print $2}')"
+    STM_PRESCREEN_MISSES="$(echo "$metrics_output" | grep_cmd '^eezo_exec_stm_conflict_prescreen_misses_total ' | awk '{print $2}')"
     
     # Default to 0 if missing
     TXS_INCLUDED="${TXS_INCLUDED:-0}"
@@ -154,6 +159,9 @@ fetch_all_metrics() {
     STM_CONFLICTS="${STM_CONFLICTS:-0}"
     STM_RETRIES="${STM_RETRIES:-0}"
     STM_ABORTED="${STM_ABORTED:-0}"
+    STM_WAVES_BUILT="${STM_WAVES_BUILT:-0}"
+    STM_PRESCREEN_HITS="${STM_PRESCREEN_HITS:-0}"
+    STM_PRESCREEN_MISSES="${STM_PRESCREEN_MISSES:-0}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -213,9 +221,12 @@ START_WAVES="$STM_WAVES"
 START_CONFLICTS="$STM_CONFLICTS"
 START_RETRIES="$STM_RETRIES"
 START_ABORTED="$STM_ABORTED"
+START_WAVES_BUILT="$STM_WAVES_BUILT"
+START_PRESCREEN_HITS="$STM_PRESCREEN_HITS"
+START_PRESCREEN_MISSES="$STM_PRESCREEN_MISSES"
 START_TS="$(date +%s)"
 
-log_verbose "Start metrics: txs=$START_TXS blocks=$START_BLOCKS waves=$START_WAVES"
+log_verbose "Start metrics: txs=$START_TXS blocks=$START_BLOCKS waves=$START_WAVES waves_built=$START_WAVES_BUILT"
 
 echo "      Measurement started at $(date +%H:%M:%S)"
 echo "      Measuring for ${DURATION}s..."
@@ -230,9 +241,12 @@ END_WAVES="$STM_WAVES"
 END_CONFLICTS="$STM_CONFLICTS"
 END_RETRIES="$STM_RETRIES"
 END_ABORTED="$STM_ABORTED"
+END_WAVES_BUILT="$STM_WAVES_BUILT"
+END_PRESCREEN_HITS="$STM_PRESCREEN_HITS"
+END_PRESCREEN_MISSES="$STM_PRESCREEN_MISSES"
 END_TS="$(date +%s)"
 
-log_verbose "End metrics: txs=$END_TXS blocks=$END_BLOCKS waves=$END_WAVES"
+log_verbose "End metrics: txs=$END_TXS blocks=$END_BLOCKS waves=$END_WAVES waves_built=$END_WAVES_BUILT"
 
 echo "      Measurement ended at $(date +%H:%M:%S)"
 echo ""
@@ -251,6 +265,9 @@ DELTA_WAVES=$((END_WAVES - START_WAVES))
 DELTA_CONFLICTS=$((END_CONFLICTS - START_CONFLICTS))
 DELTA_RETRIES=$((END_RETRIES - START_RETRIES))
 DELTA_ABORTED=$((END_ABORTED - START_ABORTED))
+DELTA_WAVES_BUILT=$((END_WAVES_BUILT - START_WAVES_BUILT))
+DELTA_PRESCREEN_HITS=$((END_PRESCREEN_HITS - START_PRESCREEN_HITS))
+DELTA_PRESCREEN_MISSES=$((END_PRESCREEN_MISSES - START_PRESCREEN_MISSES))
 DELTA_TIME=$((END_TS - START_TS))
 
 # Calculate TPS using bc for floating-point
@@ -303,6 +320,11 @@ echo "    Avg conflicts per block:  $AVG_CONFLICTS_PER_BLOCK"
 echo "    Total retries:            $DELTA_RETRIES"
 echo "    Total aborted:            $DELTA_ABORTED"
 echo ""
+echo "  T82.4 Wave Building Metrics:"
+echo "    Waves built:              $DELTA_WAVES_BUILT"
+echo "    Pre-screen hits:          $DELTA_PRESCREEN_HITS"
+echo "    Pre-screen misses:        $DELTA_PRESCREEN_MISSES"
+echo ""
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo ""
 
@@ -323,7 +345,10 @@ if [[ $VERBOSE -eq 1 ]]; then
   "stm_waves": $DELTA_WAVES,
   "stm_conflicts": $DELTA_CONFLICTS,
   "stm_retries": $DELTA_RETRIES,
-  "stm_aborted": $DELTA_ABORTED
+  "stm_aborted": $DELTA_ABORTED,
+  "stm_waves_built": $DELTA_WAVES_BUILT,
+  "stm_prescreen_hits": $DELTA_PRESCREEN_HITS,
+  "stm_prescreen_misses": $DELTA_PRESCREEN_MISSES
 }
 EOF
     echo ""
