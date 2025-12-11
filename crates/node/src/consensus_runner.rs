@@ -2193,7 +2193,9 @@ impl CoreRunnerHandle {
                                             // For now, we apply the full accounts to mem_head
                                             let write_set = BlockWriteSet {
                                                 height,
-                                                accounts: node_guard.accounts.iter().collect(),
+                                                accounts: node_guard.accounts.iter()
+                                                    .map(|(addr, acct)| (*addr, acct.clone()))
+                                                    .collect(),
                                                 supply: node_guard.supply.clone(),
                                                 write_snapshot: false, // will handle snapshots separately
                                             };
