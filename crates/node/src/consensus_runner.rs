@@ -1380,8 +1380,10 @@ impl CoreRunnerHandle {
         } else {
             None
         };
-        // Clone for use in the spawned task
-        let mem_head_c = mem_head.clone();
+        // NOTE: mem_head and async_persist_enabled will be used in block commit
+        // path when the full integration is complete. For now they are stored
+        // in the struct for future use.
+        let _mem_head_c = mem_head.clone();
         let _async_persist_enabled_c = async_persist_enabled;
 
         let join = tokio::spawn(async move {

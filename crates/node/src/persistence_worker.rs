@@ -319,10 +319,14 @@ impl PersistenceWorkerHandle {
     }
     
     /// Get the current queue length (approximate).
+    ///
+    /// NOTE: This is a placeholder that returns 0. The tokio mpsc::Sender
+    /// doesn't expose queue length directly. A proper implementation would
+    /// require an atomic counter incremented on send and decremented on receive.
+    /// For now, use the `eezo_persist_head_entries` metric as a proxy.
+    #[allow(clippy::unused_self)]
     pub fn queue_len(&self) -> usize {
-        // mpsc::Sender doesn't expose queue length directly
-        // We'd need to track this separately with an atomic counter
-        0 // Placeholder
+        0 // TODO: Implement with atomic counter if needed
     }
     
     /// Get a reference to the CommittedMemHead.
