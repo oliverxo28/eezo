@@ -38,7 +38,14 @@ const IN_FLIGHT_EXPIRY_SECS: u64 = 30;
 // Core types
 // ============================================================================
 
+// T83.4: Import SharedTx for zero-copy tx propagation
+use crate::tx_decode_pool::SharedTx;
+
 /// Runtime view of a transaction stored in the mempool.
+/// 
+/// T83.4: Now includes an optional `Arc<SharedTx>` for zero-copy pipeline.
+/// When present, downstream consumers can use the pre-parsed transaction
+/// without re-decoding from bytes.
 #[derive(Debug, Clone)]
 pub struct TxEntry {
     pub hash: TxHash,
@@ -48,6 +55,75 @@ pub struct TxEntry {
     pub requeue_count: u32,
     pub nonce: u64,
     pub fee: u64,
+    /// T83.4: Optional shared, pre-parsed transaction for zero-copy pipeline.
+    /// When set, consumers can use this directly instead of re-parsing bytes.
+    pub shared_tx: Option<Arc<SharedTx>>,
+}
+
+impl TxEntry {
+    /// T83.4: Create a new TxEntry with a pre-parsed SharedTx.
+    /// 
+    /// This is the preferred constructor for the zero-copy pipeline.
+    /// The sender, hash, nonce, and fee are extracted from the SharedTx,
+    /// ensuring consistency and avoiding duplicate computation.
+    ///
+    /// # Notes
+    ///
+    /// - If the SharedTx has no valid sender (pubkey too short), the sender
+    ///   field is set to a marker address `[0xff; 20]` to distinguish from
+    ///   valid zero addresses. Transactions with invalid senders will be
+    ///   rejected during execution.
+    /// - If fee exceeds u64::MAX, it is saturated to u64::MAX with a debug log.
+    ///   This is acceptable for priority ordering since such fees are extremely
+    ///   unlikely in practice.
+    pub fn from_shared_tx(
+        shared_tx: Arc<SharedTx>,
+        bytes: Vec<u8>,
+        received_at: Instant,
+    ) -> Self {
+        let hash = shared_tx.hash();
+        
+        // Use a marker address for invalid senders (distinguishable from zero address)
+        let sender_addr = shared_tx.sender()
+            .map(|a| a.0)
+            .unwrap_or([0xff; 20]); // T83.4: Marker for invalid sender, not zero
+            
+        let nonce = shared_tx.core().nonce;
+        
+        // T83.4: Convert u128 fee to u64 for priority ordering (saturation on overflow)
+        let fee = if shared_tx.core().fee > u64::MAX as u128 {
+            log::debug!(
+                "T83.4: fee {} exceeds u64::MAX, saturating for priority ordering",
+                shared_tx.core().fee
+            );
+            u64::MAX
+        } else {
+            shared_tx.core().fee as u64
+        };
+
+        Self {
+            hash,
+            sender: sender_addr,
+            bytes: Arc::new(bytes),
+            received_at,
+            requeue_count: 0,
+            nonce,
+            fee,
+            shared_tx: Some(shared_tx),
+        }
+    }
+
+    /// T83.4: Check if this entry has a pre-parsed SharedTx.
+    #[inline]
+    pub fn has_shared_tx(&self) -> bool {
+        self.shared_tx.is_some()
+    }
+
+    /// T83.4: Get the pre-parsed SharedTx if available.
+    #[inline]
+    pub fn get_shared_tx(&self) -> Option<&Arc<SharedTx>> {
+        self.shared_tx.as_ref()
+    }
 }
 
 /// Public status exposed to `/tx/{hash}`.
@@ -695,7 +771,23 @@ impl MempoolActorHandle {
             requeue_count: 0,
             nonce: 0, // Placeholder: actual nonce parsed in proposer loop
             fee: 0,   // Placeholder: actual fee parsed in proposer loop
+            shared_tx: None, // T83.4: No pre-parsed tx for raw submit
         };
+        self.submit(ip, entry).await
+    }
+
+    /// T83.4: Submit a transaction with a pre-parsed SharedTx for zero-copy pipeline.
+    ///
+    /// This is the preferred method for the zero-copy tx propagation path.
+    /// The SharedTx is stored in the TxEntry and passed to downstream consumers,
+    /// avoiding re-parsing overhead in the consensus runner and STM executor.
+    pub async fn submit_shared(
+        &self,
+        ip: IpAddr,
+        shared_tx: Arc<SharedTx>,
+        raw_bytes: Vec<u8>,
+    ) -> Result<(), SubmitError> {
+        let entry = TxEntry::from_shared_tx(shared_tx, raw_bytes, Instant::now());
         self.submit(ip, entry).await
     }
 
@@ -890,6 +982,7 @@ mod tests {
             requeue_count: 0,
             nonce,
             fee,
+            shared_tx: None, // T83.4: Tests don't need pre-parsed tx
         }
     }
 
@@ -1161,6 +1254,156 @@ mod tests {
         let stats2 = handle.get_stats().await;
         assert_eq!(stats2.len, 0);
         assert_eq!(stats2.in_flight_count, 3);
+
+        handle.shutdown().await;
+    }
+
+    // =========================================================================
+    // T83.4: SharedTx integration tests
+    // =========================================================================
+
+    /// Helper: create a test SharedTx and TxEntry together
+    fn make_shared_tx_entry(nonce: u64) -> (Arc<SharedTx>, TxEntry) {
+        use eezo_ledger::{Address, TxCore, SignedTx};
+        
+        let tx = SignedTx {
+            core: TxCore {
+                to: Address([0xca; 20]),
+                amount: 1000,
+                fee: 10,
+                nonce,
+            },
+            pubkey: vec![0x42; 32],  // 32-byte pubkey for valid sender derivation
+            sig: vec![0xde, 0xad],
+        };
+        
+        let chain_id = [0x01u8; 20];
+        let shared_tx = Arc::new(SharedTx::new(tx, chain_id));
+        let bytes = vec![0u8; 100]; // Dummy bytes for size tracking
+        
+        let entry = TxEntry::from_shared_tx(shared_tx.clone(), bytes, Instant::now());
+        (shared_tx, entry)
+    }
+
+    #[tokio::test]
+    async fn test_submit_shared_tx() {
+        let config = MempoolActorConfig {
+            max_len: 100,
+            max_bytes: 100_000,
+            rate_bucket_capacity: 100,
+            rate_refill_per_minute: 6000,
+            in_flight_expiry_secs: 30,
+        };
+
+        let handle = MempoolActorHandle::spawn(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Create SharedTx-backed entries
+        let (shared1, entry1) = make_shared_tx_entry(0);
+        let (shared2, entry2) = make_shared_tx_entry(1);
+
+        // Submit entries with SharedTx
+        handle.submit(ip, entry1).await.unwrap();
+        handle.submit(ip, entry2).await.unwrap();
+
+        // Get batch and verify SharedTx is preserved
+        let batch = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch.txs.len(), 2);
+
+        // All entries should have SharedTx
+        for tx_entry in &batch.txs {
+            assert!(tx_entry.has_shared_tx(), "Entry should have SharedTx");
+        }
+
+        // Verify hash consistency
+        assert_eq!(batch.txs[0].hash, shared1.hash());
+        assert_eq!(batch.txs[1].hash, shared2.hash());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_shared_tx_entry_fields() {
+        let (shared_tx, entry) = make_shared_tx_entry(42);
+
+        // Verify entry fields are derived from SharedTx
+        assert_eq!(entry.hash, shared_tx.hash());
+        assert_eq!(entry.nonce, 42);
+        assert_eq!(entry.fee, 10); // fee from core
+        
+        // Sender should be derived from pubkey (valid sender case)
+        let expected_sender = shared_tx.sender()
+            .map(|a| a.0)
+            .unwrap_or([0xff; 20]); // Marker for invalid sender
+        assert_eq!(entry.sender, expected_sender);
+
+        // SharedTx should be accessible
+        assert!(entry.has_shared_tx());
+        assert!(Arc::ptr_eq(&entry.shared_tx.as_ref().unwrap(), &shared_tx));
+    }
+
+    #[tokio::test]
+    async fn test_submit_shared_uses_actor_handle() {
+        let config = MempoolActorConfig::default();
+        let handle = MempoolActorHandle::spawn(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Use the new submit_shared method
+        use eezo_ledger::{Address, TxCore, SignedTx};
+        let tx = SignedTx {
+            core: TxCore {
+                to: Address([0xab; 20]),
+                amount: 500,
+                fee: 5,
+                nonce: 99,
+            },
+            pubkey: vec![0x11; 32],
+            sig: vec![],
+        };
+        let shared_tx = Arc::new(SharedTx::new(tx, [0x01; 20]));
+        let raw_bytes = vec![0u8; 50];
+
+        // Submit via the new submit_shared method
+        let result = handle.submit_shared(ip, shared_tx.clone(), raw_bytes).await;
+        assert!(result.is_ok());
+
+        // Verify it's in the batch
+        let batch = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch.txs.len(), 1);
+        assert!(batch.txs[0].has_shared_tx());
+        assert_eq!(batch.txs[0].hash, shared_tx.hash());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_mixed_shared_and_raw_submit() {
+        let config = MempoolActorConfig::default();
+        let handle = MempoolActorHandle::spawn(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // Submit one with SharedTx
+        let (_, entry_shared) = make_shared_tx_entry(0);
+        handle.submit(ip, entry_shared).await.unwrap();
+
+        // Submit one without SharedTx (raw)
+        let entry_raw = test_entry(100, 100, 1, 50);
+        handle.submit(ip, entry_raw).await.unwrap();
+
+        // Get batch
+        let batch = handle.get_batch(10_000, 10).await;
+        assert_eq!(batch.txs.len(), 2);
+
+        // Verify one has SharedTx, one doesn't
+        let has_shared_count = batch.txs.iter()
+            .filter(|e| e.has_shared_tx())
+            .count();
+        let no_shared_count = batch.txs.iter()
+            .filter(|e| !e.has_shared_tx())
+            .count();
+
+        assert_eq!(has_shared_count, 1);
+        assert_eq!(no_shared_count, 1);
 
         handle.shutdown().await;
     }

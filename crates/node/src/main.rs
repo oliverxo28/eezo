@@ -1866,6 +1866,11 @@ async fn post_tx(
         use eezo_ledger::tx_types::HasTxHash;
         let canonical_tx_hash = stx.tx_hash_bytes();
 
+        // T83.4: Create SharedTx for zero-copy pipeline.
+        // This is the single parse point - downstream consumers get Arc<SharedTx>.
+        use crate::tx_decode_pool::SharedTx;
+        let shared_tx = std::sync::Arc::new(SharedTx::new(stx.clone(), state.chain_id));
+
         // 5) Hand off to the consensus core (SingleNode::submit_signed_tx)
         // Check which runner is active and use it for submission
         let is_submitted = if let Some(core_runner) = state.core_runner.as_ref() {
@@ -1893,9 +1898,11 @@ async fn post_tx(
                 // already accepted the tx.
                 let _ = state.mempool.submit(ip, hash32, raw.clone()).await;
                 
-                // T82.2b: Also submit to mempool actor if enabled (for in-flight tracking)
+                // T83.4: Use submit_shared for zero-copy pipeline instead of submit_raw.
+                // This passes the pre-parsed SharedTx to the mempool actor, avoiding
+                // re-parsing in the consensus runner.
                 if let Some(ref actor) = state.mempool_actor {
-                    let _ = actor.submit_raw(ip, hash32, raw.clone()).await;
+                    let _ = actor.submit_shared(ip, shared_tx.clone(), raw.clone()).await;
                 }
                 
                 // T76.3b: Insert tx bytes into the canonical hash cache for DAG hybrid consumer.
@@ -1909,9 +1916,9 @@ async fn post_tx(
             // Submit tx to the shared mempool for shadow payload sampling.
             let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
             
-            // T82.2b: Submit to mempool actor if enabled
+            // T83.4: Use submit_shared for zero-copy pipeline
             if let Some(ref actor) = state.mempool_actor {
-                match actor.submit_raw(ip, hash32, raw.clone()).await {
+                match actor.submit_shared(ip, shared_tx.clone(), raw.clone()).await {
                     Ok(()) => {
                         #[cfg(feature = "metrics")]
                         {

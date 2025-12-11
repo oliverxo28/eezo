@@ -357,6 +357,34 @@ pub fn analyze_batch(txs: &[SignedTx]) -> Vec<AnalyzedTx> {
         .collect()
 }
 
+/// T83.4: Analyze a SharedTx to build AnalyzedTx with conflict metadata.
+///
+/// Uses pre-computed sender from SharedTx, avoiding redundant derivation.
+/// Returns None if SharedTx has no valid sender.
+pub fn analyze_shared_tx(shared_tx: &std::sync::Arc<crate::tx_decode_pool::SharedTx>, tx_idx: usize) -> Option<AnalyzedTx> {
+    let sender = shared_tx.sender()?;
+    let from_key = address_fingerprint(&sender);
+    let to_key = address_fingerprint(&shared_tx.core().to);
+    
+    Some(AnalyzedTx {
+        tx: std::sync::Arc::new(shared_tx.signed_tx().clone()),
+        tx_idx,
+        sender,
+        meta: ConflictMetadata::Simple { from_key, to_key },
+    })
+}
+
+/// T83.4: Analyze a batch of SharedTx into AnalyzedTx representations.
+///
+/// Uses pre-computed sender from SharedTx, avoiding redundant derivation.
+/// Txs without valid sender are excluded.
+pub fn analyze_shared_batch(shared_txs: &[std::sync::Arc<crate::tx_decode_pool::SharedTx>]) -> Vec<AnalyzedTx> {
+    shared_txs.iter()
+        .enumerate()
+        .filter_map(|(idx, stx)| analyze_shared_tx(stx, idx))
+        .collect()
+}
+
 // =============================================================================
 // T82.1: BlockOverlay - Block-level state overlay
 // =============================================================================
@@ -2417,5 +2445,137 @@ mod tests {
         assert!(total_after > total_before,
             "Pre-screen metrics should increment: hits before={} after={}, misses before={} after={}",
             hits_before, hits_after, misses_before, misses_after);
+    }
+
+    // =========================================================================
+    // T83.4: SharedTx → AnalyzedTx Integration Tests
+    // =========================================================================
+
+    #[test]
+    fn test_analyze_shared_tx_basic() {
+        use eezo_ledger::TxCore;
+        use crate::tx_decode_pool::SharedTx;
+        use std::sync::Arc;
+
+        // Create a test transaction
+        let sender_bytes: [u8; 20] = [0x11; 20];
+        let receiver_bytes: [u8; 20] = [0x22; 20];
+
+        let tx = SignedTx {
+            core: TxCore {
+                to: Address(receiver_bytes),
+                amount: 1000,
+                fee: 1,
+                nonce: 42,
+            },
+            // Use a 20-byte pubkey so sender derivation works
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+
+        // Create SharedTx
+        let chain_id = [0x01u8; 20];
+        let shared_tx = Arc::new(SharedTx::new(tx, chain_id));
+
+        // Analyze the SharedTx
+        let analyzed = analyze_shared_tx(&shared_tx, 5).expect("analyze should succeed");
+
+        // Verify fields are correct
+        assert_eq!(analyzed.tx_idx, 5);
+        assert_eq!(analyzed.sender, Address(sender_bytes));
+        
+        // Core fields should match
+        assert_eq!(analyzed.tx.core.nonce, 42);
+        assert_eq!(analyzed.tx.core.amount, 1000);
+    }
+
+    #[test]
+    fn test_analyze_shared_tx_uses_cached_sender() {
+        use eezo_ledger::TxCore;
+        use crate::tx_decode_pool::SharedTx;
+        use std::sync::Arc;
+
+        // Create SharedTx
+        let tx = SignedTx {
+            core: TxCore {
+                to: Address([0xaa; 20]),
+                amount: 500,
+                fee: 5,
+                nonce: 0,
+            },
+            pubkey: vec![0x42; 32], // 32-byte pubkey
+            sig: vec![],
+        };
+
+        let shared_tx = Arc::new(SharedTx::new(tx, [0; 20]));
+        
+        // The sender is pre-computed in SharedTx
+        let cached_sender = shared_tx.sender().expect("should have sender");
+        
+        // Analyze should use the same sender
+        let analyzed = analyze_shared_tx(&shared_tx, 0).expect("should succeed");
+        assert_eq!(analyzed.sender, cached_sender);
+    }
+
+    #[test]
+    fn test_analyze_shared_batch() {
+        use eezo_ledger::TxCore;
+        use crate::tx_decode_pool::SharedTx;
+        use std::sync::Arc;
+
+        // Create a batch of SharedTx
+        let chain_id = [0x01u8; 20];
+        let shared_txs: Vec<Arc<SharedTx>> = (0..5).map(|i| {
+            let tx = SignedTx {
+                core: TxCore {
+                    to: Address([0xcc; 20]),
+                    amount: 100 * (i as u128 + 1),
+                    fee: 1,
+                    nonce: i as u64,
+                },
+                pubkey: vec![0x11 + i; 20], // Different sender for each
+                sig: vec![],
+            };
+            Arc::new(SharedTx::new(tx, chain_id))
+        }).collect();
+
+        // Analyze the batch
+        let analyzed = analyze_shared_batch(&shared_txs);
+
+        // All should be analyzed successfully
+        assert_eq!(analyzed.len(), 5);
+
+        // Check indices are correct
+        for (i, atx) in analyzed.iter().enumerate() {
+            assert_eq!(atx.tx_idx, i);
+            assert_eq!(atx.tx.core.nonce, i as u64);
+        }
+    }
+
+    #[test]
+    fn test_analyze_shared_tx_invalid_sender() {
+        use eezo_ledger::TxCore;
+        use crate::tx_decode_pool::SharedTx;
+        use std::sync::Arc;
+
+        // Create tx with pubkey too short for sender derivation
+        let tx = SignedTx {
+            core: TxCore {
+                to: Address([0xaa; 20]),
+                amount: 100,
+                fee: 1,
+                nonce: 0,
+            },
+            pubkey: vec![0x01; 5], // Only 5 bytes - too short
+            sig: vec![],
+        };
+
+        let shared_tx = Arc::new(SharedTx::new(tx, [0; 20]));
+
+        // SharedTx should not have valid sender
+        assert!(shared_tx.sender().is_none());
+
+        // analyze_shared_tx should return None
+        assert!(analyze_shared_tx(&shared_tx, 0).is_none());
     }
 }

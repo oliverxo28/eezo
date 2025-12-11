@@ -29,7 +29,14 @@ use crate::metrics::{EEZO_MEMPOOL_BYTES, EEZO_MEMPOOL_LEN, EEZO_TX_REJECTED_TOTA
 /// 32-byte transaction hash (blake2/sha256/ssz-root etc. — computed by the caller).
 pub type TxHash = [u8; 32];
 
+// T83.4: Import SharedTx for zero-copy tx propagation
+use crate::tx_decode_pool::SharedTx;
+
 /// Runtime view of a transaction stored in the mempool.
+/// 
+/// T83.4: Now includes an optional `Arc<SharedTx>` for zero-copy pipeline.
+/// When present, downstream consumers can use the pre-parsed transaction
+/// without re-decoding from bytes.
 #[derive(Debug, Clone)]
 pub struct TxEntry {
     pub hash: TxHash,
@@ -37,6 +44,8 @@ pub struct TxEntry {
     #[allow(dead_code)]
     pub received_at: Instant,
     pub requeue_count: u32,
+    /// T83.4: Optional shared, pre-parsed transaction for zero-copy pipeline.
+    pub shared_tx: Option<Arc<SharedTx>>,
 }
 
 /// Public status exposed to `/tx/{hash}`.
@@ -175,6 +184,7 @@ impl Mempool {
             bytes: Arc::new(bytes),
             received_at: Instant::now(),
             requeue_count: 0,
+            shared_tx: None, // T83.4: No pre-parsed tx for raw submit
         });
         self.queue.push_back(entry);
         self.pending_index.insert(hash, ());
@@ -266,6 +276,7 @@ impl Mempool {
             bytes: entry.bytes.clone(),
             received_at: entry.received_at,
             requeue_count: new_count,
+            shared_tx: entry.shared_tx.clone(), // T83.4: Preserve SharedTx on requeue
         });
 
         self.pending_index.insert(entry.hash, ());
