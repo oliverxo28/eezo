@@ -67,7 +67,7 @@ pub enum ConflictMetadata {
     Simple {
         /// 64-bit fingerprint of sender address
         from_key: u64,
-        /// 64-bit fingerprint of receiver address  
+        /// 64-bit fingerprint of receiver address
         to_key: u64,
     },
     // TODO(T82.4): Add Complex variant with bloom filter for multi-account txs
@@ -125,15 +125,13 @@ pub struct AnalyzedTx {
 fn address_fingerprint(addr: &Address) -> u64 {
     // Take first 8 bytes of address as u64 (little-endian)
     let bytes = addr.as_bytes();
-    u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-    ])
+    let arr: [u8; 8] = bytes[..8].try_into().expect("Address has at least 8 bytes");
+    u64::from_le_bytes(arr)
 }
 
 /// Analyze a signed transaction to build AnalyzedTx with conflict metadata.
 ///
-/// Returns None if sender cannot be derived from pubkey.
+/// Returns None if sender cannot be derived from pubkey (requires 20+ byte pubkey).
 pub fn analyze_tx(tx: &SignedTx, tx_idx: usize) -> Option<AnalyzedTx> {
     let sender = sender_from_pubkey_first20(tx)?;
     let from_key = address_fingerprint(&sender);
@@ -1532,7 +1530,8 @@ mod tests {
     fn test_analyzed_tx_invalid_sender_returns_none() {
         use eezo_ledger::TxCore;
         
-        // Create a transaction with pubkey too short
+        // Create a transaction with pubkey too short.
+        // sender_from_pubkey_first20() requires at least 20 bytes to derive sender address.
         let tx = SignedTx {
             core: TxCore {
                 to: Address([0x22; 20]),
@@ -1540,7 +1539,7 @@ mod tests {
                 fee: 1,
                 nonce: 0,
             },
-            pubkey: vec![1, 2, 3], // Only 3 bytes, need at least 20
+            pubkey: vec![1, 2, 3], // Only 3 bytes, sender derivation requires 20+
             sig: vec![],
         };
         

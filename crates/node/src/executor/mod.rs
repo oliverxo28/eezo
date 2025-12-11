@@ -319,4 +319,74 @@ mod equivalence_tests {
         // Verify fees burned: 1 + 2 + 1 + 2 = 6
         assert_eq!(supply_after.burn_total, supply_before.burn_total + 6);
     }
+
+    // ========================================================================
+    // T82.1: Test - Block with multiple senders to same receiver (conflicts)
+    // ========================================================================
+    #[test]
+    fn test_executor_equivalence_same_receiver_conflicts() {
+        // This test verifies that the T82.1 overlay-based executor produces
+        // the same final state as sequential execution when multiple transactions
+        // write to the same receiver account (causing conflicts that require retries).
+        let mut node = create_test_node();
+
+        // Create multiple senders that all send to the same receiver
+        let sender1_bytes: [u8; 20] = [0xaa; 20];
+        let sender2_bytes: [u8; 20] = [0xbb; 20];
+        let sender3_bytes: [u8; 20] = [0xcc; 20];
+        let receiver_bytes: [u8; 20] = [0xdd; 20];
+
+        let _sender1 = create_funded_sender(&mut node, sender1_bytes, 100_000);
+        let _sender2 = create_funded_sender(&mut node, sender2_bytes, 100_000);
+        let _sender3 = create_funded_sender(&mut node, sender3_bytes, 100_000);
+        let receiver = Address(receiver_bytes);
+
+        // All senders send to the same receiver - this causes write-write conflicts
+        // on the receiver account
+        let txs = vec![
+            create_test_tx(sender1_bytes, receiver, 1000, 1, 0),
+            create_test_tx(sender2_bytes, receiver, 2000, 2, 0),
+            create_test_tx(sender3_bytes, receiver, 3000, 3, 0),
+        ];
+
+        // Snapshot initial state
+        let (_, supply_before) = snapshot_state(&node);
+
+        // Execute with STM
+        let stm_executor = StmExecutor::new(1);
+        let input = ExecInput::new(txs.clone(), 1);
+        let outcome = stm_executor.execute_block(&mut node, input);
+
+        assert!(outcome.result.is_ok());
+        let block = outcome.result.unwrap();
+
+        // All 3 txs should be included (STM handles conflicts via retries)
+        assert_eq!(block.txs.len(), 3, "Expected 3 txs to be included");
+
+        // Apply block to node
+        apply_block_to_node(&mut node, &block);
+
+        // Snapshot final state
+        let (accounts_after, supply_after) = snapshot_state(&node);
+
+        // Verify receiver got all transfers: 1000 + 2000 + 3000 = 6000
+        let receiver_final = accounts_after.get(&receiver);
+        assert_eq!(receiver_final.balance, 6000);
+
+        // Verify each sender's balance was deducted correctly
+        let sender1_final = accounts_after.get(&Address(sender1_bytes));
+        assert_eq!(sender1_final.balance, 100_000 - 1001); // 1000 + 1 fee
+        assert_eq!(sender1_final.nonce, 1);
+
+        let sender2_final = accounts_after.get(&Address(sender2_bytes));
+        assert_eq!(sender2_final.balance, 100_000 - 2002); // 2000 + 2 fee
+        assert_eq!(sender2_final.nonce, 1);
+
+        let sender3_final = accounts_after.get(&Address(sender3_bytes));
+        assert_eq!(sender3_final.balance, 100_000 - 3003); // 3000 + 3 fee
+        assert_eq!(sender3_final.nonce, 1);
+
+        // Verify fees burned: 1 + 2 + 3 = 6
+        assert_eq!(supply_after.burn_total, supply_before.burn_total + 6);
+    }
 }
