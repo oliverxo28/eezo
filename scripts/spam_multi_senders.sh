@@ -205,10 +205,13 @@ declare -a HOT_RECEIVERS
 for (( r=0; r < NUM_HOT_RECEIVERS; r++ )); do
     # Generate receiver address with best available entropy source
     # Try openssl first, fall back to /dev/urandom, then to pseudo-random
+    RAND_HEX=""
     if command -v openssl >/dev/null 2>&1; then
-        RAND_HEX=$(openssl rand -hex 20 2>/dev/null)
-    elif [[ -r /dev/urandom ]]; then
-        RAND_HEX=$(head -c 20 /dev/urandom | xxd -p 2>/dev/null)
+        RAND_HEX=$(openssl rand -hex 20 2>/dev/null || true)
+    fi
+    if [[ -z "$RAND_HEX" ]] && [[ -r /dev/urandom ]]; then
+        # Use od as fallback since xxd may not be available
+        RAND_HEX=$(head -c 20 /dev/urandom | od -An -tx1 2>/dev/null | tr -d ' \n' || true)
     fi
     # Fallback to pseudo-random if above failed
     if [[ -z "$RAND_HEX" ]]; then
