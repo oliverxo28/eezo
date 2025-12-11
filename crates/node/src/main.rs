@@ -78,6 +78,7 @@ use std::time::Duration;
 mod metrics;
 mod peers;
 mod mempool;
+mod mempool_actor;  // T82.2: Lock-free mempool actor
 mod sigpool;
 mod accounts;
 mod executor;
@@ -1588,6 +1589,9 @@ struct AppState {
     // Used by GET /health/dag_primary endpoint to track metric activity.
     #[cfg(feature = "metrics")]
     dag_primary_health_state: Arc<crate::dag_primary_health::DagPrimaryHealthState>,
+    // T82.2b: Optional mempool actor handle for lock-free mempool operations.
+    // When EEZO_MEMPOOL_ACTOR_ENABLED=1, this is used instead of SharedMempool.
+    mempool_actor: Option<crate::mempool_actor::MempoolActorHandle>,
 }
 
 struct RecentBlocks {
@@ -1863,6 +1867,11 @@ async fn post_tx(
                 // already accepted the tx.
                 let _ = state.mempool.submit(ip, hash32, raw.clone()).await;
                 
+                // T82.2b: Also submit to mempool actor if enabled (for in-flight tracking)
+                if let Some(ref actor) = state.mempool_actor {
+                    let _ = actor.submit_raw(ip, hash32, raw.clone()).await;
+                }
+                
                 // T76.3b: Insert tx bytes into the canonical hash cache for DAG hybrid consumer.
                 // This allows the hybrid consumer to look up bytes using the canonical SignedTx hash.
                 state.mempool.insert_tx_bytes(canonical_tx_hash, raw);
@@ -1873,6 +1882,23 @@ async fn post_tx(
             // DAG mode without core runner (shouldn't happen after T73.fix, but keep for safety):
             // Submit tx to the shared mempool for shadow payload sampling.
             let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+            
+            // T82.2b: Submit to mempool actor if enabled
+            if let Some(ref actor) = state.mempool_actor {
+                match actor.submit_raw(ip, hash32, raw.clone()).await {
+                    Ok(()) => {
+                        #[cfg(feature = "metrics")]
+                        {
+                            crate::metrics::EEZO_MEMPOOL_LEN.set(actor.len().await as i64);
+                        }
+                    }
+                    Err(e) => {
+                        log::debug!("dag mempool actor submit error: {}", e);
+                    }
+                }
+            }
+            
+            // Also submit to SharedMempool for compatibility
             match state.mempool.submit(ip, hash32, raw).await {
                 Ok(()) => {
                     #[cfg(feature = "metrics")]
@@ -1915,6 +1941,11 @@ async fn post_tx(
     {
         // For now, use loopback IP (we’ll wire real remote IP later if needed).
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        
+        // T82.2b: Submit to mempool actor if enabled
+        if let Some(ref actor) = state.mempool_actor {
+            let _ = actor.submit_raw(ip, hash32, raw.clone()).await;
+        }
         match state.mempool.submit(ip, hash32, raw).await {
             Ok(()) => {
                 #[cfg(feature = "metrics")]
@@ -2099,6 +2130,10 @@ async fn post_tx_batch(
             match serde_json::to_vec(&env) {
                 Ok(raw) => {
                     let h: [u8;32] = *blake3::hash(&raw).as_bytes();
+                    // T82.2b: Submit to mempool actor if enabled
+                    if let Some(ref actor) = state.mempool_actor {
+                        let _ = actor.submit_raw(ip, h, raw.clone()).await;
+                    }
                     match state.mempool.submit(ip, h, raw).await {
                         Ok(()) | Err(crate::mempool::SubmitError::Duplicate) => accepted += 1,
                         Err(_) => rejected += 1,
@@ -2398,6 +2433,12 @@ async fn post_tx_raw_admin(
 
     // Use loopback as submitter IP for now (keeps rate limit path consistent)
     let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    
+    // T82.2b: Submit to mempool actor if enabled
+    if let Some(ref actor) = state.mempool_actor {
+        let _ = actor.submit_raw(ip, hash32, raw.clone()).await;
+    }
+    
     match state.mempool.submit(ip, hash32, raw).await {
         Ok(()) => {
             #[cfg(feature = "metrics")]
@@ -3458,6 +3499,22 @@ async fn main() -> anyhow::Result<()> {
         mp_rate_capacity,
         mp_rate_per_min,
     ));
+    
+    // T82.2b: Optionally spawn the mempool actor for lock-free operations.
+    // When enabled, the actor is used for batch building in the proposer loop.
+    let mempool_actor_enabled = crate::mempool_actor::is_mempool_actor_enabled();
+    let mempool_actor = if mempool_actor_enabled {
+        log::info!("mempool: using actor-based implementation (EEZO_MEMPOOL_ACTOR_ENABLED=1)");
+        Some(crate::mempool_actor::spawn_mempool_actor_from_env())
+    } else {
+        log::info!("mempool: using SharedMempool implementation (default)");
+        None
+    };
+    
+    // T82.2b: Set the metrics gauge for mempool actor enabled state.
+    #[cfg(feature = "metrics")]
+    crate::metrics::mempool_actor_enabled_set(mempool_actor_enabled);
+    
 	// -- T51.5a: sigpool runtime config (multi-threaded signature verification) --
     let sigpool_threads = env_usize("EEZO_SIGPOOL_THREADS", 4);
     let sigpool_queue   = env_usize("EEZO_SIGPOOL_QUEUE", 10_000);
@@ -4094,6 +4151,8 @@ async fn main() -> anyhow::Result<()> {
         // T79.0: dag-primary health state tracker
         #[cfg(feature = "metrics")]
         dag_primary_health_state: Arc::new(crate::dag_primary_health::DagPrimaryHealthState::new()),
+        // T82.2b: Optional mempool actor for lock-free operations
+        mempool_actor,
     };
     println!(
         "✅ AppState initialized: ready_flag={}, version={}, git_sha={:?}",
@@ -4413,6 +4472,10 @@ async fn main() -> anyhow::Result<()> {
                                 .mempool
                                 .mark_rejected(&entry.hash, reason.clone(), entry.bytes.len())
                                 .await;
+                            // T82.2b: Also mark rejected in mempool actor if enabled
+                            if let Some(ref actor) = state_clone.mempool_actor {
+                                actor.mark_rejected(&entry.hash, reason.clone(), entry.bytes.len()).await;
+                            }
                             let hhex = format!("0x{}", hex::encode(entry.hash));
                             let dummy_tx = TransferTx { from: "".into(), to: "".into(), amount: "".into(), nonce: "".into(), fee: "".into(), chain_id: "".into() };
                             let receipt = Receipt{
@@ -4649,6 +4712,10 @@ async fn main() -> anyhow::Result<()> {
                             .mempool
                             .mark_rejected(&entry.hash, reason.clone(), entry.bytes.len())
                             .await;
+                        // T82.2b: Also mark rejected in mempool actor if enabled
+                        if let Some(ref actor) = state_clone.mempool_actor {
+                            actor.mark_rejected(&entry.hash, reason.clone(), entry.bytes.len()).await;
+                        }
                         let hhex = format!("0x{}", hex::encode(entry.hash));
                         let receipt = Receipt {
                             hash: hhex.clone(),
@@ -4786,6 +4853,10 @@ async fn main() -> anyhow::Result<()> {
 					    .mempool
 						.mark_included(&entry.hash, next_h, entry.bytes.len())
 						.await;
+                    // T82.2b: Also mark included in mempool actor if enabled
+                    if let Some(ref actor) = state_clone.mempool_actor {
+                        actor.mark_included(&entry.hash, next_h, entry.bytes.len()).await;
+                    }
                     let hhex = format!("0x{}", hex::encode(entry.hash));
                     let receipt = Receipt {
                         hash: hhex.clone(),

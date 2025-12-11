@@ -556,6 +556,55 @@ pub fn checkpoint_filename(height: u64) -> String {
     format!("{height:020}.json")
 }
 
+/// T82.2: Helper to ensure a directory path is valid (no file conflicts).
+/// 
+/// Walks each component of the path and checks if any component exists as a file
+/// where a directory is expected. Returns a clear, actionable error if found.
+/// 
+/// This prevents cryptic "Not a directory (os error 20)" errors by diagnosing
+/// the problem upfront.
+/// 
+/// # Arguments
+/// 
+/// * `dir` - The directory path to validate
+/// 
+/// # Returns
+/// 
+/// * `Ok(())` - If the path is valid (all existing components are directories)
+/// * `Err(io::Error)` - If any path component exists as a file instead of a directory
+fn ensure_dir_path_valid(dir: &Path) -> std::io::Result<()> {
+    let mut current = PathBuf::new();
+    for component in dir.components() {
+        current.push(component);
+        // Use metadata directly to avoid duplicate filesystem operations
+        match fs::metadata(&current) {
+            Ok(meta) => {
+                if meta.is_file() {
+                    let msg = format!(
+                        "checkpoint path conflict: '{}' exists as a file but should be a directory. \
+                         Please remove the file or rename it, then restart the node. \
+                         Full target path: {}",
+                        current.display(),
+                        dir.display()
+                    );
+                    log::error!("{}", msg);
+                    return Err(std::io::Error::new(ErrorKind::Other, msg));
+                }
+                // If it's a directory, continue checking the next component
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                // Path doesn't exist yet, no conflict possible for remaining components
+                break;
+            }
+            Err(e) => {
+                // Propagate other errors (permissions, etc.)
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Rotation-aware filename with a stable tag (`active` or `next`).
 #[inline]
 pub fn checkpoint_filename_tagged(height: u64, tag: &str) -> String {
@@ -565,7 +614,11 @@ pub fn checkpoint_filename_tagged(height: u64, tag: &str) -> String {
 /// Write a `BridgeHeader` JSON file into `dir/<height>.json`.
 /// Creates the directory if missing.
 /// Returns the full path on success.
+/// 
+/// T82.2: Now includes path conflict detection with clear, actionable error messages.
 pub fn write_checkpoint_json(dir: &Path, hdr: &BridgeHeader) -> std::io::Result<PathBuf> {
+    // T82.2: Check for path conflicts before attempting to create directory
+    ensure_dir_path_valid(dir)?;
     fs::create_dir_all(dir)?;
     let mut path = PathBuf::from(dir);
     path.push(checkpoint_filename(hdr.height));
@@ -632,8 +685,12 @@ pub fn write_checkpoint_json(dir: &Path, hdr: &BridgeHeader) -> std::io::Result<
 }
 
 /// Write a `BridgeHeader` JSON file into `dir/ckpt_<height>_<tag>.json`.
+/// 
+/// T82.2: Now includes path conflict detection with clear, actionable error messages.
 #[inline]
 pub fn write_checkpoint_json_tagged(dir: &Path, hdr: &BridgeHeader, tag: &str) -> std::io::Result<PathBuf> {
+    // T82.2: Check for path conflicts before attempting to create directory
+    ensure_dir_path_valid(dir)?;
     fs::create_dir_all(dir)?;
     let mut path = PathBuf::from(dir);
     path.push(checkpoint_filename_tagged(hdr.height, tag));
@@ -1429,5 +1486,160 @@ mod tests {
         };
         let hs = build_rotation_headers(&policy, 42, [9u8; 32], [8u8; 32], [7u8; 32], 999, 1);
         assert!(hs.iter().all(|h| h.qc_sidecar_v2.is_none()));
-    }	
+    }
+
+    // =========================================================================
+    // T82.2: Checkpoint writing tests
+    // =========================================================================
+
+    /// T82.2: Test that checkpoint writing succeeds in a clean temp directory.
+    #[test]
+    fn checkpoint_write_clean_dir_success() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("failed to create temp dir");
+        let checkpoint_dir = dir.path().join("checkpoints");
+
+        // Write checkpoints for a few heights
+        for height in [32u64, 64, 96, 128] {
+            let hdr = BridgeHeader::new(
+                height,
+                [height as u8; 32],
+                [1u8; 32],
+                [2u8; 32],
+                1700000000 + height,
+                2,
+            );
+
+            let result = write_checkpoint_json(&checkpoint_dir, &hdr);
+            assert!(result.is_ok(), "checkpoint write failed at h={}: {:?}", height, result.err());
+
+            let path = result.unwrap();
+            assert!(path.exists(), "checkpoint file not created at h={}", height);
+
+            // Verify the file content is valid JSON
+            let content = fs::read_to_string(&path).expect("failed to read checkpoint file");
+            let parsed: serde_json::Value = serde_json::from_str(&content)
+                .expect("checkpoint file is not valid JSON");
+            assert_eq!(parsed["height"], height);
+        }
+    }
+
+    /// T82.2: Test that checkpoint writing detects file-as-directory conflict.
+    #[test]
+    fn checkpoint_write_file_conflict_detected() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("failed to create temp dir");
+
+        // Create a file where the "checkpoints" directory should be
+        let conflict_file = dir.path().join("checkpoints");
+        fs::write(&conflict_file, "i am a file, not a directory").expect("failed to create conflict file");
+
+        let hdr = BridgeHeader::new(32, [1u8; 32], [2u8; 32], [3u8; 32], 1700000000, 2);
+
+        let result = write_checkpoint_json(&conflict_file.join("subdir"), &hdr);
+        assert!(result.is_err(), "should fail when path component is a file");
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("path conflict") || err_msg.contains("should be a directory"),
+            "error message should explain the conflict: {}",
+            err_msg
+        );
+    }
+
+    /// T82.2: Test that checkpoint writing is idempotent (no error on second write).
+    #[test]
+    fn checkpoint_write_idempotent() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("failed to create temp dir");
+        let checkpoint_dir = dir.path().join("checkpoints");
+
+        let hdr = BridgeHeader::new(32, [1u8; 32], [2u8; 32], [3u8; 32], 1700000000, 2);
+
+        // First write should succeed
+        let result1 = write_checkpoint_json(&checkpoint_dir, &hdr);
+        assert!(result1.is_ok(), "first write failed: {:?}", result1.err());
+
+        // Second write should also succeed (idempotent)
+        let result2 = write_checkpoint_json(&checkpoint_dir, &hdr);
+        assert!(result2.is_ok(), "second write failed: {:?}", result2.err());
+    }
+
+    /// T82.2: Test tagged checkpoint writing.
+    #[test]
+    fn checkpoint_write_tagged_success() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("failed to create temp dir");
+        let checkpoint_dir = dir.path().join("checkpoints");
+
+        let hdr = BridgeHeader::new(32, [1u8; 32], [2u8; 32], [3u8; 32], 1700000000, 2);
+
+        // Write with "active" tag
+        let result = write_checkpoint_json_tagged(&checkpoint_dir, &hdr, "active");
+        assert!(result.is_ok(), "tagged write failed: {:?}", result.err());
+
+        let path = result.unwrap();
+        assert!(path.exists(), "tagged checkpoint file not created");
+
+        // Verify filename format
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert!(filename.contains("_active.json"), "unexpected filename: {}", filename);
+
+        // Verify content
+        let content = fs::read_to_string(&path).expect("failed to read checkpoint file");
+        let parsed: serde_json::Value = serde_json::from_str(&content)
+            .expect("checkpoint file is not valid JSON");
+        assert_eq!(parsed["height"], 32);
+    }
+
+    /// T82.2: Test ensure_dir_path_valid helper function.
+    #[test]
+    fn ensure_dir_path_valid_ok_for_existing_dir() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("failed to create temp dir");
+
+        // Existing directory should be OK
+        let result = ensure_dir_path_valid(dir.path());
+        assert!(result.is_ok(), "should succeed for existing directory");
+
+        // Non-existent path should be OK (will be created later)
+        let result = ensure_dir_path_valid(&dir.path().join("new_subdir"));
+        assert!(result.is_ok(), "should succeed for non-existent path");
+    }
+
+    /// T82.2: Test ensure_dir_path_valid detects file conflicts.
+    #[test]
+    fn ensure_dir_path_valid_detects_file_conflict() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("failed to create temp dir");
+
+        // Create a file where a directory component should be
+        let file_path = dir.path().join("proof");
+        fs::write(&file_path, "").expect("failed to create file");
+
+        // Path that expects "proof" to be a directory
+        let target_path = file_path.join("checkpoints");
+
+        let result = ensure_dir_path_valid(&target_path);
+        assert!(result.is_err(), "should fail when path component is a file");
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("path conflict") && err_msg.contains("should be a directory"),
+            "error message should be clear and actionable: {}",
+            err_msg
+        );
+    }
 }
