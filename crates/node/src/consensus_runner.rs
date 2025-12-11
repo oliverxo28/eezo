@@ -1931,8 +1931,10 @@ impl CoreRunnerHandle {
                                     }
                                     // T82.2c: Reset in-flight count on rollback (txs returned to pool)
                                     #[cfg(feature = "metrics")]
-                                    if crate::mempool_actor::is_mempool_actor_enabled() {
-                                        crate::metrics::mempool_inflight_len_set(0);
+                                    {
+                                        if crate::mempool_actor::is_mempool_actor_enabled() {
+                                            crate::metrics::mempool_inflight_len_set(0);
+                                        }
                                     }
                                     log::warn!("executor: block apply failed: {:?}", e);
                                     Ok(SlotOutcome::Skipped(NoOpReason::Unknown))
@@ -1949,8 +1951,10 @@ impl CoreRunnerHandle {
                             }
                             // T82.2c: Reset in-flight count on rollback (txs returned to pool)
                             #[cfg(feature = "metrics")]
-                            if crate::mempool_actor::is_mempool_actor_enabled() {
-                                crate::metrics::mempool_inflight_len_set(0);
+                            {
+                                if crate::mempool_actor::is_mempool_actor_enabled() {
+                                    crate::metrics::mempool_inflight_len_set(0);
+                                }
                             }
                             // Convert the executor's internal String error to a ConsensusError
                             log::warn!("executor: block execution failed: {}", e);
