@@ -4472,6 +4472,10 @@ async fn main() -> anyhow::Result<()> {
                                 .mempool
                                 .mark_rejected(&entry.hash, reason.clone(), entry.bytes.len())
                                 .await;
+                            // T82.2b: Also mark rejected in mempool actor if enabled
+                            if let Some(ref actor) = state_clone.mempool_actor {
+                                actor.mark_rejected(&entry.hash, reason.clone(), entry.bytes.len()).await;
+                            }
                             let hhex = format!("0x{}", hex::encode(entry.hash));
                             let dummy_tx = TransferTx { from: "".into(), to: "".into(), amount: "".into(), nonce: "".into(), fee: "".into(), chain_id: "".into() };
                             let receipt = Receipt{
@@ -4708,6 +4712,10 @@ async fn main() -> anyhow::Result<()> {
                             .mempool
                             .mark_rejected(&entry.hash, reason.clone(), entry.bytes.len())
                             .await;
+                        // T82.2b: Also mark rejected in mempool actor if enabled
+                        if let Some(ref actor) = state_clone.mempool_actor {
+                            actor.mark_rejected(&entry.hash, reason.clone(), entry.bytes.len()).await;
+                        }
                         let hhex = format!("0x{}", hex::encode(entry.hash));
                         let receipt = Receipt {
                             hash: hhex.clone(),
@@ -4845,6 +4853,10 @@ async fn main() -> anyhow::Result<()> {
 					    .mempool
 						.mark_included(&entry.hash, next_h, entry.bytes.len())
 						.await;
+                    // T82.2b: Also mark included in mempool actor if enabled
+                    if let Some(ref actor) = state_clone.mempool_actor {
+                        actor.mark_included(&entry.hash, next_h, entry.bytes.len()).await;
+                    }
                     let hhex = format!("0x{}", hex::encode(entry.hash));
                     let receipt = Receipt {
                         hash: hhex.clone(),
