@@ -3235,3 +3235,385 @@ pub fn register_t77_dag_ordering_latency_metrics() {
 pub fn register_t77_dag_ordering_latency_metrics() {
     // No metrics to register when the feature is off.
 }
+
+// -----------------------------------------------------------------------------
+// T82.0 — DAG TPS Baseline & Profiling - Executor metrics with eezo_exec_* prefix
+// -----------------------------------------------------------------------------
+//
+// These metrics follow the eezo_exec_* naming convention as requested for T82.0.
+// They track STM executor behavior (waves, conflicts, retries) per block for
+// TPS baseline measurement and profiling.
+
+/// Counter: Total number of STM execution waves across all blocks.
+/// Alias for eezo_stm_block_waves_total with eezo_exec_* prefix.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_WAVES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_exec_stm_waves_total",
+        "Total STM execution waves across all blocks (T82.0)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total tx conflicts detected during STM execution.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_CONFLICTS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_exec_stm_conflicts_total",
+        "Total tx conflicts detected during STM execution (T82.0)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total txs retried due to conflicts during STM execution.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_RETRIES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_exec_stm_retries_total",
+        "Total txs retried due to conflicts during STM execution (T82.0)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total txs aborted after max retries in STM execution.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_ABORTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_exec_stm_aborted_total",
+        "Total txs aborted after max retries in STM execution (T82.0)"
+    )
+    .unwrap()
+});
+
+/// Histogram: STM waves per block distribution.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_WAVES_PER_BLOCK: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_stm_waves_per_block",
+        "Distribution of STM waves per block (T82.0)",
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0]
+    )
+    .unwrap()
+});
+
+/// Histogram: Conflicts per block distribution.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_CONFLICTS_PER_BLOCK: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_stm_conflicts_per_block",
+        "Distribution of conflicts per block (T82.0)",
+        vec![0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0]
+    )
+    .unwrap()
+});
+
+/// Histogram: Retries per block distribution.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_RETRIES_PER_BLOCK: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_stm_retries_per_block",
+        "Distribution of retries per block (T82.0)",
+        vec![0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0]
+    )
+    .unwrap()
+});
+
+/// Helper: Increment STM waves counter (T82.0).
+#[inline]
+pub fn exec_stm_waves_inc(by: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_WAVES_TOTAL.inc_by(by);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = by;
+    }
+}
+
+/// Helper: Increment STM conflicts counter (T82.0).
+#[inline]
+pub fn exec_stm_conflicts_inc(by: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_CONFLICTS_TOTAL.inc_by(by);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = by;
+    }
+}
+
+/// Helper: Increment STM retries counter (T82.0).
+#[inline]
+pub fn exec_stm_retries_inc(by: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_RETRIES_TOTAL.inc_by(by);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = by;
+    }
+}
+
+/// Helper: Increment STM aborted counter (T82.0).
+#[inline]
+pub fn exec_stm_aborted_inc(by: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_ABORTED_TOTAL.inc_by(by);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = by;
+    }
+}
+
+/// Helper: Observe STM waves per block (T82.0).
+#[inline]
+pub fn exec_stm_observe_waves_per_block(waves: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_WAVES_PER_BLOCK.observe(waves as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = waves;
+    }
+}
+
+/// Helper: Observe STM conflicts per block (T82.0).
+#[inline]
+pub fn exec_stm_observe_conflicts_per_block(conflicts: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_CONFLICTS_PER_BLOCK.observe(conflicts as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = conflicts;
+    }
+}
+
+/// Helper: Observe STM retries per block (T82.0).
+#[inline]
+pub fn exec_stm_observe_retries_per_block(retries: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_RETRIES_PER_BLOCK.observe(retries as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = retries;
+    }
+}
+
+/// Eagerly register T82.0 executor metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t82_exec_metrics() {
+    let _ = &*EEZO_EXEC_STM_WAVES_TOTAL;
+    let _ = &*EEZO_EXEC_STM_CONFLICTS_TOTAL;
+    let _ = &*EEZO_EXEC_STM_RETRIES_TOTAL;
+    let _ = &*EEZO_EXEC_STM_ABORTED_TOTAL;
+    let _ = &*EEZO_EXEC_STM_WAVES_PER_BLOCK;
+    let _ = &*EEZO_EXEC_STM_CONFLICTS_PER_BLOCK;
+    let _ = &*EEZO_EXEC_STM_RETRIES_PER_BLOCK;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t82_exec_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
+// T82.0 — CPU Profiling Hooks
+// -----------------------------------------------------------------------------
+//
+// When EEZO_PROFILING=perf is set, the node runs with minimal extra overhead
+// and is friendly to perf record / flamegraph tooling.
+//
+// The profiling mode is determined at startup by checking the environment.
+
+/// Profiling mode configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfilingMode {
+    /// No profiling instrumentation
+    Off,
+    /// Perf-friendly mode with lightweight span markers
+    Perf,
+}
+
+impl Default for ProfilingMode {
+    fn default() -> Self {
+        ProfilingMode::Off
+    }
+}
+
+impl ProfilingMode {
+    /// Parse profiling mode from the EEZO_PROFILING environment variable.
+    /// - "perf" or "1" enables perf-friendly mode
+    /// - Any other value or unset means profiling is off
+    pub fn from_env() -> Self {
+        match std::env::var("EEZO_PROFILING")
+            .unwrap_or_else(|_| "off".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "perf" | "1" | "true" | "on" => ProfilingMode::Perf,
+            _ => ProfilingMode::Off,
+        }
+    }
+
+    /// Check if profiling is enabled
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, ProfilingMode::Off)
+    }
+}
+
+/// Global profiling mode (set once at startup).
+/// Thread-safe via atomic loading in PROFILING_MODE_CACHE.
+static PROFILING_MODE_CACHE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Initialize profiling mode from environment. Should be called once at startup.
+pub fn init_profiling_mode() {
+    let mode = ProfilingMode::from_env();
+    let val = match mode {
+        ProfilingMode::Off => 0,
+        ProfilingMode::Perf => 1,
+    };
+    PROFILING_MODE_CACHE.store(val, std::sync::atomic::Ordering::Relaxed);
+    
+    if mode.is_enabled() {
+        log::info!("T82.0: Profiling mode enabled (EEZO_PROFILING=perf). \
+                   Node is perf/flamegraph friendly.");
+    }
+}
+
+/// Get the current profiling mode.
+/// 
+/// This function is part of T82.0's profiling infrastructure. It returns the current
+/// profiling mode (Off or Perf) based on the EEZO_PROFILING environment variable.
+/// 
+/// The profiling mode is used to enable perf/flamegraph-friendly behavior when
+/// profiling is requested. Currently, enabling profiling mode just logs a message;
+/// future tasks (T82.1+) may add explicit span markers in hot paths.
+#[inline]
+#[allow(dead_code)] // Available for use in profiling spans when needed
+pub fn profiling_mode() -> ProfilingMode {
+    match PROFILING_MODE_CACHE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => ProfilingMode::Perf,
+        _ => ProfilingMode::Off,
+    }
+}
+
+/// Lightweight profiling span marker.
+/// When profiling is enabled, this creates a named span that helps attribute
+/// CPU time in perf/flamegraph output. When disabled, this is a no-op.
+///
+/// This macro is part of T82.0's profiling infrastructure. It can be added to hot paths
+/// (STM execute, sig verification, DAG ordering) to help perf/flamegraph attribute time.
+/// The macro is currently available but not yet placed in hot paths - future work (T82.1+)
+/// may add explicit spans if profiling shows value in having them.
+///
+/// Usage:
+/// ```ignore
+/// let _span = profiling_span!("stm_execute");
+/// // ... hot code ...
+/// // span ends when _span drops
+/// ```
+#[macro_export]
+macro_rules! profiling_span {
+    ($name:expr) => {{
+        // When profiling is enabled, we use a scope guard that does minimal work.
+        // The function name appears in stack traces for perf/flamegraph attribution.
+        struct ProfilingSpan;
+        impl Drop for ProfilingSpan {
+            #[inline(never)]
+            fn drop(&mut self) {
+                // Force this function to appear in stack traces
+                std::hint::black_box(());
+            }
+        }
+        
+        #[inline(never)]
+        fn create_span() -> ProfilingSpan {
+            // This function name helps with perf attribution
+            std::hint::black_box(());
+            ProfilingSpan
+        }
+        
+        if $crate::metrics::profiling_mode().is_enabled() {
+            Some(create_span())
+        } else {
+            None
+        }
+    }};
+}
+
+// Re-export the macro for use in other modules. Currently available but not yet
+// placed in hot paths; can be added during T82.1+ profiling work if needed.
+#[allow(unused_imports)]
+pub use profiling_span;
+
+// -----------------------------------------------------------------------------
+// T82.0 — Unit tests for ProfilingMode
+// -----------------------------------------------------------------------------
+#[cfg(test)]
+mod t82_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Mutex to serialize env var access across tests
+    static T82_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_profiling_mode_default_is_off() {
+        assert_eq!(ProfilingMode::default(), ProfilingMode::Off);
+    }
+
+    #[test]
+    fn test_profiling_mode_is_enabled() {
+        assert!(!ProfilingMode::Off.is_enabled());
+        assert!(ProfilingMode::Perf.is_enabled());
+    }
+
+    #[test]
+    fn test_profiling_mode_from_env_off() {
+        let _guard = T82_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        std::env::remove_var("EEZO_PROFILING");
+        assert_eq!(ProfilingMode::from_env(), ProfilingMode::Off);
+        
+        std::env::set_var("EEZO_PROFILING", "off");
+        assert_eq!(ProfilingMode::from_env(), ProfilingMode::Off);
+        
+        std::env::set_var("EEZO_PROFILING", "disabled");
+        assert_eq!(ProfilingMode::from_env(), ProfilingMode::Off);
+        
+        std::env::remove_var("EEZO_PROFILING");
+    }
+
+    #[test]
+    fn test_profiling_mode_from_env_perf() {
+        let _guard = T82_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        std::env::set_var("EEZO_PROFILING", "perf");
+        assert_eq!(ProfilingMode::from_env(), ProfilingMode::Perf);
+        
+        std::env::set_var("EEZO_PROFILING", "PERF");
+        assert_eq!(ProfilingMode::from_env(), ProfilingMode::Perf);
+        
+        std::env::set_var("EEZO_PROFILING", "1");
+        assert_eq!(ProfilingMode::from_env(), ProfilingMode::Perf);
+        
+        std::env::set_var("EEZO_PROFILING", "true");
+        assert_eq!(ProfilingMode::from_env(), ProfilingMode::Perf);
+        
+        std::env::set_var("EEZO_PROFILING", "on");
+        assert_eq!(ProfilingMode::from_env(), ProfilingMode::Perf);
+        
+        std::env::remove_var("EEZO_PROFILING");
+    }
+}
