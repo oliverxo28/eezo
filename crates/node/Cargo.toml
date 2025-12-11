@@ -11,6 +11,10 @@ readme = "README.md"
 categories = ["cryptography", "blockchain", "networking"]
 keywords = ["eezo", "node", "pqc", "blockchain", "dag-consensus"]
 
+[lib]
+name = "eezo_node"
+path = "src/lib.rs"
+
 [[bin]]
 name = "eezo-node"
 path = "src/main.rs"

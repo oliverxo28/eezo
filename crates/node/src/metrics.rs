@@ -1146,6 +1146,77 @@ pub static EEZO_SIGPOOL_ACTIVE_THREADS: Lazy<IntGauge> = Lazy::new(|| {
 });
 
 // -----------------------------------------------------------------------------
+// T83.0 — Enhanced SigPool metrics (micro-batching + cache)
+// -----------------------------------------------------------------------------
+
+/// Counter: Total micro-batches executed by sigpool.
+pub static EEZO_SIGPOOL_BATCHES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_sigpool_batches_total",
+        "Total number of micro-batches executed by sigpool (T83.0)"
+    )
+    .unwrap()
+});
+
+/// Histogram: Distribution of batch sizes.
+pub static EEZO_SIGPOOL_BATCH_SIZE: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_sigpool_batch_size",
+        "Distribution of sigpool micro-batch sizes (T83.0)",
+        vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0]
+    )
+    .unwrap()
+});
+
+/// Counter: Cache hits in the signature verification cache.
+pub static EEZO_SIGPOOL_CACHE_HITS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_sigpool_cache_hits_total",
+        "Total cache hits in sigpool replay cache (T83.0)"
+    )
+    .unwrap()
+});
+
+/// Counter: Cache misses in the signature verification cache.
+pub static EEZO_SIGPOOL_CACHE_MISSES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_sigpool_cache_misses_total",
+        "Total cache misses in sigpool replay cache (T83.0)"
+    )
+    .unwrap()
+});
+
+/// Histogram: Batch verification latency in seconds.
+pub static EEZO_SIGPOOL_BATCH_LATENCY_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_sigpool_batch_latency_seconds",
+        "Sigpool micro-batch verification latency (seconds) (T83.0)",
+        vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5]
+    )
+    .unwrap()
+});
+
+/// Eagerly register T83.0 sigpool metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t83_sigpool_metrics() {
+    let _ = &*EEZO_SIGPOOL_QUEUED_TOTAL;
+    let _ = &*EEZO_SIGPOOL_VERIFIED_TOTAL;
+    let _ = &*EEZO_SIGPOOL_FAILED_TOTAL;
+    let _ = &*EEZO_SIGPOOL_ACTIVE_THREADS;
+    let _ = &*EEZO_SIGPOOL_BATCHES_TOTAL;
+    let _ = &*EEZO_SIGPOOL_BATCH_SIZE;
+    let _ = &*EEZO_SIGPOOL_CACHE_HITS_TOTAL;
+    let _ = &*EEZO_SIGPOOL_CACHE_MISSES_TOTAL;
+    let _ = &*EEZO_SIGPOOL_BATCH_LATENCY_SECONDS;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t83_sigpool_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
 // T55.3 — DAG runner metrics
 // -----------------------------------------------------------------------------
 /// Gauge: DAG runner state
