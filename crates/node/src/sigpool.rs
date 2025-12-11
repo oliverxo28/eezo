@@ -304,6 +304,17 @@ impl SigVerifyCache {
 /// 2. Verifies uncached jobs using ML-DSA
 /// 3. Updates cache with results
 /// 4. Returns results in original order
+///
+/// ## Implementation Note
+///
+/// Currently processes jobs individually since the ML-DSA implementation
+/// (`verify_single`) does not expose a native batch verification API.
+/// The micro-batching still provides benefits through:
+/// - Better CPU cache locality (jobs processed together)
+/// - Reduced tokio runtime overhead (fewer async context switches)
+/// - Replay cache hits for duplicate signatures
+///
+/// Future: If eezo_crypto exposes `batch_verify`, use it here for further speedup.
 #[cfg(feature = "pq44-runtime")]
 fn verify_batch(jobs: &[SigVerifyJob], cache: &SigVerifyCache) -> Vec<SigVerifyResult> {
     use eezo_crypto::sig::ml_dsa::verify_single;
@@ -614,7 +625,8 @@ fn dispatch_batch(batch: &mut Vec<VerifyJobRequest>, cache: &Arc<SigVerifyCache>
     for (req, result) in batch.drain(..).zip(results.into_iter()) {
         #[cfg(feature = "metrics")]
         {
-            EEZO_SIGPOOL_QUEUED_TOTAL.inc();
+            // Note: EEZO_SIGPOOL_QUEUED_TOTAL is incremented at job submission time,
+            // not here. We only track verified/failed outcomes here.
             match result {
                 SigVerifyResult::Ok | SigVerifyResult::CacheHit => {
                     EEZO_SIGPOOL_VERIFIED_TOTAL.inc();
