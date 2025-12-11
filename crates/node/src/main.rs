@@ -137,6 +137,9 @@ use crate::metrics::{
     register_t76_decode_pool_metrics,
     // T76.11: Consensus mode gauge
     consensus_mode_active_set,
+    // T82.0: DAG TPS Baseline metrics
+    register_t82_exec_metrics,
+    init_profiling_mode,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -3127,6 +3130,10 @@ async fn main() -> anyhow::Result<()> {
 
         // T76.9: Decode pool metrics
         register_t76_decode_pool_metrics();
+
+        // T82.0: DAG TPS Baseline & Profiling metrics
+        register_t82_exec_metrics();
+        init_profiling_mode();
 
         // T76.11: Set consensus mode gauge based on current mode
         // 0 = Legacy, 1 = Hybrid (dag-hybrid with ordering), 2 = DAG
