@@ -723,6 +723,12 @@ impl CoreRunnerHandle {
                                         // Emit block applied and supply metrics
                                         ledger_observe_block_applied();
                                         ledger_observe_supply(&guard.supply);
+                                        
+                                        // T82.2d: Increment mempool_batches_served_total when actor is enabled
+                                        // and block contains transactions.
+                                        if crate::mempool_actor::is_mempool_actor_enabled() && blk.header.tx_count > 0 {
+                                            crate::metrics::mempool_batches_served_inc();
+                                        }
                                     }
 
                                     // Update node pointers
@@ -1515,14 +1521,6 @@ impl CoreRunnerHandle {
                                         hybrid_batch_used = true;
                                         crate::metrics::dag_hybrid_batches_used_inc();
                                         
-                                        // T82.2c: Increment mempool_batches_served_total when actor is enabled.
-                                        // This ensures the metric reflects batches used for DAG-primary block building.
-                                        if crate::mempool_actor::is_mempool_actor_enabled() {
-                                            crate::metrics::mempool_batches_served_inc();
-                                            // Track in-flight count (txs currently being built into a block)
-                                            crate::metrics::mempool_inflight_len_set(hybrid_aggregated_txs.len());
-                                        }
-                                        
                                         // T77.1: Record DAG ordering latency (time from wait start to successful batch consumption)
                                         let ordering_latency_secs = wait_start.elapsed().as_secs_f64();
                                         crate::metrics::observe_dag_ordering_latency_seconds(ordering_latency_secs);
@@ -1792,6 +1790,13 @@ impl CoreRunnerHandle {
                     );
 
                     let next_height = guard.height + 1;
+                    
+                    // T82.2d: Track in-flight count for ALL tx collection paths when actor is enabled.
+                    // This shows txs currently being built into a block, regardless of source.
+                    #[cfg(feature = "metrics")]
+                    if crate::mempool_actor::is_mempool_actor_enabled() && !txs.is_empty() {
+                        crate::metrics::mempool_inflight_len_set(txs.len());
+                    }
 
                     // 3. Create executor input
                     // T76.4: Use partial failure tolerance for hybrid DAG batches to avoid
@@ -1881,6 +1886,16 @@ impl CoreRunnerHandle {
                                         // Emit block applied and supply metrics
                                         ledger_observe_block_applied();
                                         ledger_observe_supply(&guard.supply);
+                                        
+                                        // T82.2d: Increment mempool_batches_served_total when:
+                                        // 1. Mempool actor is enabled
+                                        // 2. Block contains non-empty transactions
+                                        // This metric reflects batches served for block building in DAG-primary mode.
+                                        // The metric is incremented at commit time to ensure it only counts
+                                        // batches that actually resulted in committed blocks.
+                                        if crate::mempool_actor::is_mempool_actor_enabled() && blk.header.tx_count > 0 {
+                                            crate::metrics::mempool_batches_served_inc();
+                                        }
                                     }
 
                                     // Update node pointers
