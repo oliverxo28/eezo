@@ -2282,4 +2282,140 @@ mod tests {
         // Should indicate conflict
         assert!(complex1.conflicts_with(&complex2));
     }
+
+    // =========================================================================
+    // T82.4b: Integration test for STM metrics wiring
+    // =========================================================================
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_stm_executor_increments_wave_metrics() {
+        use crate::metrics::{
+            EEZO_EXEC_STM_WAVES_TOTAL,
+            EEZO_EXEC_STM_WAVES_BUILT_TOTAL,
+        };
+        use eezo_ledger::TxCore;
+        
+        // Create a test node
+        let chain_id = [0u8; 20];
+        let cfg = eezo_ledger::consensus::SingleNodeCfg {
+            chain_id,
+            block_byte_budget: 1 << 20,
+            header_cache_cap: 100,
+            ..Default::default()
+        };
+        let (pk, sk) = pqcrypto_mldsa::mldsa44::keypair();
+        let mut node = eezo_ledger::consensus::SingleNode::new(cfg, sk, pk);
+        
+        // Fund a sender
+        let sender_bytes: [u8; 20] = [0x42; 20];
+        let sender = Address(sender_bytes);
+        node.dev_faucet_credit(sender, 100_000);
+        
+        // Capture initial metric values
+        let waves_before = EEZO_EXEC_STM_WAVES_TOTAL.get();
+        let waves_built_before = EEZO_EXEC_STM_WAVES_BUILT_TOTAL.get();
+        
+        // Create a valid transaction
+        let recipient = Address([0xBE; 20]);
+        let tx = SignedTx {
+            core: TxCore {
+                to: recipient,
+                amount: 1000,
+                fee: 1,
+                nonce: 0,
+            },
+            pubkey: sender_bytes.to_vec(),
+            sig: vec![],
+        };
+        
+        // Execute with STM executor
+        let executor = StmExecutor::new(1);
+        let input = crate::executor::ExecInput::new(vec![tx], 1);
+        let outcome = executor.execute_block(&mut node, input);
+        
+        // Verify execution succeeded
+        assert!(outcome.result.is_ok());
+        let block = outcome.result.unwrap();
+        assert_eq!(block.txs.len(), 1);
+        
+        // Verify metrics were incremented
+        let waves_after = EEZO_EXEC_STM_WAVES_TOTAL.get();
+        let waves_built_after = EEZO_EXEC_STM_WAVES_BUILT_TOTAL.get();
+        
+        assert!(waves_after > waves_before, 
+            "eezo_exec_stm_waves_total should increment: before={}, after={}", 
+            waves_before, waves_after);
+        assert!(waves_built_after > waves_built_before, 
+            "eezo_exec_stm_waves_built_total should increment: before={}, after={}", 
+            waves_built_before, waves_built_after);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_stm_executor_increments_prescreen_metrics_with_conflicts() {
+        use crate::metrics::{
+            EEZO_EXEC_STM_PRESCREEN_HITS_TOTAL,
+            EEZO_EXEC_STM_PRESCREEN_MISSES_TOTAL,
+        };
+        use eezo_ledger::TxCore;
+        
+        // Create a test node
+        let chain_id = [0u8; 20];
+        let cfg = eezo_ledger::consensus::SingleNodeCfg {
+            chain_id,
+            block_byte_budget: 1 << 20,
+            header_cache_cap: 100,
+            ..Default::default()
+        };
+        let (pk, sk) = pqcrypto_mldsa::mldsa44::keypair();
+        let mut node = eezo_ledger::consensus::SingleNode::new(cfg, sk, pk);
+        
+        // Fund two senders
+        let sender1_bytes: [u8; 20] = [0x11; 20];
+        let sender2_bytes: [u8; 20] = [0x22; 20];
+        node.dev_faucet_credit(Address(sender1_bytes), 100_000);
+        node.dev_faucet_credit(Address(sender2_bytes), 100_000);
+        
+        // Capture initial metric values
+        let hits_before = EEZO_EXEC_STM_PRESCREEN_HITS_TOTAL.get();
+        let misses_before = EEZO_EXEC_STM_PRESCREEN_MISSES_TOTAL.get();
+        
+        // Create transactions - two senders to the same receiver (causes conflicts)
+        let receiver = Address([0xDD; 20]);
+        let txs = vec![
+            SignedTx {
+                core: TxCore { to: receiver, amount: 1000, fee: 1, nonce: 0 },
+                pubkey: sender1_bytes.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: receiver, amount: 2000, fee: 2, nonce: 0 },
+                pubkey: sender2_bytes.to_vec(),
+                sig: vec![],
+            },
+        ];
+        
+        // Execute with STM executor
+        let executor = StmExecutor::new(1);
+        let input = crate::executor::ExecInput::new(txs, 1);
+        let outcome = executor.execute_block(&mut node, input);
+        
+        // Verify execution succeeded
+        assert!(outcome.result.is_ok());
+        let block = outcome.result.unwrap();
+        assert_eq!(block.txs.len(), 2);
+        
+        // Verify pre-screen metrics were incremented
+        // With conflicting txs (same receiver), we expect at least one hit
+        let hits_after = EEZO_EXEC_STM_PRESCREEN_HITS_TOTAL.get();
+        let misses_after = EEZO_EXEC_STM_PRESCREEN_MISSES_TOTAL.get();
+        
+        // Either hits or misses (or both) should have incremented
+        let total_before = hits_before + misses_before;
+        let total_after = hits_after + misses_after;
+        assert!(total_after > total_before,
+            "Pre-screen metrics should increment: hits before={} after={}, misses before={} after={}",
+            hits_before, hits_after, misses_before, misses_after);
+    }
 }
