@@ -123,10 +123,10 @@ curl -s http://localhost:3030/metrics | grep eezo_consensus_mode_active
 ```
 
 Values:
-- `0` = hotstuff (default)
+- `0` = legacy/deprecated (hotstuff is no longer valid as of T81.5)
 - `1` = dag-hybrid (with ordering enabled)
 - `2` = dag (full DAG mode)
-- `3` = **dag-primary** ✅
+- `3` = **dag-primary** ✅ (PRODUCTION RECOMMENDED)
 
 ### 2. Verify No Fallback Occurs
 
@@ -238,9 +238,12 @@ test result: ok. 12 passed; 0 failed; 0 ignored
 - Only affects metric increments and fallback path selection
 
 ### Compatibility
+
+> **Note (T81.5):** The compatibility statements below were accurate at the time of T78.4 implementation.
+> As of T81.5, EEZO is DAG-only and `hotstuff` / `hs` are no longer valid mode strings.
+
 - **Opt-in only**: Requires explicit `EEZO_CONSENSUS_MODE=dag-primary`
-- **Default unchanged**: Hotstuff mode when env var is unset
-- **No impact on other modes**: dag-hybrid and hotstuff unaffected
+- **Default unchanged**: dag-primary is now the default in T81.5
 - **Backwards compatible**: Existing metrics and logs unchanged for other modes
 
 ## Summary
