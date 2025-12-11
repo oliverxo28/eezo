@@ -670,6 +670,28 @@ impl MempoolActorHandle {
         rx.await.unwrap_or(Err(SubmitError::ActorClosed))
     }
 
+    /// Submit a new transaction using raw bytes (compatible with SharedMempool interface).
+    /// 
+    /// This is a convenience method that creates a TxEntry with default values for
+    /// sender, nonce, and fee. The actual values will be parsed when the tx is processed.
+    pub async fn submit_raw(
+        &self,
+        ip: IpAddr,
+        hash: TxHash,
+        bytes: Vec<u8>,
+    ) -> Result<(), SubmitError> {
+        let entry = TxEntry {
+            hash,
+            sender: [0u8; 20], // Will be filled when tx is parsed
+            bytes: Arc::new(bytes),
+            received_at: Instant::now(),
+            requeue_count: 0,
+            nonce: 0, // Will be filled when tx is parsed
+            fee: 0,   // Will be filled when tx is parsed
+        };
+        self.submit(ip, entry).await
+    }
+
     /// Get a batch of transactions for block building.
     pub async fn get_batch(&self, max_bytes: usize, max_txs: usize) -> BatchResponse {
         let (tx, rx) = oneshot::channel();
@@ -678,7 +700,20 @@ impl MempoolActorHandle {
             return BatchResponse { txs: vec![], total_bytes: 0 };
         }
 
+        // T82.2b: increment batches served metric
+        #[cfg(feature = "metrics")]
+        crate::metrics::mempool_batches_served_inc();
+
         rx.await.unwrap_or(BatchResponse { txs: vec![], total_bytes: 0 })
+    }
+
+    /// Get a batch of transactions for block building (compatibility with SharedMempool::pop_batch).
+    /// 
+    /// Returns `Vec<Arc<TxEntry>>` which is compatible with the proposer loop.
+    /// Note: This uses max_txs = usize::MAX since SharedMempool::pop_batch only has max_bytes.
+    pub async fn pop_batch(&self, max_bytes: usize) -> Vec<Arc<TxEntry>> {
+        let response = self.get_batch(max_bytes, usize::MAX).await;
+        response.txs
     }
 
     /// Request prefetch of next batch (non-blocking).
@@ -689,6 +724,31 @@ impl MempoolActorHandle {
     /// Notify that a block was committed.
     pub async fn on_block_commit(&self, height: u64, applied_txs: Vec<TxHash>) {
         let _ = self.sender.send(MempoolMsg::OnBlockCommit { height, applied_txs }).await;
+        
+        // T82.2b: Update in-flight metrics after block commit
+        #[cfg(feature = "metrics")]
+        {
+            let stats = self.get_stats().await;
+            crate::metrics::mempool_inflight_len_set(stats.in_flight_count);
+        }
+    }
+
+    /// Mark a transaction as included in a block (compatibility with SharedMempool::mark_included).
+    /// 
+    /// This is a convenience wrapper around on_block_commit for single transaction marking.
+    /// The approx_bytes parameter is ignored as the actor tracks bytes internally.
+    pub async fn mark_included(&self, hash: &TxHash, height: u64, _approx_bytes: usize) {
+        self.on_block_commit(height, vec![*hash]).await;
+    }
+
+    /// Mark a transaction as rejected (compatibility with SharedMempool::mark_rejected).
+    /// 
+    /// For the actor, this is currently a no-op since rejected txs are already removed
+    /// from the in-flight set. The status is tracked internally.
+    /// TODO(T82.3): Add proper rejection status tracking if needed.
+    pub async fn mark_rejected(&self, _hash: &TxHash, _reason: impl Into<String>, _approx_bytes: usize) {
+        // No-op for now: txs that fail processing are simply removed from in-flight
+        // on the next on_block_commit call. The status could be tracked if needed.
     }
 
     /// Return in-flight txs back to ready queues (on rollback).
@@ -736,6 +796,62 @@ impl MempoolActorHandle {
     pub async fn shutdown(&self) {
         let _ = self.sender.send(MempoolMsg::Shutdown).await;
     }
+
+    /// Get the current pending transaction count (for metrics).
+    pub async fn len(&self) -> usize {
+        self.get_stats().await.len
+    }
+}
+
+// ============================================================================
+// T82.2b: Unified mempool interface
+// ============================================================================
+
+/// Check if the mempool actor is enabled via environment variable.
+/// 
+/// Returns `true` if `EEZO_MEMPOOL_ACTOR_ENABLED=1` or `EEZO_MEMPOOL_ACTOR_ENABLED=true`.
+pub fn is_mempool_actor_enabled() -> bool {
+    std::env::var("EEZO_MEMPOOL_ACTOR_ENABLED")
+        .map(|v| {
+            let v = v.to_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
+}
+
+/// Create a MempoolActorHandle with configuration from environment variables.
+/// 
+/// Environment variables:
+/// - `EEZO_MEMPOOL_MAX_LEN`: Maximum number of transactions (default: 10000)
+/// - `EEZO_MEMPOOL_MAX_BYTES`: Maximum total bytes (default: 64MB)
+/// - `EEZO_MEMPOOL_RATE_CAP`: Rate limit capacity per IP (default: 60)
+/// - `EEZO_MEMPOOL_RATE_PER_MIN`: Rate limit refill per minute (default: 600)
+/// - `EEZO_MEMPOOL_INFLIGHT_EXPIRY_SECS`: In-flight expiry (default: 30)
+pub fn spawn_mempool_actor_from_env() -> MempoolActorHandle {
+    fn env_usize(key: &str, default: usize) -> usize {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+
+    let config = MempoolActorConfig {
+        max_len: env_usize("EEZO_MEMPOOL_MAX_LEN", 10_000),
+        max_bytes: env_usize("EEZO_MEMPOOL_MAX_BYTES", 64 * 1024 * 1024),
+        rate_bucket_capacity: env_usize("EEZO_MEMPOOL_RATE_CAP", 60) as u32,
+        rate_refill_per_minute: env_usize("EEZO_MEMPOOL_RATE_PER_MIN", 600) as u32,
+        in_flight_expiry_secs: env_usize("EEZO_MEMPOOL_INFLIGHT_EXPIRY_SECS", 30) as u64,
+    };
+
+    log::info!(
+        "mempool-actor: spawning with max_len={}, max_bytes={}, rate_cap={}, inflight_expiry={}s",
+        config.max_len,
+        config.max_bytes,
+        config.rate_bucket_capacity,
+        config.in_flight_expiry_secs
+    );
+
+    MempoolActorHandle::spawn(config)
 }
 
 // ============================================================================

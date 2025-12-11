@@ -134,6 +134,49 @@ pub static EEZO_MEMPOOL_BYTES: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!("eezo_mempool_bytes_gauge", "Current bytes in mempool").unwrap()
 });
 
+// T82.2b: Mempool actor metrics
+#[cfg(feature = "metrics")]
+pub static EEZO_MEMPOOL_INFLIGHT_LEN: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_mempool_inflight_len",
+        "Number of transactions currently in-flight (reserved for block building)"
+    ).unwrap()
+});
+
+#[cfg(feature = "metrics")]
+pub static EEZO_MEMPOOL_BATCHES_SERVED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_mempool_batches_served_total",
+        "Total number of batches served by mempool for block building"
+    ).unwrap()
+});
+
+#[cfg(feature = "metrics")]
+pub static EEZO_MEMPOOL_ACTOR_ENABLED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_mempool_actor_enabled",
+        "1 if mempool actor is enabled, 0 otherwise"
+    ).unwrap()
+});
+
+/// T82.2b: Set the mempool actor enabled gauge.
+#[cfg(feature = "metrics")]
+pub fn mempool_actor_enabled_set(enabled: bool) {
+    EEZO_MEMPOOL_ACTOR_ENABLED.set(if enabled { 1 } else { 0 });
+}
+
+/// T82.2b: Update the in-flight length gauge.
+#[cfg(feature = "metrics")]
+pub fn mempool_inflight_len_set(len: usize) {
+    EEZO_MEMPOOL_INFLIGHT_LEN.set(len as i64);
+}
+
+/// T82.2b: Increment the batches served counter.
+#[cfg(feature = "metrics")]
+pub fn mempool_batches_served_inc() {
+    EEZO_MEMPOOL_BATCHES_SERVED_TOTAL.inc();
+}
+
 // NOTE: eezo_txs_included_total and eezo_block_tx_count metrics are defined
 // in the ledger crate (crates/ledger/src/metrics.rs) and automatically updated
 // via observe_block_proposed() when blocks are assembled.
@@ -534,6 +577,10 @@ pub fn register_ledger_consensus_metrics() {
 	{
 		let _ = &*EEZO_MEMPOOL_LEN;
 		let _ = &*EEZO_MEMPOOL_BYTES;
+		// T82.2b: mempool actor metrics
+		let _ = &*EEZO_MEMPOOL_INFLIGHT_LEN;
+		let _ = &*EEZO_MEMPOOL_BATCHES_SERVED_TOTAL;
+		let _ = &*EEZO_MEMPOOL_ACTOR_ENABLED;
 	}
 }
  // Eagerly register T33 Bridge metrics so they appear on /metrics immediately.
