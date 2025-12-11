@@ -484,25 +484,26 @@ impl StmExecutor {
     /// 5. Mark conflicting txs for retry in next wave
     /// 6. Repeat until all txs are committed/failed or max retries reached
     ///
-    /// Returns (contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block)
+    /// Returns (contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block)
     fn execute_stm(
         &self,
         txs: &[SignedTx],
         accounts: &mut Accounts,
         supply: &mut Supply,
-    ) -> (Vec<TxContext>, Vec<SignedTx>, u64, u64, u64) {
+    ) -> (Vec<TxContext>, Vec<SignedTx>, u64, u64, u64, u64) {
         let n = txs.len();
         if n == 0 {
-            return (Vec::new(), Vec::new(), 0, 0, 0);
+            return (Vec::new(), Vec::new(), 0, 0, 0, 0);
         }
 
         // Initialize contexts for all transactions
         let mut contexts: Vec<TxContext> = (0..n).map(TxContext::new).collect();
 
-        // STM metrics tracking (T73.4)
+        // STM metrics tracking (T73.4 + T82.0)
         let mut waves_this_block: u64 = 0;
         let mut conflicts_this_block: u64 = 0;
         let mut retries_this_block: u64 = 0;
+        let mut aborted_this_block: u64 = 0;
 
         // Track which txs have been finally committed (won't be retried)
         let mut finally_committed: HashSet<usize> = HashSet::new();
@@ -524,12 +525,11 @@ impl StmExecutor {
             }
 
             // Check for max retries before execution
-            let mut aborted_count = 0;
             for &(tx_idx, attempt) in &pending {
                 if attempt >= self.config.max_retries as u16 {
                     contexts[tx_idx].status = TxStatus::Aborted;
                     log::warn!("STM: tx {} aborted after {} retries", tx_idx, attempt);
-                    aborted_count += 1;
+                    aborted_this_block += 1;
                 }
             }
             
@@ -649,7 +649,7 @@ impl StmExecutor {
             retries_this_block
         );
 
-        (contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block)
+        (contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block)
     }
 
     /// Build a block header from the committed transactions.
@@ -717,11 +717,11 @@ impl Executor for StmExecutor {
         let mut supply = node.supply.clone();
 
         // Execute transactions using STM
-        let (_contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block) = 
+        let (_contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block) = 
             self.execute_stm(&input.txs, &mut accounts, &mut supply);
         let tx_count = committed_txs.len();
 
-        // T73.4: Emit STM-specific metrics
+        // T73.4: Emit STM-specific metrics (legacy eezo_stm_* prefix)
         #[cfg(feature = "metrics")]
         {
             crate::metrics::stm_block_waves_inc(waves_this_block);
@@ -730,6 +730,18 @@ impl Executor for StmExecutor {
             crate::metrics::stm_observe_waves_per_block(waves_this_block);
             crate::metrics::stm_observe_conflicts_per_block(conflicts_this_block);
             crate::metrics::stm_observe_retries_per_block(retries_this_block);
+        }
+
+        // T82.0: Emit executor metrics with eezo_exec_* prefix
+        #[cfg(feature = "metrics")]
+        {
+            crate::metrics::exec_stm_waves_inc(waves_this_block);
+            crate::metrics::exec_stm_conflicts_inc(conflicts_this_block);
+            crate::metrics::exec_stm_retries_inc(retries_this_block);
+            crate::metrics::exec_stm_aborted_inc(aborted_this_block);
+            crate::metrics::exec_stm_observe_waves_per_block(waves_this_block);
+            crate::metrics::exec_stm_observe_conflicts_per_block(conflicts_this_block);
+            crate::metrics::exec_stm_observe_retries_per_block(retries_this_block);
         }
 
         // T72.metrics.fix: Record transactions per block histogram
@@ -742,13 +754,14 @@ impl Executor for StmExecutor {
 
         let elapsed = start.elapsed();
         log::info!(
-            "STM: executed {} txs ({} committed) in {:?}, waves={}, conflicts={}, retries={}",
+            "STM: executed {} txs ({} committed) in {:?}, waves={}, conflicts={}, retries={}, aborted={}",
             input.txs.len(),
             tx_count,
             elapsed,
             waves_this_block,
             conflicts_this_block,
-            retries_this_block
+            retries_this_block,
+            aborted_this_block
         );
 
         ExecOutcome::new(Ok(block), elapsed, tx_count)
