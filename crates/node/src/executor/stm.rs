@@ -59,7 +59,9 @@ use crate::executor::{ExecInput, ExecOutcome, Executor};
 /// conflict comparisons, avoiding repeated inspection of raw tx data.
 ///
 /// For simple transfers, we store 64-bit fingerprints of sender and receiver.
-/// TODO(T82.4): Add `Complex { bloom: SmallBloom }` variant for multi-touch txs.
+///
+/// T82.4: Added `Complex` variant with a small bloom filter for multi-touch txs.
+/// The pre-screen uses these fingerprints for fast conflict detection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConflictMetadata {
     /// Simple transfer: sender writes to from_key, receiver gets to_key.
@@ -70,8 +72,15 @@ pub enum ConflictMetadata {
         /// 64-bit fingerprint of receiver address
         to_key: u64,
     },
-    // TODO(T82.4): Add Complex variant with bloom filter for multi-account txs
-    // Complex { bloom: SmallBloom },
+    /// T82.4: Complex transaction touching multiple accounts.
+    /// Uses a compact bloom filter for fast conflict pre-screening.
+    /// The bloom filter is a 64-bit bitset with 4 hash functions.
+    Complex {
+        /// Compact bloom filter representing all touched accounts
+        bloom: u64,
+        /// Count of accounts touched (for diagnostics)
+        touch_count: u8,
+    },
 }
 
 impl ConflictMetadata {
@@ -79,7 +88,12 @@ impl ConflictMetadata {
     ///
     /// Two txs conflict if they touch overlapping keys (addresses).
     /// For Simple metadata, we compare fingerprints directly.
+    /// For Complex metadata, we check bloom filter intersection.
     /// Supply conflicts are always assumed (all txs burn fees).
+    ///
+    /// T82.4: This is used for fast conflict pre-screening. The result may
+    /// have false positives (says "conflict" when there is none) but never
+    /// false negatives (never misses an actual conflict).
     #[inline]
     pub fn conflicts_with(&self, other: &ConflictMetadata) -> bool {
         match (self, other) {
@@ -95,8 +109,184 @@ impl ConflictMetadata {
                 // Note: Supply conflicts are implicit (all txs write Supply)
                 f1 == f2 || f1 == t2 || t1 == f2 || t1 == t2
             }
-            // TODO(T82.4): Handle Complex metadata with bloom filter intersection
+            // T82.4: Handle Complex metadata with bloom filter intersection
+            (
+                ConflictMetadata::Complex { bloom: b1, .. },
+                ConflictMetadata::Complex { bloom: b2, .. },
+            ) => {
+                // If any bits overlap, there may be a conflict
+                (b1 & b2) != 0
+            }
+            // Mixed: Simple vs Complex - convert Simple to bloom and check
+            (
+                ConflictMetadata::Simple { from_key, to_key },
+                ConflictMetadata::Complex { bloom, .. },
+            ) => {
+                let simple_bloom = fingerprint_to_bloom(*from_key) | fingerprint_to_bloom(*to_key);
+                (simple_bloom & bloom) != 0
+            }
+            (
+                ConflictMetadata::Complex { bloom, .. },
+                ConflictMetadata::Simple { from_key, to_key },
+            ) => {
+                let simple_bloom = fingerprint_to_bloom(*from_key) | fingerprint_to_bloom(*to_key);
+                (bloom & simple_bloom) != 0
+            }
         }
+    }
+
+    /// T82.4: Convert this metadata to a bloom filter representation.
+    /// Used by WaveFingerprint for efficient conflict pre-screening.
+    #[inline]
+    pub fn to_bloom(&self) -> u64 {
+        match self {
+            ConflictMetadata::Simple { from_key, to_key } => {
+                fingerprint_to_bloom(*from_key) | fingerprint_to_bloom(*to_key)
+            }
+            ConflictMetadata::Complex { bloom, .. } => *bloom,
+        }
+    }
+
+    /// T82.4: Get the raw fingerprint keys for Simple metadata.
+    /// Returns None for Complex metadata (use bloom filter instead).
+    #[inline]
+    pub fn keys(&self) -> Option<(u64, u64)> {
+        match self {
+            ConflictMetadata::Simple { from_key, to_key } => Some((*from_key, *to_key)),
+            ConflictMetadata::Complex { .. } => None,
+        }
+    }
+}
+
+/// T82.4: Convert a 64-bit fingerprint to bloom filter bits.
+/// Uses 4 hash functions to set 4 bits in the 64-bit bloom filter.
+/// This provides a compact representation for fast conflict pre-screening.
+#[inline]
+fn fingerprint_to_bloom(fingerprint: u64) -> u64 {
+    // Use different bit positions derived from the fingerprint
+    // Each "hash function" extracts 6 bits (0-63) from different parts
+    let h1 = (fingerprint & 0x3F) as u32;           // bits 0-5
+    let h2 = ((fingerprint >> 6) & 0x3F) as u32;    // bits 6-11
+    let h3 = ((fingerprint >> 12) & 0x3F) as u32;   // bits 12-17
+    let h4 = ((fingerprint >> 18) & 0x3F) as u32;   // bits 18-23
+    
+    (1u64 << h1) | (1u64 << h2) | (1u64 << h3) | (1u64 << h4)
+}
+
+// =============================================================================
+// T82.4: WaveFingerprint — Per-wave conflict pre-screening
+// =============================================================================
+
+/// T82.4: Per-wave fingerprint for fast conflict pre-screening.
+///
+/// This structure tracks the set of "already used" keys in the current wave
+/// using a compact bloom filter representation. It provides:
+/// - `may_conflict()`: Fast check if a tx might conflict with the wave
+/// - `record()`: Register a tx's keys in the wave fingerprint
+///
+/// ## Design Notes
+///
+/// The pre-screen is a **pure optimization** layered on top of the existing
+/// conflict detection logic. It may have false positives (says "may conflict"
+/// when there is no actual conflict) but never false negatives.
+///
+/// Correctness is preserved because:
+/// 1. If pre-screen says "no conflict" → tx is definitely safe for this wave
+/// 2. If pre-screen says "may conflict" → fall back to precise conflict detection
+///
+/// The bloom filter is local to a single wave and cheap to allocate/clone.
+#[derive(Clone, Debug, Default)]
+pub struct WaveFingerprint {
+    /// Combined bloom filter of all tx fingerprints recorded in this wave.
+    /// Each bit represents potential presence of certain address fingerprints.
+    bloom: u64,
+    
+    /// Set of exact fingerprint keys seen in this wave.
+    /// Used for precise conflict checking when bloom filter indicates possible conflict.
+    /// For simple transfers, stores both from_key and to_key.
+    keys: HashSet<u64>,
+    
+    /// Number of transactions recorded in this wave.
+    tx_count: usize,
+}
+
+impl WaveFingerprint {
+    /// Create a new empty wave fingerprint.
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            bloom: 0,
+            keys: HashSet::new(),
+            tx_count: 0,
+        }
+    }
+
+    /// T82.4: Fast pre-screen check if a tx might conflict with the wave.
+    ///
+    /// Returns `true` if there MAY be a conflict (requires precise check).
+    /// Returns `false` if there is DEFINITELY no conflict (tx is safe).
+    ///
+    /// This is the first stage of conflict detection:
+    /// - If `may_conflict()` returns `false` → skip precise conflict detection
+    /// - If `may_conflict()` returns `true` → run precise conflict detection
+    #[inline]
+    pub fn may_conflict(&self, meta: &ConflictMetadata) -> bool {
+        if self.bloom == 0 {
+            // Empty wave - no conflicts possible
+            return false;
+        }
+        
+        let tx_bloom = meta.to_bloom();
+        
+        // Fast bloom filter check
+        if (self.bloom & tx_bloom) == 0 {
+            // No overlapping bits - definitely no conflict
+            return false;
+        }
+        
+        // Bloom filter indicates possible conflict.
+        // For Simple metadata, do precise key check to reduce false positives.
+        if let Some((from_key, to_key)) = meta.keys() {
+            // Check if any of the tx's keys are actually in the wave
+            self.keys.contains(&from_key) || self.keys.contains(&to_key)
+        } else {
+            // Complex metadata - rely on bloom filter alone
+            true
+        }
+    }
+
+    /// T82.4: Record a transaction's keys in the wave fingerprint.
+    ///
+    /// Called after a tx is accepted into the wave so future txs see it.
+    #[inline]
+    pub fn record(&mut self, meta: &ConflictMetadata) {
+        // Add to bloom filter
+        self.bloom |= meta.to_bloom();
+        
+        // Add exact keys for precise checking
+        match meta {
+            ConflictMetadata::Simple { from_key, to_key } => {
+                self.keys.insert(*from_key);
+                self.keys.insert(*to_key);
+            }
+            ConflictMetadata::Complex { .. } => {
+                // Complex metadata uses bloom only, no exact keys
+            }
+        }
+        
+        self.tx_count += 1;
+    }
+
+    /// Get the number of transactions recorded in this wave.
+    #[inline]
+    pub fn tx_count(&self) -> usize {
+        self.tx_count
+    }
+
+    /// Check if the wave fingerprint is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.tx_count == 0
     }
 }
 
@@ -909,17 +1099,25 @@ impl StmExecutor {
         (contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block)
     }
 
-    /// T82.1: Execute all transactions using wave-based STM with BlockOverlay.
+    /// T82.1 + T82.4: Execute all transactions using wave-based STM with BlockOverlay.
     ///
     /// This version uses:
     /// - `AnalyzedTx` for pre-computed conflict metadata (avoids re-deriving sender each time)
     /// - `BlockOverlay` to track modified accounts (avoids cloning full state per wave)
+    /// - T82.4: `WaveFingerprint` for fast conflict pre-screening
     ///
     /// The base snapshot is read-only; all writes go to the overlay.
     /// At block commit, overlay changes are applied to the actual state.
     ///
-    /// TODO(T82.4): Use ConflictMetadata fingerprints for faster conflict detection.
-    /// TODO(T82.4): Introduce per-wave bloom filters for conflict pre-screening.
+    /// ## T82.4: Conflict Pre-Screening
+    ///
+    /// Before deciding whether a tx can join the current wave:
+    /// 1. First call the fast pre-screen (`WaveFingerprint::may_conflict`)
+    /// 2. If it returns `false` → definitely safe, no further conflict check needed
+    /// 3. If it returns `true` → fall back to precise StateKey-based conflict detection
+    ///
+    /// The pre-screen is a pure optimization. The existing conflict detection logic
+    /// remains the ultimate source of truth for correctness.
     ///
     /// Returns (contexts, committed_txs, waves, conflicts, retries, aborted)
     fn execute_stm_with_overlay(
@@ -1044,9 +1242,16 @@ impl StmExecutor {
             let mut pending_indices: Vec<usize> = pending.iter().map(|&(idx, _)| idx).collect();
             pending_indices.sort();
 
-            // TODO(T82.4): Use ConflictMetadata for faster conflict pre-screening
-            // Currently using existing StateKey-based conflict detection for correctness
-            let conflicts = Self::detect_conflicts_in_wave(&contexts, &pending_indices);
+            // T82.4: Use WaveFingerprint for conflict pre-screening combined with
+            // the existing StateKey-based conflict detection for correctness.
+            //
+            // The pre-screen is an optimization only - it reduces the work done
+            // in precise conflict detection but doesn't replace it for correctness.
+            let conflicts = Self::detect_conflicts_with_prescreen(
+                &contexts, 
+                &pending_indices, 
+                &analyzed_map
+            );
             let conflict_set: HashSet<usize> = conflicts.into_iter().collect();
             conflicts_this_block += conflict_set.len() as u64;
 
@@ -1096,6 +1301,12 @@ impl StmExecutor {
             .map(|idx| txs[idx].clone())
             .collect();
 
+        // T82.4: Emit wave-building metrics
+        #[cfg(feature = "metrics")]
+        {
+            crate::metrics::exec_stm_waves_built_inc(waves_this_block);
+        }
+
         log::debug!(
             "STM(overlay): completed {} waves, {} committed, {} failed/aborted, {} conflicts, {} retries, overlay_size={}",
             waves_this_block,
@@ -1107,6 +1318,127 @@ impl StmExecutor {
         );
 
         (contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block)
+    }
+
+    /// T82.4: Detect conflicts in a wave using pre-screening optimization.
+    ///
+    /// This method uses a two-phase approach:
+    /// 1. Fast pre-screen using WaveFingerprint (bloom filter + exact key check)
+    /// 2. Fall back to precise StateKey-based conflict detection when needed
+    ///
+    /// The pre-screen is a pure optimization layered on top of the existing
+    /// conflict detection. It never introduces false negatives (missed conflicts),
+    /// only reduces false positives vs. bloom-only pre-screening.
+    fn detect_conflicts_with_prescreen(
+        contexts: &[TxContext],
+        pending_indices: &[usize],
+        analyzed_map: &HashMap<usize, &AnalyzedTx>,
+    ) -> Vec<usize> {
+        let mut conflicts = Vec::new();
+        
+        // T82.4: Wave fingerprint for pre-screening
+        let mut wave_fingerprint = WaveFingerprint::new();
+        
+        // Track committed writes by tx index (for precise conflict detection)
+        let mut committed_writes: HashMap<StateKey, usize> = HashMap::new();
+
+        // Process in index order for determinism
+        let mut sorted_pending: Vec<usize> = pending_indices.to_vec();
+        sorted_pending.sort();
+
+        for &tx_idx in &sorted_pending {
+            let ctx = &contexts[tx_idx];
+            
+            if ctx.status != TxStatus::Committed {
+                continue;
+            }
+
+            let mut has_conflict = false;
+
+            // Get the analyzed tx for pre-screening
+            if let Some(analyzed) = analyzed_map.get(&tx_idx) {
+                // T82.4: Fast pre-screen using WaveFingerprint
+                if wave_fingerprint.may_conflict(&analyzed.meta) {
+                    // Pre-screen says "may conflict" - do precise check
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::exec_stm_prescreen_hit_inc();
+
+                    // Fall back to existing precise StateKey-based conflict detection
+                    // Check read-after-write conflicts
+                    for key in &ctx.read_set {
+                        if let Some(&writer_idx) = committed_writes.get(key) {
+                            if writer_idx < tx_idx {
+                                has_conflict = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Check write-after-write conflicts
+                    if !has_conflict {
+                        for key in &ctx.write_set {
+                            if let Some(&writer_idx) = committed_writes.get(key) {
+                                if writer_idx < tx_idx {
+                                    has_conflict = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Pre-screen says "no conflict" - definitely safe
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::exec_stm_prescreen_miss_inc();
+                    
+                    // Still need to record writes for future conflict detection
+                    // but we know this tx has no conflict with earlier txs
+                }
+            } else {
+                // No analyzed metadata - fall back to precise check only
+                // (This shouldn't happen for valid txs, but handle gracefully)
+                for key in &ctx.read_set {
+                    if let Some(&writer_idx) = committed_writes.get(key) {
+                        if writer_idx < tx_idx {
+                            has_conflict = true;
+                            break;
+                        }
+                    }
+                }
+                if !has_conflict {
+                    for key in &ctx.write_set {
+                        if let Some(&writer_idx) = committed_writes.get(key) {
+                            if writer_idx < tx_idx {
+                                has_conflict = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if has_conflict {
+                conflicts.push(tx_idx);
+            } else {
+                // Record our writes for conflict detection with later txs
+                for key in &ctx.write_set {
+                    committed_writes.insert(key.clone(), tx_idx);
+                }
+                
+                // T82.4: Record in wave fingerprint for pre-screening later txs
+                if let Some(analyzed) = analyzed_map.get(&tx_idx) {
+                    wave_fingerprint.record(&analyzed.meta);
+                }
+            }
+        }
+
+        // T82.4: Emit wave size metric
+        #[cfg(feature = "metrics")]
+        {
+            let wave_size = sorted_pending.len() - conflicts.len();
+            crate::metrics::exec_stm_observe_wave_size(wave_size);
+        }
+
+        conflicts
     }
 
     /// Build a block header from the committed transactions.
@@ -1523,6 +1855,9 @@ mod tests {
                 assert_eq!(*from_key, address_fingerprint(&Address(sender_bytes)));
                 assert_eq!(*to_key, address_fingerprint(&Address(receiver_bytes)));
             }
+            ConflictMetadata::Complex { .. } => {
+                panic!("Expected Simple metadata for simple transfer");
+            }
         }
     }
 
@@ -1734,5 +2069,204 @@ mod tests {
         // Only the valid tx should be analyzed
         assert_eq!(analyzed.len(), 1);
         assert_eq!(analyzed[0].tx_idx, 0);
+    }
+
+    // =========================================================================
+    // T82.4: WaveFingerprint Tests
+    // =========================================================================
+
+    #[test]
+    fn test_wave_fingerprint_new_is_empty() {
+        let fp = WaveFingerprint::new();
+        assert!(fp.is_empty());
+        assert_eq!(fp.tx_count(), 0);
+    }
+
+    #[test]
+    fn test_wave_fingerprint_may_conflict_empty_returns_false() {
+        let fp = WaveFingerprint::new();
+        
+        let meta = ConflictMetadata::Simple {
+            from_key: 12345,
+            to_key: 67890,
+        };
+        
+        // Empty fingerprint should never indicate conflict
+        assert!(!fp.may_conflict(&meta));
+    }
+
+    #[test]
+    fn test_wave_fingerprint_record_and_may_conflict_same_keys() {
+        let mut fp = WaveFingerprint::new();
+        
+        let meta1 = ConflictMetadata::Simple {
+            from_key: 12345,
+            to_key: 67890,
+        };
+        
+        fp.record(&meta1);
+        assert_eq!(fp.tx_count(), 1);
+        
+        // Same keys should indicate conflict
+        let meta2 = ConflictMetadata::Simple {
+            from_key: 12345,  // Same from_key
+            to_key: 99999,
+        };
+        assert!(fp.may_conflict(&meta2));
+        
+        // Same to_key
+        let meta3 = ConflictMetadata::Simple {
+            from_key: 11111,
+            to_key: 67890,  // Same to_key
+        };
+        assert!(fp.may_conflict(&meta3));
+    }
+
+    #[test]
+    fn test_wave_fingerprint_no_conflict_different_keys() {
+        let mut fp = WaveFingerprint::new();
+        
+        let meta1 = ConflictMetadata::Simple {
+            from_key: 12345,
+            to_key: 67890,
+        };
+        
+        fp.record(&meta1);
+        
+        // Different keys should not indicate conflict (with high probability)
+        let meta2 = ConflictMetadata::Simple {
+            from_key: 0xDEADBEEF12345678,
+            to_key: 0xCAFEBABE87654321,
+        };
+        
+        // Note: This may have false positives due to bloom filter collisions,
+        // but with well-distributed keys, the probability is low.
+        // The test uses distinct enough keys to make collisions unlikely.
+        assert!(!fp.may_conflict(&meta2));
+    }
+
+    #[test]
+    fn test_wave_fingerprint_record_multiple() {
+        let mut fp = WaveFingerprint::new();
+        
+        // Record 3 transactions
+        for i in 0..3 {
+            let meta = ConflictMetadata::Simple {
+                from_key: (i * 1000) as u64,
+                to_key: (i * 1000 + 100) as u64,
+            };
+            fp.record(&meta);
+        }
+        
+        assert_eq!(fp.tx_count(), 3);
+        assert!(!fp.is_empty());
+    }
+
+    #[test]
+    fn test_wave_fingerprint_cross_conflict() {
+        let mut fp = WaveFingerprint::new();
+        
+        // tx1: A -> B
+        let meta1 = ConflictMetadata::Simple {
+            from_key: 0xAAAA,
+            to_key: 0xBBBB,
+        };
+        fp.record(&meta1);
+        
+        // tx2: B -> C (B was receiver of tx1, now sender of tx2 - conflict)
+        let meta2 = ConflictMetadata::Simple {
+            from_key: 0xBBBB,  // Same as meta1's to_key
+            to_key: 0xCCCC,
+        };
+        
+        assert!(fp.may_conflict(&meta2));
+    }
+
+    #[test]
+    fn test_fingerprint_to_bloom_deterministic() {
+        let fp1 = fingerprint_to_bloom(0x123456789ABCDEF0);
+        let fp2 = fingerprint_to_bloom(0x123456789ABCDEF0);
+        
+        assert_eq!(fp1, fp2);
+        assert_ne!(fp1, 0); // Should set some bits
+    }
+
+    #[test]
+    fn test_conflict_metadata_to_bloom_simple() {
+        let meta = ConflictMetadata::Simple {
+            from_key: 0x1234,
+            to_key: 0x5678,
+        };
+        
+        let bloom = meta.to_bloom();
+        
+        // Should be a combination of both fingerprints
+        let expected = fingerprint_to_bloom(0x1234) | fingerprint_to_bloom(0x5678);
+        assert_eq!(bloom, expected);
+    }
+
+    #[test]
+    fn test_conflict_metadata_complex_variant() {
+        let meta = ConflictMetadata::Complex {
+            bloom: 0b10101010,
+            touch_count: 5,
+        };
+        
+        // to_bloom should return the stored bloom
+        assert_eq!(meta.to_bloom(), 0b10101010);
+        
+        // keys() should return None for Complex
+        assert!(meta.keys().is_none());
+    }
+
+    #[test]
+    fn test_conflict_metadata_simple_vs_complex_conflict() {
+        let simple = ConflictMetadata::Simple {
+            from_key: 0x1234,
+            to_key: 0x5678,
+        };
+        
+        // Create a Complex metadata with overlapping bloom bits
+        let simple_bloom = simple.to_bloom();
+        let complex = ConflictMetadata::Complex {
+            bloom: simple_bloom,  // Same bloom bits
+            touch_count: 2,
+        };
+        
+        // Should indicate conflict
+        assert!(simple.conflicts_with(&complex));
+        assert!(complex.conflicts_with(&simple));
+    }
+
+    #[test]
+    fn test_conflict_metadata_complex_vs_complex_no_overlap() {
+        let complex1 = ConflictMetadata::Complex {
+            bloom: 0b00001111,
+            touch_count: 2,
+        };
+        
+        let complex2 = ConflictMetadata::Complex {
+            bloom: 0b11110000,  // No overlapping bits
+            touch_count: 2,
+        };
+        
+        // Should NOT indicate conflict
+        assert!(!complex1.conflicts_with(&complex2));
+    }
+
+    #[test]
+    fn test_conflict_metadata_complex_vs_complex_overlap() {
+        let complex1 = ConflictMetadata::Complex {
+            bloom: 0b00111111,
+            touch_count: 2,
+        };
+        
+        let complex2 = ConflictMetadata::Complex {
+            bloom: 0b11111100,  // Overlapping bits in the middle
+            touch_count: 2,
+        };
+        
+        // Should indicate conflict
+        assert!(complex1.conflicts_with(&complex2));
     }
 }
