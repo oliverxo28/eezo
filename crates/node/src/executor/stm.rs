@@ -161,16 +161,27 @@ impl ConflictMetadata {
 /// T82.4: Convert a 64-bit fingerprint to bloom filter bits.
 /// Uses 4 hash functions to set 4 bits in the 64-bit bloom filter.
 /// This provides a compact representation for fast conflict pre-screening.
+///
+/// Uses XOR folding to incorporate all 64 bits of the fingerprint for better
+/// distribution of hash values across the bloom filter space.
 #[inline]
 fn fingerprint_to_bloom(fingerprint: u64) -> u64 {
-    // Use different bit positions derived from the fingerprint
-    // Each "hash function" extracts 6 bits (0-63) from different parts
-    let h1 = (fingerprint & 0x3F) as u32;           // bits 0-5
-    let h2 = ((fingerprint >> 6) & 0x3F) as u32;    // bits 6-11
-    let h3 = ((fingerprint >> 12) & 0x3F) as u32;   // bits 12-17
-    let h4 = ((fingerprint >> 18) & 0x3F) as u32;   // bits 18-23
+    // XOR-fold the 64-bit fingerprint to use all bits for better entropy.
+    // Split into high and low 32-bit halves and XOR them together.
+    let folded = (fingerprint as u32) ^ ((fingerprint >> 32) as u32);
     
-    (1u64 << h1) | (1u64 << h2) | (1u64 << h3) | (1u64 << h4)
+    // Extract 4 x 6-bit hash values from different parts of the folded value
+    // Each "hash function" gives a bit position 0-63 for the bloom filter
+    let h1 = (folded & 0x3F) as u32;              // bits 0-5
+    let h2 = ((folded >> 6) & 0x3F) as u32;       // bits 6-11
+    let h3 = ((folded >> 12) & 0x3F) as u32;      // bits 12-17
+    let h4 = ((folded >> 18) & 0x3F) as u32;      // bits 18-23
+    
+    // For additional entropy, mix in rotated versions of the fingerprint
+    let rot = fingerprint.rotate_left(32);
+    let h5 = ((rot >> 24) & 0x3F) as u32;         // bits from rotated value
+    
+    (1u64 << h1) | (1u64 << h2) | (1u64 << h3) | (1u64 << h4) | (1u64 << h5)
 }
 
 // =============================================================================
@@ -1432,10 +1443,12 @@ impl StmExecutor {
         }
 
         // T82.4: Emit wave size metric
+        // Wave size is the count of transactions that were successfully committed
+        // in this wave (i.e., passed both execution and conflict detection).
+        // This equals: wave_fingerprint.tx_count() since we only record non-conflicting txs.
         #[cfg(feature = "metrics")]
         {
-            let wave_size = sorted_pending.len() - conflicts.len();
-            crate::metrics::exec_stm_observe_wave_size(wave_size);
+            crate::metrics::exec_stm_observe_wave_size(wave_fingerprint.tx_count());
         }
 
         conflicts
