@@ -230,8 +230,9 @@ for (( s=0; s < NUM_SENDERS; s++ )); do
     KEYGEN_OUTPUT=$("$KEYGEN_BIN" 2>/dev/null)
     
     # Parse the output (format: export EEZO_TX_PK_HEX=0x... \n export EEZO_TX_SK_HEX=0x...)
-    PK_HEX=$(echo "$KEYGEN_OUTPUT" | grep 'EEZO_TX_PK_HEX' | sed 's/.*=0x/0x/' | tr -d '\n\r')
-    SK_HEX=$(echo "$KEYGEN_OUTPUT" | grep 'EEZO_TX_SK_HEX' | sed 's/.*=0x/0x/' | tr -d '\n\r')
+    # Use anchored patterns to ensure we match the correct values
+    PK_HEX=$(echo "$KEYGEN_OUTPUT" | grep '^export EEZO_TX_PK_HEX=' | sed 's/^export EEZO_TX_PK_HEX=//' | tr -d '\n\r')
+    SK_HEX=$(echo "$KEYGEN_OUTPUT" | grep '^export EEZO_TX_SK_HEX=' | sed 's/^export EEZO_TX_SK_HEX=//' | tr -d '\n\r')
     
     if [[ -z "$PK_HEX" || -z "$SK_HEX" ]]; then
         echo "[error] Failed to parse keygen output for sender $s" >&2
@@ -288,13 +289,15 @@ for (( s=0; s < NUM_SENDERS; s++ )); do
         sender_addr="${SENDER_ADDRS[$s]}"
         pk_hex="${SENDER_PKS[$s]}"
         sk_hex="${SENDER_SKS[$s]}"
-        local_sent=0
-        local_failed=0
         
         # Get current nonce for this sender
-        ACCT_JSON="$(curl -sf "$NODE/account/${sender_addr,,}" 2>/dev/null || echo "{}")"
+        ACCT_JSON="$(curl -sf "$NODE/account/${sender_addr,,}" 2>/dev/null || echo '{"nonce":"0x0"}')"
         NON_HEX="$(echo "$ACCT_JSON" | jq -r '.nonce // "0x0"')"
         NON_DEC=$((NON_HEX))
+        
+        # Batch size for curl requests to prevent resource exhaustion
+        BATCH_SIZE=50
+        batch_pids=()
         
         for (( i=0; i < TX_PER_SENDER; i++ )); do
             nonce_dec=$((NON_DEC + i))
@@ -317,19 +320,25 @@ for (( s=0; s < NUM_SENDERS; s++ )); do
             export EEZO_TX_SK_HEX="$sk_hex"
             
             # Generate signed tx
-            BODY=$("$TXGEN_BIN" "$nonce_dec" 2>/dev/null) || {
-                ((local_failed++))
-                continue
-            }
+            BODY=$("$TXGEN_BIN" "$nonce_dec" 2>/dev/null) || continue
             
-            # Submit tx (fire and forget for speed)
+            # Submit tx in background
             curl -sf -X POST "$NODE/tx" \
                 -H "Content-Type: application/json" \
                 -d "$BODY" >/dev/null 2>&1 &
+            batch_pids+=($!)
+            
+            # Wait for batch to complete before starting next batch
+            if (( ${#batch_pids[@]} >= BATCH_SIZE )); then
+                wait "${batch_pids[@]}" 2>/dev/null || true
+                batch_pids=()
+            fi
         done
         
-        # Wait for this sender's submissions
-        wait
+        # Wait for remaining submissions in this sender's batch
+        if (( ${#batch_pids[@]} > 0 )); then
+            wait "${batch_pids[@]}" 2>/dev/null || true
+        fi
         
         echo "[sender $((s+1))/$NUM_SENDERS] Submitted $TX_PER_SENDER transactions"
     ) &
