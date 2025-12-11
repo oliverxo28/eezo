@@ -673,7 +673,14 @@ impl MempoolActorHandle {
     /// Submit a new transaction using raw bytes (compatible with SharedMempool interface).
     /// 
     /// This is a convenience method that creates a TxEntry with default values for
-    /// sender, nonce, and fee. The actual values will be parsed when the tx is processed.
+    /// sender, nonce, and fee. 
+    /// 
+    /// **NOTE (T82.2b):** The sender, nonce, and fee fields use placeholder values.
+    /// The mempool actor currently tracks transactions by hash for in-flight/duplicate
+    /// detection. The actual transaction parsing (extracting sender/nonce/fee) happens
+    /// when the tx is processed in the proposer loop. If proper fee-ordering or
+    /// sender-based sharding is needed, the caller should use `submit()` with a
+    /// fully-populated TxEntry instead.
     pub async fn submit_raw(
         &self,
         ip: IpAddr,
@@ -682,12 +689,12 @@ impl MempoolActorHandle {
     ) -> Result<(), SubmitError> {
         let entry = TxEntry {
             hash,
-            sender: [0u8; 20], // Will be filled when tx is parsed
+            sender: [0u8; 20], // Placeholder: actual sender parsed in proposer loop
             bytes: Arc::new(bytes),
             received_at: Instant::now(),
             requeue_count: 0,
-            nonce: 0, // Will be filled when tx is parsed
-            fee: 0,   // Will be filled when tx is parsed
+            nonce: 0, // Placeholder: actual nonce parsed in proposer loop
+            fee: 0,   // Placeholder: actual fee parsed in proposer loop
         };
         self.submit(ip, entry).await
     }
@@ -743,12 +750,17 @@ impl MempoolActorHandle {
 
     /// Mark a transaction as rejected (compatibility with SharedMempool::mark_rejected).
     /// 
-    /// For the actor, this is currently a no-op since rejected txs are already removed
-    /// from the in-flight set. The status is tracked internally.
-    /// TODO(T82.3): Add proper rejection status tracking if needed.
+    /// **NOTE (T82.2b):** This is intentionally a no-op in the current implementation.
+    /// Rejected transactions are handled as follows:
+    /// - When a tx fails validation in the proposer loop, it's simply not included in the block
+    /// - The tx remains in the actor's in-flight set until the next on_block_commit
+    /// - At block commit, in-flight txs not in the applied list are effectively cleared
+    /// 
+    /// **TODO(T82.3):** Implement proper rejection tracking with a Rejected status and
+    /// notification message (MempoolMsg::OnTxRejected) if rejection status needs to be
+    /// queryable via get_status().
     pub async fn mark_rejected(&self, _hash: &TxHash, _reason: impl Into<String>, _approx_bytes: usize) {
-        // No-op for now: txs that fail processing are simply removed from in-flight
-        // on the next on_block_commit call. The status could be tracked if needed.
+        // Intentional no-op - see doc comment above for rationale
     }
 
     /// Return in-flight txs back to ready queues (on rollback).
