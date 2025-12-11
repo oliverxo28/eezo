@@ -4,11 +4,19 @@
 //! repeated decoding overhead. Transactions are decoded once (in parallel)
 //! and handed off as `Arc<DecodedTx>` references for zero-copy processing.
 //!
+//! ## T83.4: SharedTx Enhancement
+//!
+//! This module now provides `SharedTx` as the primary shared transaction type for the
+//! zero-copy tx propagation pipeline. `SharedTx` extends `DecodedTx` with:
+//! - Pre-computed sender address (derived from pubkey)
+//! - Cached domain-separated message bytes for ML-DSA verification
+//! - Thread-safe sharing via `Arc`
+//!
 //! ## Features
 //!
 //! - **Parallel decoding**: Uses rayon to decode multiple transactions in parallel.
 //! - **Caching**: Stores decoded transactions keyed by their canonical hash.
-//! - **Zero-copy handoff**: Returns `Arc<DecodedTx>` references that can be shared
+//! - **Zero-copy handoff**: Returns `Arc<SharedTx>` references that can be shared
 //!   without cloning the underlying transaction data.
 //! - **Environment gating**: Controlled by `EEZO_FAST_DECODE_ENABLED` (default: false).
 //! - **Metrics**: Tracks cache hits/misses, decode latency, and pool activity.
@@ -44,7 +52,10 @@
 //! // Option 1: Use the global decode pool (recommended)
 //! let decoded = decode_tx_global(&raw_bytes);
 //!
-//! // Option 2: Create a custom pool with specific configuration
+//! // Option 2: Create a SharedTx directly
+//! let shared = SharedTx::new(signed_tx, chain_id);
+//!
+//! // Option 3: Create a custom pool with specific configuration
 //! let pool = TxDecodePool::new();
 //! let decoded_txs = pool.decode_batch(&raw_bytes_list);
 //! // decoded_txs is Vec<Arc<DecodedTx>> - share without cloning
@@ -57,7 +68,9 @@ use std::time::Instant;
 use parking_lot::RwLock;
 use rayon::prelude::*;
 
-use eezo_ledger::SignedTx;
+use eezo_ledger::{Address, SignedTx};
+use eezo_ledger::tx_types::tx_domain_bytes;
+use eezo_ledger::sender_from_pubkey_first20;
 
 use crate::dag_runner::parse_signed_tx_from_envelope;
 
@@ -112,6 +125,165 @@ impl From<SignedTx> for DecodedTx {
 }
 
 impl AsRef<SignedTx> for DecodedTx {
+    fn as_ref(&self) -> &SignedTx {
+        &self.tx
+    }
+}
+
+// =============================================================================
+// T83.4: SharedTx — Enhanced shared transaction for zero-copy pipeline
+// =============================================================================
+
+/// T83.4: A shared, immutable transaction with pre-computed fields.
+///
+/// `SharedTx` is the primary shared transaction type for the zero-copy tx propagation
+/// pipeline (T83.4). It extends the basic decoded transaction with:
+///
+/// - **Pre-computed sender**: Derived from pubkey, avoiding repeated derivation
+/// - **Cached tx hash**: Computed once at creation
+/// - **Domain-separated message bytes**: For ML-DSA signature verification
+///
+/// ## Design Notes
+///
+/// This is an **internal type**, not exposed on the wire. The external wire format
+/// (HTTP JSON, binary tx wire, DAG payload encoding) remains unchanged.
+///
+/// ## Thread Safety
+///
+/// `SharedTx` is designed to be stored behind `Arc` for reference-counted sharing.
+/// All fields are immutable after construction.
+///
+/// ## Usage
+///
+/// ```ignore
+/// // Create from SignedTx with chain_id for domain separation
+/// let shared = SharedTx::new(signed_tx, chain_id);
+///
+/// // Access pre-computed fields
+/// let sender = shared.sender();
+/// let hash = shared.hash();
+///
+/// // Get the underlying SignedTx (no clone, just reference)
+/// let tx_ref = shared.signed_tx();
+/// ```
+#[derive(Debug, Clone)]
+pub struct SharedTx {
+    /// The underlying signed transaction.
+    tx: SignedTx,
+    /// Cached canonical hash (blake3 of tx.to_bytes()).
+    hash: [u8; 32],
+    /// Pre-computed sender address (derived from pubkey).
+    /// None if sender derivation failed (requires 20+ byte pubkey).
+    sender: Option<Address>,
+    /// Domain-separated message bytes for ML-DSA verification.
+    /// Computed from chain_id + tx core fields.
+    domain_msg: Vec<u8>,
+}
+
+impl SharedTx {
+    /// Create a new SharedTx with pre-computed fields.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The signed transaction
+    /// * `chain_id` - 20-byte chain ID for domain separation
+    ///
+    /// # Returns
+    ///
+    /// A new SharedTx with all fields pre-computed.
+    pub fn new(tx: SignedTx, chain_id: [u8; 20]) -> Self {
+        let hash = tx.hash();
+        let sender = sender_from_pubkey_first20(&tx);
+        let domain_msg = tx_domain_bytes(chain_id, &tx.core);
+        
+        Self {
+            tx,
+            hash,
+            sender,
+            domain_msg,
+        }
+    }
+
+    /// Create a SharedTx without domain message computation.
+    /// Useful when signature verification has already been done.
+    pub fn new_without_domain(tx: SignedTx) -> Self {
+        let hash = tx.hash();
+        let sender = sender_from_pubkey_first20(&tx);
+        
+        Self {
+            tx,
+            hash,
+            sender,
+            domain_msg: Vec::new(),
+        }
+    }
+
+    /// Get the canonical hash of this transaction.
+    #[inline]
+    pub fn hash(&self) -> [u8; 32] {
+        self.hash
+    }
+
+    /// Get the pre-computed sender address.
+    /// Returns None if sender derivation failed.
+    #[inline]
+    pub fn sender(&self) -> Option<Address> {
+        self.sender
+    }
+
+    /// Get a reference to the domain-separated message bytes.
+    /// Empty if created with `new_without_domain`.
+    #[inline]
+    pub fn domain_msg(&self) -> &[u8] {
+        &self.domain_msg
+    }
+
+    /// Get a reference to the underlying SignedTx.
+    #[inline]
+    pub fn signed_tx(&self) -> &SignedTx {
+        &self.tx
+    }
+
+    /// Get a reference to the transaction core.
+    #[inline]
+    pub fn core(&self) -> &eezo_ledger::TxCore {
+        &self.tx.core
+    }
+
+    /// Get a reference to the public key bytes.
+    #[inline]
+    pub fn pubkey(&self) -> &[u8] {
+        &self.tx.pubkey
+    }
+
+    /// Get a reference to the signature bytes.
+    #[inline]
+    pub fn sig(&self) -> &[u8] {
+        &self.tx.sig
+    }
+
+    /// Consume self and return the underlying SignedTx.
+    #[inline]
+    pub fn into_signed_tx(self) -> SignedTx {
+        self.tx
+    }
+
+    /// Check if the sender was successfully derived.
+    #[inline]
+    pub fn has_valid_sender(&self) -> bool {
+        self.sender.is_some()
+    }
+}
+
+impl From<SignedTx> for SharedTx {
+    /// Create a SharedTx from a SignedTx using a zero chain_id.
+    /// For full domain separation, use `SharedTx::new()` with the actual chain_id.
+    fn from(tx: SignedTx) -> Self {
+        SharedTx::new_without_domain(tx)
+    }
+}
+
+impl AsRef<SignedTx> for SharedTx {
     fn as_ref(&self) -> &SignedTx {
         &self.tx
     }
@@ -674,5 +846,144 @@ mod tests {
 
         let recovered = decoded.into_signed_tx();
         assert_eq!(recovered.core.nonce, expected_nonce);
+    }
+
+    // =========================================================================
+    // T83.4: SharedTx tests
+    // =========================================================================
+
+    #[test]
+    fn test_shared_tx_new_computes_all_fields() {
+        let tx = make_test_tx(42);
+        let expected_hash = tx.hash();
+        let chain_id = [0x01u8; 20];
+
+        let shared = SharedTx::new(tx.clone(), chain_id);
+
+        // Hash should match
+        assert_eq!(shared.hash(), expected_hash);
+
+        // Sender should be derived (pubkey is 20 bytes, so sender derivation works)
+        assert!(shared.has_valid_sender());
+        assert!(shared.sender().is_some());
+
+        // Domain message should be non-empty
+        assert!(!shared.domain_msg().is_empty());
+
+        // Core fields accessible
+        assert_eq!(shared.core().nonce, 42);
+        assert_eq!(shared.core().amount, 1000);
+        assert_eq!(shared.core().fee, 1);
+    }
+
+    #[test]
+    fn test_shared_tx_without_domain() {
+        let tx = make_test_tx(0);
+        let expected_hash = tx.hash();
+
+        let shared = SharedTx::new_without_domain(tx);
+
+        // Hash should match
+        assert_eq!(shared.hash(), expected_hash);
+
+        // Sender should be derived
+        assert!(shared.has_valid_sender());
+
+        // Domain message should be empty
+        assert!(shared.domain_msg().is_empty());
+    }
+
+    #[test]
+    fn test_shared_tx_invalid_sender() {
+        // Create tx with pubkey too short for sender derivation
+        let tx = SignedTx {
+            core: TxCore {
+                to: Address([0xca; 20]),
+                amount: 1000,
+                fee: 1,
+                nonce: 0,
+            },
+            pubkey: vec![0x01; 5], // Only 5 bytes - too short
+            sig: vec![],
+        };
+
+        let shared = SharedTx::new_without_domain(tx);
+
+        // Sender derivation should fail
+        assert!(!shared.has_valid_sender());
+        assert!(shared.sender().is_none());
+    }
+
+    #[test]
+    fn test_shared_tx_into_signed_tx() {
+        let tx = make_test_tx(77);
+        let expected_nonce = tx.core.nonce;
+        let chain_id = [0x01u8; 20];
+
+        let shared = SharedTx::new(tx, chain_id);
+        let recovered = shared.into_signed_tx();
+
+        assert_eq!(recovered.core.nonce, expected_nonce);
+    }
+
+    #[test]
+    fn test_shared_tx_from_signed_tx() {
+        let tx = make_test_tx(88);
+        let expected_hash = tx.hash();
+
+        // Using From trait
+        let shared: SharedTx = tx.into();
+
+        assert_eq!(shared.hash(), expected_hash);
+        assert!(shared.has_valid_sender());
+    }
+
+    #[test]
+    fn test_shared_tx_accessors() {
+        let tx = SignedTx {
+            core: TxCore {
+                to: Address([0xab; 20]),
+                amount: 5000,
+                fee: 10,
+                nonce: 123,
+            },
+            pubkey: vec![0x42; 32],
+            sig: vec![0xde, 0xad, 0xbe, 0xef],
+        };
+
+        let shared = SharedTx::new_without_domain(tx);
+
+        // Test accessors
+        assert_eq!(shared.pubkey(), &[0x42u8; 32]);
+        assert_eq!(shared.sig(), &[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(shared.core().to, Address([0xab; 20]));
+        assert_eq!(shared.core().amount, 5000);
+        assert_eq!(shared.core().fee, 10);
+        assert_eq!(shared.core().nonce, 123);
+    }
+
+    #[test]
+    fn test_shared_tx_deterministic_hash() {
+        let tx = make_test_tx(99);
+        let chain_id = [0x01u8; 20];
+
+        let shared1 = SharedTx::new(tx.clone(), chain_id);
+        let shared2 = SharedTx::new(tx, chain_id);
+
+        // Same tx should produce same hash
+        assert_eq!(shared1.hash(), shared2.hash());
+    }
+
+    #[test]
+    fn test_shared_tx_domain_bytes_deterministic() {
+        let tx = make_test_tx(55);
+        let chain_id = [0xab; 20];
+
+        let shared1 = SharedTx::new(tx.clone(), chain_id);
+        let shared2 = SharedTx::new(tx, chain_id);
+
+        // Domain bytes should be deterministic
+        assert_eq!(shared1.domain_msg(), shared2.domain_msg());
+        assert!(!shared1.domain_msg().is_empty());
     }
 }
