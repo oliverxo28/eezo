@@ -2106,9 +2106,13 @@ async fn post_tx_batch(
             // T83.0b: Build signature verification jobs for batch verification
             if !pubkey_bytes.is_empty() && !sig_bytes.is_empty() {
                 let message = tx_domain_bytes(state.chain_id, &core);
-                // Use a simple hash of the envelope for cache key
-                let raw = serde_json::to_vec(&env).unwrap_or_default();
-                let tx_hash: [u8; 32] = *blake3::hash(&raw).as_bytes();
+                // Compute tx hash from (pubkey || message || sig) for cache key
+                // This is more reliable than re-serializing the envelope
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(&pubkey_bytes);
+                hasher.update(&message);
+                hasher.update(&sig_bytes);
+                let tx_hash: [u8; 32] = *hasher.finalize().as_bytes();
                 
                 let job = SigVerifyJob::with_tx_hash(
                     pubkey_bytes.clone(),
