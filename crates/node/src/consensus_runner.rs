@@ -361,6 +361,12 @@ use crate::persistence_worker::{
     BlockWriteSet, CommittedMemHead, PersistenceWorker, PersistenceWorkerHandle,
 };
 
+// T83.3: Block execution pipelining imports
+use crate::block_pipeline::{
+    is_pipeline_enabled, log_pipeline_status,
+    BlockPipeline, PreparedBlock,
+};
+
 // --------------------
 // T41.4: strict consumption toggle
 // Enabled only when the build has `--features qc-sidecar-v2-enforce` AND env EEZO_QC_SIDECAR_ENFORCE=1/true/on/yes
@@ -1386,6 +1392,11 @@ impl CoreRunnerHandle {
         // Clone the persist_worker for use in the spawned task
         let persist_worker_c = persist_worker.clone();
 
+        // T83.3: Create block execution pipeline
+        let pipeline_enabled = is_pipeline_enabled();
+        let pipeline = BlockPipeline::new();
+        let pipeline_state = pipeline.state();
+
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
 			// expose T36.6 bridge metrics on /metrics immediately
@@ -1397,13 +1408,16 @@ impl CoreRunnerHandle {
                 crate::metrics::register_t77_dag_ordering_latency_metrics();
             }
             
+            // T83.3: Log pipeline status
+            log_pipeline_status();
+            
             // T81.1: Log consensus mode at startup (persistence variant)
             #[cfg(feature = "dag-consensus")]
             {
                 let dag_ordering_enabled = dag_ordering_enabled_from_env();
                 log::info!(
-                    "consensus: mode={:?}, dag_ordering_enabled={}",
-                    hybrid_mode_cfg, dag_ordering_enabled
+                    "consensus: mode={:?}, dag_ordering_enabled={}, pipeline_enabled={}",
+                    hybrid_mode_cfg, dag_ordering_enabled, pipeline_enabled
                 );
             }
             
@@ -2164,6 +2178,14 @@ impl CoreRunnerHandle {
                         #[cfg(feature = "metrics")]
                         {
                             crate::metrics::EEZO_BLOCK_HEIGHT.set(height as i64);
+                        }
+
+                        // T83.3: Mark block as committed in pipeline
+                        // This allows the pipeline to discard stale prepared blocks
+                        // and trigger preparation of the next block
+                        {
+                            let mut state = pipeline_state.lock();
+                            state.mark_committed(height);
                         }
 
                         // capture the committed header hash once, reuse later for checkpoint
