@@ -203,9 +203,17 @@ echo "[2/4] Generating receiver addresses..."
 
 declare -a HOT_RECEIVERS
 for (( r=0; r < NUM_HOT_RECEIVERS; r++ )); do
-    # Generate a deterministic receiver address based on index
-    # Use openssl rand for randomness
-    RAND_HEX=$(openssl rand -hex 20 2>/dev/null || printf '%040x' $((r + 1000000)))
+    # Generate receiver address with best available entropy source
+    # Try openssl first, fall back to /dev/urandom, then to pseudo-random
+    if command -v openssl >/dev/null 2>&1; then
+        RAND_HEX=$(openssl rand -hex 20 2>/dev/null)
+    elif [[ -r /dev/urandom ]]; then
+        RAND_HEX=$(head -c 20 /dev/urandom | xxd -p 2>/dev/null)
+    fi
+    # Fallback to pseudo-random if above failed
+    if [[ -z "$RAND_HEX" ]]; then
+        RAND_HEX=$(printf '%08x%08x%08x%08x%08x' $RANDOM $RANDOM $RANDOM $RANDOM $((RANDOM + r)))
+    fi
     HOT_RECEIVERS+=("0x$RAND_HEX")
 done
 
@@ -305,8 +313,12 @@ for (( s=0; s < NUM_SENDERS; s++ )); do
             
             # Select receiver based on pattern
             if [[ "$PATTERN" == "disjoint" ]]; then
-                receiver_idx=$(( (s + i) % NUM_HOT_RECEIVERS ))
+                # Disjoint: distribute receivers across senders to minimize overlap
+                # Each sender is assigned a primary receiver based on its index,
+                # then cycles through if more txs than receivers
+                receiver_idx=$(( (s + i * NUM_SENDERS) % NUM_HOT_RECEIVERS ))
             else
+                # Hotspot: all senders target the same small pool of receivers
                 receiver_idx=$(( i % NUM_HOT_RECEIVERS ))
             fi
             receiver="${HOT_RECEIVERS[$receiver_idx]}"
