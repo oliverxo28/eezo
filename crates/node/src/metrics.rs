@@ -3492,8 +3492,15 @@ pub fn init_profiling_mode() {
 }
 
 /// Get the current profiling mode.
+/// 
+/// This function is part of T82.0's profiling infrastructure. It returns the current
+/// profiling mode (Off or Perf) based on the EEZO_PROFILING environment variable.
+/// 
+/// The profiling mode is used to enable perf/flamegraph-friendly behavior when
+/// profiling is requested. Currently, enabling profiling mode just logs a message;
+/// future tasks (T82.1+) may add explicit span markers in hot paths.
 #[inline]
-#[allow(dead_code)] // Designed for future use in profiling spans (T82.1+)
+#[allow(dead_code)] // Available for use in profiling spans when needed
 pub fn profiling_mode() -> ProfilingMode {
     match PROFILING_MODE_CACHE.load(std::sync::atomic::Ordering::Relaxed) {
         1 => ProfilingMode::Perf,
@@ -3504,6 +3511,11 @@ pub fn profiling_mode() -> ProfilingMode {
 /// Lightweight profiling span marker.
 /// When profiling is enabled, this creates a named span that helps attribute
 /// CPU time in perf/flamegraph output. When disabled, this is a no-op.
+///
+/// This macro is part of T82.0's profiling infrastructure. It can be added to hot paths
+/// (STM execute, sig verification, DAG ordering) to help perf/flamegraph attribute time.
+/// The macro is currently available but not yet placed in hot paths - future work (T82.1+)
+/// may add explicit spans if profiling shows value in having them.
 ///
 /// Usage:
 /// ```ignore
@@ -3540,8 +3552,9 @@ macro_rules! profiling_span {
     }};
 }
 
-// Re-export the macro for use in other modules
-#[allow(unused_imports)] // Designed for future use in profiling spans (T82.1+)
+// Re-export the macro for use in other modules. Currently available but not yet
+// placed in hot paths; can be added during T82.1+ profiling work if needed.
+#[allow(unused_imports)]
 pub use profiling_span;
 
 // -----------------------------------------------------------------------------

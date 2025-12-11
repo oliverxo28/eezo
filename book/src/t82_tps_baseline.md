@@ -35,7 +35,9 @@ T82.0 provides a clean, reproducible DAG TPS baseline with:
 # Terminal 1: Start the DAG-primary devnet node
 ./scripts/devnet_dag_primary.sh
 
-# Terminal 2: Generate TPS load (requires ml_dsa_keygen setup first)
+# Terminal 2: Generate TPS load using existing spam script
+# Note: spam_tps.sh is an existing script that requires ml_dsa_keygen setup.
+# See scripts/spam_tps.sh for required environment variables (EEZO_TX_FROM, etc.)
 ./scripts/spam_tps.sh 5000
 
 # Terminal 3: Run the TPS benchmark
@@ -223,7 +225,8 @@ export EEZO_PROFILING=perf
 ./scripts/devnet_dag_primary.sh &
 NODE_PID=$!
 
-# Generate load
+# Generate load using the existing spam script
+# (requires ml_dsa_keygen setup - see scripts/spam_tps.sh for env vars)
 ./scripts/spam_tps.sh 10000 &
 
 # Record performance data (30 seconds)

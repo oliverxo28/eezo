@@ -87,8 +87,10 @@ while [[ $# -gt 0 ]]; do
             show_help
             ;;
         *)
-            echo "Unknown option: $1"
-            show_help
+            echo "Error: Unknown option: $1" >&2
+            echo "" >&2
+            show_help >&2
+            exit 1
             ;;
     esac
 done
