@@ -75,7 +75,12 @@ The clone overhead scales with account set size. As the test progresses and touc
 let mut wb = WriteBatch::default();
 wb.put_cf(cf_hdrs, k_height(height), &hdr_bytes);
 wb.put_cf(cf_blks, k_height(height), &blk_bytes);
-// ... tx index entries
+// Transaction index entries (one per tx in block)
+for (idx, tx) in block.txs.iter().enumerate() {
+    let key = k_tx_hash(tx_hash(tx));
+    let val = serialize(&(height, idx as u32))?;
+    wb.put_cf(cf_txix, key, val);
+}
 self.db.write(wb)?;  // <-- Blocking!
 ```
 
@@ -94,7 +99,15 @@ For NVMe SSDs, Y is typically 1-5ms. For 5 blocks/second target, this leaves onl
 ```rust
 pub fn try_order_round(&self, store: &DagStore, round: Round) -> Option<OrderedBundle> {
     let ready_nodes = store.get_ready_round(round);
-    // ... single-threaded processing
+    if ready_nodes.is_empty() { return None; }
+    
+    // Count distinct authors (producers) - threshold check
+    let distinct_authors: HashSet<_> = ready_nodes.iter().map(|n| n.author).collect();
+    if distinct_authors.len() < self.threshold { return None; }
+    
+    // Sequential vertex collection and bundle creation
+    let vertices: Vec<VertexId> = ready_nodes.iter().map(|n| n.id).collect();
+    Some(OrderedBundle::new(round, vertices, tx_count))
 }
 ```
 
@@ -286,7 +299,7 @@ By using `Arc<SignedTx>` consistently and caching decoded forms, we eliminate re
 The mempool actor's in-flight tracking (`mempool_actor.rs:469-487`) is critical for preventing "zombie tx" reappearance. Any pipelining work must ensure:
 
 ```
-INVARIANT: A tx hash must NOT appear in two concurrent block proposals
+INVARIANT: A `tx_hash` must NOT appear in two concurrent block proposals
 ```
 
 The `move_to_in_flight()` → `on_block_commit()` flow handles this. Pipelining must not break this.
