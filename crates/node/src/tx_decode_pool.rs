@@ -986,4 +986,93 @@ mod tests {
         assert_eq!(shared1.domain_msg(), shared2.domain_msg());
         assert!(!shared1.domain_msg().is_empty());
     }
+
+    // =========================================================================
+    // T83.4: Micro-benchmark comparing old vs new path
+    // =========================================================================
+    //
+    // This test demonstrates the performance improvement from:
+    // 1. Old path: decode + derive sender + compute hash for each stage
+    // 2. New path: decode once into SharedTx, reuse pre-computed values
+    //
+    // To run with timing output:
+    //   RUST_LOG=info cargo test --features ... test_t83_decode_cost_comparison -- --nocapture
+
+    #[test]
+    fn test_t83_decode_cost_comparison() {
+        use std::time::Instant;
+        use eezo_ledger::sender_from_pubkey_first20;
+
+        // Generate test data: 1000 transaction envelopes
+        let tx_count = 1000;
+        let envelope_bytes: Vec<Vec<u8>> = (0..tx_count)
+            .map(|i| make_envelope_bytes(i as u64))
+            .collect();
+
+        // OLD PATH: Parse each envelope multiple times (simulating repeated decode)
+        // This is what happens without SharedTx - each stage parses again
+        let old_start = Instant::now();
+        let mut old_results = 0u64;
+        for bytes in &envelope_bytes {
+            // Stage 1: Parse for mempool
+            if let Some(tx1) = crate::dag_runner::parse_signed_tx_from_envelope(bytes) {
+                let _hash1 = tx1.hash();
+                old_results += 1;
+            }
+            // Stage 2: Parse again in consensus
+            if let Some(tx2) = crate::dag_runner::parse_signed_tx_from_envelope(bytes) {
+                let _sender2 = sender_from_pubkey_first20(&tx2);
+                old_results += 1;
+            }
+            // Stage 3: Parse again in STM
+            if let Some(tx3) = crate::dag_runner::parse_signed_tx_from_envelope(bytes) {
+                let _hash3 = tx3.hash();
+                let _sender3 = sender_from_pubkey_first20(&tx3);
+                old_results += 1;
+            }
+        }
+        let old_elapsed = old_start.elapsed();
+
+        // NEW PATH: Parse once into SharedTx, reuse pre-computed values
+        let chain_id = [0x01u8; 20];
+        let new_start = Instant::now();
+        let mut new_results = 0u64;
+        for bytes in &envelope_bytes {
+            // Single parse into SharedTx
+            if let Some(tx) = crate::dag_runner::parse_signed_tx_from_envelope(bytes) {
+                let shared = SharedTx::new(tx, chain_id);
+                
+                // Stage 1: Use cached hash (no recompute)
+                let _hash1 = shared.hash();
+                new_results += 1;
+                
+                // Stage 2: Use cached sender (no recompute)
+                let _sender2 = shared.sender();
+                new_results += 1;
+                
+                // Stage 3: Reuse both (zero additional cost)
+                let _hash3 = shared.hash();
+                let _sender3 = shared.sender();
+                new_results += 1;
+            }
+        }
+        let new_elapsed = new_start.elapsed();
+
+        // Both paths should produce the same number of results
+        assert_eq!(old_results, new_results, "Both paths should process same tx count");
+        
+        // Log timing for manual inspection
+        eprintln!("\n=== T83.4 Decode Cost Comparison ({}x transactions) ===", tx_count);
+        eprintln!("Old path (3x parse per tx): {:?}", old_elapsed);
+        eprintln!("New path (1x parse + reuse): {:?}", new_elapsed);
+        if new_elapsed.as_nanos() > 0 {
+            let speedup = old_elapsed.as_nanos() as f64 / new_elapsed.as_nanos() as f64;
+            eprintln!("Speedup factor: {:.2}x", speedup);
+        }
+        eprintln!("===================================================\n");
+
+        // The new path should be faster (at least not slower)
+        // We don't assert strict speedup since test env timing is variable
+        assert!(old_results > 0, "Should have processed transactions");
+    }
 }
