@@ -238,15 +238,7 @@ impl CudaBlake3Engine {
         // When the `cuda` feature is enabled with rustacuda, this would use
         // GPU kernels. Currently uses CPU BLAKE3 to produce correct output
         // that is verified in cross-check tests.
-        let digests = match self.compute_blake3_batch(inputs) {
-            Ok(d) => d,
-            Err(e) => {
-                log::error!("eezo-cuda-hash: compute_blake3_batch failed: {}", e);
-                return Err(e);
-            }
-        };
-
-        Ok(digests)
+        self.compute_blake3_batch(inputs)
     }
 
     /// Internal batch BLAKE3 computation.
@@ -267,14 +259,8 @@ impl CudaBlake3Engine {
         //
         // Current implementation uses CPU BLAKE3 to produce
         // correct, verifiable output for cross-check tests.
-
-        #[cfg(feature = "cuda")]
-        {
-            // When rustacuda feature is enabled, we could use CUDA APIs here.
-            // For T91.1, we use CPU BLAKE3 to ensure correct output.
-            // This can be replaced with actual CUDA kernels in a future iteration.
-            let _ = self._cuda_context_present; // Acknowledge CUDA context
-        }
+        // Acknowledge CUDA context to silence unused field warning.
+        let _ = self._cuda_context_present;
 
         // Compute BLAKE3 digests (CPU-based for now, matches CUDA output spec)
         let digests: Vec<[u8; 32]> = inputs
@@ -620,10 +606,13 @@ mod tests {
             Err(other) => panic!("unexpected cuda init failure: {other:?}"),
         };
 
-        // Test with 100 messages of varying sizes
+        // Test with 100 messages of varying sizes.
+        // Formula: (i * 17 + 1) % 512 produces sizes 0-511 that vary pseudo-randomly
+        // across the 100 messages. The prime multiplier 17 ensures good distribution,
+        // and 512 is a typical GPU block size boundary to test edge cases.
         let messages: Vec<Vec<u8>> = (0u32..100)
             .map(|i| {
-                let size = (i * 17 + 1) as usize % 512; // varying sizes 0-511 bytes
+                let size = (i * 17 + 1) as usize % 512;
                 (0..size).map(|j| (j ^ i as usize) as u8).collect()
             })
             .collect();
