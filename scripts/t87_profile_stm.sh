@@ -38,33 +38,38 @@ echo ""
 # Function to fetch and parse a specific metric
 fetch_metric() {
     local name="$1"
-    curl -s "http://${METRICS_URL}/metrics" 2>/dev/null | grep "^${name}" | head -1 | awk '{print $2}'
+    local metrics="$2"
+    echo "$metrics" | grep "^${name}" | head -1 | awk '{print $2}'
 }
 
-# Function to fetch histogram sum/count
+# Function to fetch histogram sum/count from cached metrics
 fetch_histogram() {
     local name="$1"
+    local metrics="$2"
     local sum count
-    sum=$(curl -s "http://${METRICS_URL}/metrics" 2>/dev/null | grep "^${name}_sum" | head -1 | awk '{print $2}')
-    count=$(curl -s "http://${METRICS_URL}/metrics" 2>/dev/null | grep "^${name}_count" | head -1 | awk '{print $2}')
+    sum=$(echo "$metrics" | grep "^${name}_sum" | head -1 | awk '{print $2}')
+    count=$(echo "$metrics" | grep "^${name}_count" | head -1 | awk '{print $2}')
     echo "${sum:-0} ${count:-0}"
 }
 
 echo "Capturing BEFORE snapshot..."
 echo ""
 
+# Fetch all metrics once for BEFORE snapshot
+BEFORE_METRICS=$(curl -s "http://${METRICS_URL}/metrics" 2>/dev/null)
+
 # Before snapshot
-BEFORE_WAVES=$(fetch_metric "eezo_exec_stm_waves_total")
-BEFORE_CONFLICTS=$(fetch_metric "eezo_exec_stm_conflicts_total")
-BEFORE_RETRIES=$(fetch_metric "eezo_exec_stm_retries_total")
-BEFORE_ABORTED=$(fetch_metric "eezo_exec_stm_aborted_total")
-BEFORE_WAVES_BUILT=$(fetch_metric "eezo_exec_stm_waves_built_total")
-BEFORE_PRESCREEN_HITS=$(fetch_metric "eezo_exec_stm_conflict_prescreen_hits_total")
-BEFORE_PRESCREEN_MISSES=$(fetch_metric "eezo_exec_stm_conflict_prescreen_misses_total")
-BEFORE_TXS=$(fetch_metric "eezo_txs_included_total")
-BEFORE_BLOCKS=$(fetch_metric "block_applied_total")
-read -r BEFORE_WAVE_SIZE_SUM BEFORE_WAVE_SIZE_COUNT <<< "$(fetch_histogram eezo_exec_stm_wave_size)"
-read -r BEFORE_WAVE_BUILD_SUM BEFORE_WAVE_BUILD_COUNT <<< "$(fetch_histogram eezo_exec_stm_wave_build_seconds)"
+BEFORE_WAVES=$(fetch_metric "eezo_exec_stm_waves_total" "$BEFORE_METRICS")
+BEFORE_CONFLICTS=$(fetch_metric "eezo_exec_stm_conflicts_total" "$BEFORE_METRICS")
+BEFORE_RETRIES=$(fetch_metric "eezo_exec_stm_retries_total" "$BEFORE_METRICS")
+BEFORE_ABORTED=$(fetch_metric "eezo_exec_stm_aborted_total" "$BEFORE_METRICS")
+BEFORE_WAVES_BUILT=$(fetch_metric "eezo_exec_stm_waves_built_total" "$BEFORE_METRICS")
+BEFORE_PRESCREEN_HITS=$(fetch_metric "eezo_exec_stm_conflict_prescreen_hits_total" "$BEFORE_METRICS")
+BEFORE_PRESCREEN_MISSES=$(fetch_metric "eezo_exec_stm_conflict_prescreen_misses_total" "$BEFORE_METRICS")
+BEFORE_TXS=$(fetch_metric "eezo_txs_included_total" "$BEFORE_METRICS")
+BEFORE_BLOCKS=$(fetch_metric "block_applied_total" "$BEFORE_METRICS")
+read -r BEFORE_WAVE_SIZE_SUM BEFORE_WAVE_SIZE_COUNT <<< "$(fetch_histogram eezo_exec_stm_wave_size "$BEFORE_METRICS")"
+read -r BEFORE_WAVE_BUILD_SUM BEFORE_WAVE_BUILD_COUNT <<< "$(fetch_histogram eezo_exec_stm_wave_build_seconds "$BEFORE_METRICS")"
 
 echo "Waiting ${DURATION}s..."
 sleep "$DURATION"
@@ -73,20 +78,23 @@ echo ""
 echo "Capturing AFTER snapshot..."
 echo ""
 
-# After snapshot
-AFTER_WAVES=$(fetch_metric "eezo_exec_stm_waves_total")
-AFTER_CONFLICTS=$(fetch_metric "eezo_exec_stm_conflicts_total")
-AFTER_RETRIES=$(fetch_metric "eezo_exec_stm_retries_total")
-AFTER_ABORTED=$(fetch_metric "eezo_exec_stm_aborted_total")
-AFTER_WAVES_BUILT=$(fetch_metric "eezo_exec_stm_waves_built_total")
-AFTER_PRESCREEN_HITS=$(fetch_metric "eezo_exec_stm_conflict_prescreen_hits_total")
-AFTER_PRESCREEN_MISSES=$(fetch_metric "eezo_exec_stm_conflict_prescreen_misses_total")
-AFTER_TXS=$(fetch_metric "eezo_txs_included_total")
-AFTER_BLOCKS=$(fetch_metric "block_applied_total")
-read -r AFTER_WAVE_SIZE_SUM AFTER_WAVE_SIZE_COUNT <<< "$(fetch_histogram eezo_exec_stm_wave_size)"
-read -r AFTER_WAVE_BUILD_SUM AFTER_WAVE_BUILD_COUNT <<< "$(fetch_histogram eezo_exec_stm_wave_build_seconds)"
+# Fetch all metrics once for AFTER snapshot
+AFTER_METRICS=$(curl -s "http://${METRICS_URL}/metrics" 2>/dev/null)
 
-# Calculate deltas
+# After snapshot
+AFTER_WAVES=$(fetch_metric "eezo_exec_stm_waves_total" "$AFTER_METRICS")
+AFTER_CONFLICTS=$(fetch_metric "eezo_exec_stm_conflicts_total" "$AFTER_METRICS")
+AFTER_RETRIES=$(fetch_metric "eezo_exec_stm_retries_total" "$AFTER_METRICS")
+AFTER_ABORTED=$(fetch_metric "eezo_exec_stm_aborted_total" "$AFTER_METRICS")
+AFTER_WAVES_BUILT=$(fetch_metric "eezo_exec_stm_waves_built_total" "$AFTER_METRICS")
+AFTER_PRESCREEN_HITS=$(fetch_metric "eezo_exec_stm_conflict_prescreen_hits_total" "$AFTER_METRICS")
+AFTER_PRESCREEN_MISSES=$(fetch_metric "eezo_exec_stm_conflict_prescreen_misses_total" "$AFTER_METRICS")
+AFTER_TXS=$(fetch_metric "eezo_txs_included_total" "$AFTER_METRICS")
+AFTER_BLOCKS=$(fetch_metric "block_applied_total" "$AFTER_METRICS")
+read -r AFTER_WAVE_SIZE_SUM AFTER_WAVE_SIZE_COUNT <<< "$(fetch_histogram eezo_exec_stm_wave_size "$AFTER_METRICS")"
+read -r AFTER_WAVE_BUILD_SUM AFTER_WAVE_BUILD_COUNT <<< "$(fetch_histogram eezo_exec_stm_wave_build_seconds "$AFTER_METRICS")"
+
+# Calculate deltas using bash arithmetic for integers
 DELTA_WAVES=$((${AFTER_WAVES:-0} - ${BEFORE_WAVES:-0}))
 DELTA_CONFLICTS=$((${AFTER_CONFLICTS:-0} - ${BEFORE_CONFLICTS:-0}))
 DELTA_RETRIES=$((${AFTER_RETRIES:-0} - ${BEFORE_RETRIES:-0}))
@@ -96,38 +104,40 @@ DELTA_PRESCREEN_HITS=$((${AFTER_PRESCREEN_HITS:-0} - ${BEFORE_PRESCREEN_HITS:-0}
 DELTA_PRESCREEN_MISSES=$((${AFTER_PRESCREEN_MISSES:-0} - ${BEFORE_PRESCREEN_MISSES:-0}))
 DELTA_TXS=$((${AFTER_TXS:-0} - ${BEFORE_TXS:-0}))
 DELTA_BLOCKS=$((${AFTER_BLOCKS:-0} - ${BEFORE_BLOCKS:-0}))
-DELTA_WAVE_SIZE_SUM=$(echo "${AFTER_WAVE_SIZE_SUM:-0} - ${BEFORE_WAVE_SIZE_SUM:-0}" | bc 2>/dev/null || echo "0")
 DELTA_WAVE_SIZE_COUNT=$((${AFTER_WAVE_SIZE_COUNT:-0} - ${BEFORE_WAVE_SIZE_COUNT:-0}))
-DELTA_WAVE_BUILD_SUM=$(echo "${AFTER_WAVE_BUILD_SUM:-0} - ${BEFORE_WAVE_BUILD_SUM:-0}" | bc 2>/dev/null || echo "0")
 DELTA_WAVE_BUILD_COUNT=$((${AFTER_WAVE_BUILD_COUNT:-0} - ${BEFORE_WAVE_BUILD_COUNT:-0}))
 
-# Calculate derived metrics
-TPS=$(echo "scale=2; ${DELTA_TXS} / ${DURATION}" | bc 2>/dev/null || echo "0")
-BLOCKS_PER_SEC=$(echo "scale=2; ${DELTA_BLOCKS} / ${DURATION}" | bc 2>/dev/null || echo "0")
+# Use awk for floating-point calculations
+DELTA_WAVE_SIZE_SUM=$(awk "BEGIN {printf \"%.6f\", ${AFTER_WAVE_SIZE_SUM:-0} - ${BEFORE_WAVE_SIZE_SUM:-0}}")
+DELTA_WAVE_BUILD_SUM=$(awk "BEGIN {printf \"%.6f\", ${AFTER_WAVE_BUILD_SUM:-0} - ${BEFORE_WAVE_BUILD_SUM:-0}}")
+
+# Calculate derived metrics using awk for floating-point
+TPS=$(awk "BEGIN {printf \"%.2f\", ${DELTA_TXS} / ${DURATION}}")
+BLOCKS_PER_SEC=$(awk "BEGIN {printf \"%.2f\", ${DELTA_BLOCKS} / ${DURATION}}")
 
 if [ "${DELTA_BLOCKS:-0}" -gt 0 ]; then
-    AVG_TXS_PER_BLOCK=$(echo "scale=2; ${DELTA_TXS} / ${DELTA_BLOCKS}" | bc 2>/dev/null || echo "0")
-    AVG_WAVES_PER_BLOCK=$(echo "scale=2; ${DELTA_WAVES} / ${DELTA_BLOCKS}" | bc 2>/dev/null || echo "0")
+    AVG_TXS_PER_BLOCK=$(awk "BEGIN {printf \"%.2f\", ${DELTA_TXS} / ${DELTA_BLOCKS}}")
+    AVG_WAVES_PER_BLOCK=$(awk "BEGIN {printf \"%.2f\", ${DELTA_WAVES} / ${DELTA_BLOCKS}}")
 else
     AVG_TXS_PER_BLOCK="N/A"
     AVG_WAVES_PER_BLOCK="N/A"
 fi
 
 if [ "${DELTA_WAVE_SIZE_COUNT:-0}" -gt 0 ]; then
-    AVG_WAVE_SIZE=$(echo "scale=2; ${DELTA_WAVE_SIZE_SUM} / ${DELTA_WAVE_SIZE_COUNT}" | bc 2>/dev/null || echo "0")
+    AVG_WAVE_SIZE=$(awk "BEGIN {printf \"%.2f\", ${DELTA_WAVE_SIZE_SUM} / ${DELTA_WAVE_SIZE_COUNT}}")
 else
     AVG_WAVE_SIZE="N/A"
 fi
 
 if [ "${DELTA_WAVE_BUILD_COUNT:-0}" -gt 0 ]; then
-    AVG_WAVE_BUILD_MS=$(echo "scale=4; ${DELTA_WAVE_BUILD_SUM} / ${DELTA_WAVE_BUILD_COUNT} * 1000" | bc 2>/dev/null || echo "0")
+    AVG_WAVE_BUILD_MS=$(awk "BEGIN {printf \"%.4f\", ${DELTA_WAVE_BUILD_SUM} / ${DELTA_WAVE_BUILD_COUNT} * 1000}")
 else
     AVG_WAVE_BUILD_MS="N/A"
 fi
 
 PRESCREEN_TOTAL=$((${DELTA_PRESCREEN_HITS:-0} + ${DELTA_PRESCREEN_MISSES:-0}))
 if [ "${PRESCREEN_TOTAL}" -gt 0 ]; then
-    PRESCREEN_HIT_RATE=$(echo "scale=2; ${DELTA_PRESCREEN_HITS} * 100 / ${PRESCREEN_TOTAL}" | bc 2>/dev/null || echo "0")
+    PRESCREEN_HIT_RATE=$(awk "BEGIN {printf \"%.2f\", ${DELTA_PRESCREEN_HITS} * 100 / ${PRESCREEN_TOTAL}}")
 else
     PRESCREEN_HIT_RATE="N/A"
 fi
