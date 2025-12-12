@@ -1745,6 +1745,164 @@ pub fn register_t71_gpu_hash_metrics() {
 }
 
 // -----------------------------------------------------------------------------
+// T90.0 — GPU Hash Plumbing metrics (non-consensus, feature-gated)
+// -----------------------------------------------------------------------------
+//
+// These metrics track the T90.0 GPU hash plumbing milestone:
+// - eezo_gpu_hash_enabled: gauge (0/1) indicating GPU hash backend availability
+// - eezo_gpu_hash_jobs_total: counter of GPU hash batches requested
+// - eezo_gpu_hash_failures_total: counter of failed GPU jobs
+// - eezo_gpu_hash_latency_seconds: histogram of per-batch wall-clock time
+// - eezo_gpu_hash_bytes_total: counter of total bytes hashed via GPU
+// - eezo_gpu_hash_mismatch_total: counter of GPU/CPU hash mismatches
+
+/// T90.0: Gauge indicating whether GPU hash backend was successfully initialized.
+/// Value: 0 = GPU unavailable/disabled/init failed, 1 = GPU successfully initialized.
+#[cfg(feature = "metrics")]
+pub static EEZO_GPU_HASH_ENABLED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_gpu_hash_enabled",
+        "Whether GPU hash backend was successfully initialized (0=no, 1=yes)"
+    )
+    .unwrap()
+});
+
+/// T90.0: Counter of GPU hash batches requested.
+#[cfg(feature = "metrics")]
+pub static EEZO_GPU_HASH_JOBS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_gpu_hash_jobs_total",
+        "Total number of GPU hash batches requested"
+    )
+    .unwrap()
+});
+
+/// T90.0: Counter of failed GPU hash operations (including device unavailable).
+#[cfg(feature = "metrics")]
+pub static EEZO_GPU_HASH_FAILURES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_gpu_hash_failures_total",
+        "Total number of GPU hash failures (device unavailable, compute errors)"
+    )
+    .unwrap()
+});
+
+/// T90.0: Histogram of GPU hash batch latency in seconds.
+#[cfg(feature = "metrics")]
+pub static EEZO_GPU_HASH_LATENCY_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_gpu_hash_latency_seconds",
+        "GPU hash batch latency (seconds)",
+        vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5]
+    )
+    .unwrap()
+});
+
+/// T90.0: Counter of total bytes hashed via GPU.
+#[cfg(feature = "metrics")]
+pub static EEZO_GPU_HASH_BYTES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_gpu_hash_bytes_total",
+        "Total bytes hashed via GPU"
+    )
+    .unwrap()
+});
+
+/// T90.0: Counter of GPU/CPU hash mismatches detected.
+#[cfg(feature = "metrics")]
+pub static EEZO_GPU_HASH_MISMATCH_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_gpu_hash_mismatch_total",
+        "Total GPU/CPU hash mismatches detected (GPU disagrees with CPU)"
+    )
+    .unwrap()
+});
+
+/// T90.0: Helper to set the GPU hash enabled gauge.
+#[inline]
+pub fn gpu_hash_enabled_set(val: i64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_GPU_HASH_ENABLED.set(val);
+    }
+    let _ = val;
+}
+
+/// T90.0: Helper to increment GPU hash jobs counter.
+#[inline]
+pub fn gpu_hash_jobs_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_GPU_HASH_JOBS_TOTAL.inc();
+    }
+}
+
+/// T90.0: Helper to increment GPU hash failures counter.
+#[inline]
+pub fn gpu_hash_failures_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_GPU_HASH_FAILURES_TOTAL.inc();
+    }
+}
+
+/// T90.0: Helper to observe GPU hash latency.
+#[inline]
+pub fn gpu_hash_latency_observe(seconds: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_GPU_HASH_LATENCY_SECONDS.observe(seconds);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = seconds;
+    }
+}
+
+/// T90.0: Helper to increment GPU hash bytes counter.
+#[inline]
+pub fn gpu_hash_bytes_inc(bytes: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_GPU_HASH_BYTES_TOTAL.inc_by(bytes);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = bytes;
+    }
+}
+
+/// T90.0: Helper to increment GPU/CPU mismatch counter.
+#[inline]
+pub fn gpu_hash_mismatch_inc_by(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_GPU_HASH_MISMATCH_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// T90.0: Eagerly register GPU hash plumbing metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t90_gpu_hash_metrics() {
+    let _ = &*EEZO_GPU_HASH_ENABLED;
+    let _ = &*EEZO_GPU_HASH_JOBS_TOTAL;
+    let _ = &*EEZO_GPU_HASH_FAILURES_TOTAL;
+    let _ = &*EEZO_GPU_HASH_LATENCY_SECONDS;
+    let _ = &*EEZO_GPU_HASH_BYTES_TOTAL;
+    let _ = &*EEZO_GPU_HASH_MISMATCH_TOTAL;
+}
+
+/// T90.0: No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t90_gpu_hash_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
 // T72.0 — Detailed executor performance metrics
 // -----------------------------------------------------------------------------
 
