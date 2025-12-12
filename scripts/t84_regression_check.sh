@@ -144,6 +144,7 @@ echo ""
 # ─────────────────────────────────────────────────────────────────────────────
 command -v curl >/dev/null || { echo -e "${RED}ERROR: curl is required${NC}"; exit 2; }
 command -v bc >/dev/null || { echo -e "${RED}ERROR: bc is required${NC}"; exit 2; }
+# jq is optional (only needed for spam_tps.sh, which we may skip)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Verify node connectivity
@@ -167,13 +168,23 @@ echo -e "      ${GREEN}✓${NC} Metrics endpoint available"
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper function to get metric value
+# Helper function to get metric value from cached metrics
 # ─────────────────────────────────────────────────────────────────────────────
+# Global variable for cached metrics (fetch once, parse multiple times)
+CACHED_METRICS=""
+
+fetch_metrics() {
+    CACHED_METRICS=$(curl -sf "$METRICS_URL" 2>/dev/null) || {
+        echo -e "${RED}ERROR: Failed to fetch metrics from $METRICS_URL${NC}"
+        exit 2
+    }
+}
+
 get_metric() {
     local name="$1"
     local default="${2:-0}"
     local value
-    value=$(curl -sf "$METRICS_URL" 2>/dev/null | grep "^${name} " | awk '{print $2}' | head -1)
+    value=$(echo "$CACHED_METRICS" | grep "^${name} " | awk '{print $2}' | head -1)
     value="${value%.0}"
     echo "${value:-$default}"
 }
@@ -224,7 +235,8 @@ if [[ "${SKIP_SPAM:-0}" != "1" ]]; then
     sleep 2
 fi
 
-# Capture start metrics
+# Capture start metrics (fetch once, parse multiple times)
+fetch_metrics
 TXS_START=$(get_metric "eezo_txs_included_total" "0")
 TS_START=$(date +%s)
 
@@ -235,7 +247,8 @@ sleep "$WARMUP"
 echo -e "      Measuring for ${DURATION}s..."
 sleep "$DURATION"
 
-# Capture end metrics
+# Capture end metrics (fetch once, parse multiple times)
+fetch_metrics
 TXS_END=$(get_metric "eezo_txs_included_total" "0")
 TS_END=$(date +%s)
 
