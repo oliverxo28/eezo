@@ -1047,4 +1047,89 @@ mod tests {
         crate::metrics::gpu_hash_bytes_inc(100);
         crate::metrics::gpu_hash_mismatch_inc_by(1);
     }
+
+    /// T90.0b: Test that `is_gpu_hash_enabled` correctly reports based on env var.
+    /// This test verifies that the GPU hash diagnostic check works correctly
+    /// in non-persistence builds when EEZO_GPU_HASH_ENABLED is set.
+    /// 
+    /// Note: This test only checks the env var parsing logic, not GPU initialization.
+    /// It does NOT trigger GPU driver initialization (which could segfault on
+    /// machines without proper GPU support).
+    #[test]
+    fn t90_0b_gpu_hash_enabled_check() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        
+        // Test: when EEZO_GPU_HASH_ENABLED=1, the check returns true
+        std::env::set_var("EEZO_GPU_HASH_ENABLED", "1");
+        assert!(is_gpu_hash_enabled(), "T90.0b: GPU hash should be enabled when EEZO_GPU_HASH_ENABLED=1");
+        
+        // Test: when EEZO_GPU_HASH_ENABLED=0, the check returns false
+        std::env::set_var("EEZO_GPU_HASH_ENABLED", "0");
+        assert!(!is_gpu_hash_enabled(), "T90.0b: GPU hash should be disabled when EEZO_GPU_HASH_ENABLED=0");
+        
+        // Test: when EEZO_GPU_HASH_ENABLED is unset, the check returns false (default off)
+        std::env::remove_var("EEZO_GPU_HASH_ENABLED");
+        assert!(!is_gpu_hash_enabled(), "T90.0b: GPU hash should be disabled by default");
+    }
+
+    /// T90.0b: Test that `hash_batch_with_gpu_check` returns correct CPU hashes.
+    /// 
+    /// This test verifies that the diagnostic function always returns correct
+    /// CPU hashes (the invariant that makes GPU hashing non-consensus).
+    /// 
+    /// This test runs with GPU DISABLED by default to avoid triggering wgpu/GPU
+    /// driver initialization, which can cause SIGSEGV on machines without proper
+    /// GPU support (e.g., WSL, CI environments, headless servers).
+    /// 
+    /// To test the full GPU path on machines with GPU hardware, set:
+    ///   EEZO_GPU_HASH_TEST_GPU=1 cargo test t90_0b
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn t90_0b_gpu_hash_diagnostic_callable_with_enabled() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        
+        // Register metrics first
+        crate::metrics::register_t90_gpu_hash_metrics();
+        
+        // Check if GPU testing is explicitly requested via env var.
+        // Default is OFF to avoid SIGSEGV on machines without proper GPU support.
+        let test_gpu = std::env::var("EEZO_GPU_HASH_TEST_GPU")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        
+        if test_gpu {
+            // GPU path: Enable GPU and test the full diagnostic path.
+            // Only run this on machines with known working GPU support.
+            std::env::set_var("EEZO_GPU_HASH_ENABLED", "1");
+            log::info!("T90.0b test: GPU testing enabled (EEZO_GPU_HASH_TEST_GPU=1)");
+        } else {
+            // CPU-only path: Keep GPU disabled for safe testing on all machines.
+            std::env::remove_var("EEZO_GPU_HASH_ENABLED");
+        }
+        
+        // Create test inputs similar to what a block would contain
+        let inputs = vec![
+            b"tx1: transfer from A to B".to_vec(),
+            b"tx2: transfer from C to D".to_vec(),
+            b"tx3: transfer from E to F".to_vec(),
+        ];
+        
+        // Call the diagnostic function
+        // - With GPU disabled: exercises CPU-only path
+        // - With GPU enabled: exercises GPU comparison path (may fail gracefully if no GPU)
+        let results = hash_batch_with_gpu_check(&inputs);
+        
+        // Verify CPU hashes are correct (this is the invariant - always true)
+        assert_eq!(results.len(), inputs.len());
+        for (input, result) in inputs.iter().zip(results.iter()) {
+            let expected = *blake3::hash(input).as_bytes();
+            assert_eq!(
+                *result, expected,
+                "T90.0b: hash_batch_with_gpu_check must return correct CPU hashes"
+            );
+        }
+        
+        // Clean up
+        std::env::remove_var("EEZO_GPU_HASH_ENABLED");
+    }
 }

@@ -191,6 +191,40 @@ fn compute_block_body_hash_with_gpu(blk_opt: &Option<Block>, height: u64) -> Opt
     Some(digest)
 }
 
+/// T90.0b — Run GPU hash diagnostic on a committed block (non-consensus).
+///
+/// This function is called after every block commit when EEZO_GPU_HASH_ENABLED=1.
+/// It runs regardless of whether persistence is enabled, ensuring the GPU path
+/// is exercised in DagPrimary + STM mode without persistence.
+///
+/// The diagnostic:
+///   1. Computes CPU BLAKE3 hashes of all tx bytes (ground truth)
+///   2. If GPU is available, computes GPU hashes and compares them
+///   3. Logs any mismatches and updates metrics
+///
+/// This does **not** change consensus behaviour; it only exercises the GPU path.
+fn run_t90_0b_gpu_hash_diagnostic(blk_opt: &Option<Block>, height: u64) {
+    if !is_gpu_hash_enabled() {
+        return;
+    }
+
+    if let Some(ref blk) = blk_opt {
+        if !blk.txs.is_empty() {
+            let tx_bytes: Vec<Vec<u8>> = blk.txs.iter()
+                .map(|tx| tx.to_bytes())
+                .collect();
+            // hash_batch_with_gpu_check computes CPU hashes,
+            // compares with GPU if available, and logs mismatches.
+            // Result is discarded: this is diagnostic only.
+            let _ = hash_batch_with_gpu_check(&tx_bytes);
+            log::debug!(
+                "T90.0b: GPU hash diagnostic ran for block h={} ({} txs)",
+                height, tx_bytes.len()
+            );
+        }
+    }
+}
+
 // --- T54 executor wiring ---
 use crate::executor::{Executor, ExecInput};
 use crate::executor::{SingleExecutor};
@@ -886,6 +920,11 @@ impl CoreRunnerHandle {
                         // This exercises the GPU hashing path without changing consensus behaviour.
                         let _ = compute_block_body_hash_with_gpu(&blk_opt, height);
 
+                        // T90.0b: GPU hash diagnostic (non-consensus, feature-gated)
+                        // Runs regardless of persistence feature to exercise GPU path in
+                        // DagPrimary + STM mode without persistence.
+                        run_t90_0b_gpu_hash_diagnostic(&blk_opt, height);
+
                         // T75.0: Send committed block to shadow DAG (if enabled)
                         // This must not block or affect the main consensus path.
                         #[cfg(feature = "dag-consensus")]
@@ -971,27 +1010,8 @@ impl CoreRunnerHandle {
                                         log::error!("❌ runner: failed to persist block at h={}: {}", height, e);
                                     } else {
                                         log::debug!("runner: persisted block at h={}", height);
-                                        
-                                        // T90.0: GPU hash diagnostic (non-consensus)
-                                        // If GPU hashing is enabled, run a diagnostic comparison of
-                                        // GPU vs CPU BLAKE3 hashes on the block's transaction bytes.
-                                        // This is purely observational - consensus uses CPU hashes.
-                                        if is_gpu_hash_enabled() && !block.txs.is_empty() {
-                                            let tx_bytes: Vec<Vec<u8>> = block.txs.iter()
-                                                .map(|tx| tx.to_bytes())
-                                                .collect();
-                                            if !tx_bytes.is_empty() {
-                                                // hash_batch_with_gpu_check computes CPU hashes,
-                                                // compares with GPU if available, and logs mismatches.
-                                                // Result is discarded intentionally: this is diagnostic only,
-                                                // not used for consensus. Metrics and logs track GPU health.
-                                                let _ = hash_batch_with_gpu_check(&tx_bytes);
-                                                log::debug!(
-                                                    "T90.0: GPU hash diagnostic ran for block h={} ({} txs)",
-                                                    height, tx_bytes.len()
-                                                );
-                                            }
-                                        }
+                                        // T90.0b: GPU hash diagnostic moved outside persistence guard.
+                                        // See T90.0b block above (runs regardless of persistence feature).
                                     }
                                 } else {
                                     log::warn!(
@@ -2137,6 +2157,11 @@ impl CoreRunnerHandle {
                         // T71.0: GPU hash comparison (optional, controlled by EEZO_NODE_GPU_HASH)
                         // This exercises the GPU hashing path without changing consensus behaviour.
                         let _ = compute_block_body_hash_with_gpu(&blk_opt, height);
+
+                        // T90.0b: GPU hash diagnostic (non-consensus, feature-gated)
+                        // Runs regardless of persistence feature to exercise GPU path in
+                        // DagPrimary + STM mode with or without persistence.
+                        run_t90_0b_gpu_hash_diagnostic(&blk_opt, height);
 
                         // T75.0: Send committed block to shadow DAG (if enabled)
                         // T76.2: Also feed hybrid DAG handle for ordered batch consumption.
