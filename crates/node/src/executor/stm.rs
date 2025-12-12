@@ -527,12 +527,15 @@ struct TxContext {
 }
 
 impl TxContext {
+    /// T87.2: Create a new TxContext with pre-sized collections.
+    /// Typical transfer tx touches 2 read keys (sender, receiver) and 3 write keys
+    /// (sender, receiver, supply). Pre-sizing avoids reallocation.
     fn new(tx_idx: usize) -> Self {
         Self {
             tx_idx,
             attempt: 0,
-            read_set: HashSet::new(),
-            write_set: HashSet::new(),
+            read_set: HashSet::with_capacity(2),
+            write_set: HashSet::with_capacity(3),
             status: TxStatus::NeedsRetry,
             spec_result: None,
         }
@@ -561,6 +564,9 @@ pub struct StmConfig {
     /// T76.7: Optional cap on transactions per wave.
     /// Configured via EEZO_EXEC_WAVE_CAP env var (default: no cap, i.e., 0 means unlimited).
     pub wave_cap: usize,
+    /// T87.1: Enable aggressive wave grouping for better parallelism.
+    /// Configured via EEZO_STM_WAVE_AGGRESSIVE env var (default: false).
+    pub wave_aggressive: bool,
 }
 
 impl Default for StmConfig {
@@ -571,6 +577,7 @@ impl Default for StmConfig {
             wave_timeout_ms: 1000,
             exec_lanes: 16,
             wave_cap: 0, // 0 means unlimited
+            wave_aggressive: false, // T87.1: opt-in
         }
     }
 }
@@ -590,6 +597,7 @@ impl StmConfig {
     /// - `EEZO_STM_WAVE_TIMEOUT_MS`: Wave timeout in ms (default: 1000)
     /// - `EEZO_EXEC_LANES`: Number of execution lanes (default: 16, allow 32/48/64)
     /// - `EEZO_EXEC_WAVE_CAP`: Optional cap on txs per wave (default: 0 = unlimited)
+    /// - `EEZO_STM_WAVE_AGGRESSIVE`: Enable aggressive wave grouping (default: 0)
     pub fn from_env(threads: usize) -> Self {
         let max_retries = std::env::var("EEZO_STM_MAX_RETRIES")
             .ok()
@@ -623,12 +631,21 @@ impl StmConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
 
+        // T87.1: Parse wave_aggressive from environment (default false)
+        let wave_aggressive = std::env::var("EEZO_STM_WAVE_AGGRESSIVE")
+            .map(|v| {
+                let s = v.trim().to_ascii_lowercase();
+                matches!(s.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false);
+
         Self {
             threads,
             max_retries,
             wave_timeout_ms,
             exec_lanes,
             wave_cap,
+            wave_aggressive,
         }
     }
 }
@@ -663,13 +680,14 @@ impl StmExecutor {
 
     /// Create a new STM executor loading config from environment.
     /// T76.7: Also logs and sets gauges for exec_lanes and wave_cap.
+    /// T87.1: Also logs and sets gauge for wave_aggressive.
     pub fn from_env(threads: usize) -> Self {
         let config = StmConfig::from_env(threads);
         
-        // T76.7: Log the configured values
+        // T76.7 + T87.1: Log the configured values
         log::info!(
-            "stm-executor: initialized with threads={} exec_lanes={} wave_cap={} (0=unlimited)",
-            config.threads, config.exec_lanes, config.wave_cap
+            "stm-executor: initialized with threads={} exec_lanes={} wave_cap={} (0=unlimited) wave_aggressive={}",
+            config.threads, config.exec_lanes, config.wave_cap, config.wave_aggressive
         );
         
         // T76.7: Set gauge metrics
@@ -677,6 +695,8 @@ impl StmExecutor {
         {
             crate::metrics::exec_lanes_set(config.exec_lanes);
             crate::metrics::exec_wave_cap_set(config.wave_cap);
+            // T87.1: Set aggressive wave mode gauge
+            crate::metrics::exec_stm_wave_aggressive_set(config.wave_aggressive);
         }
         
         Self { config }
@@ -1286,11 +1306,19 @@ impl StmExecutor {
             //
             // The pre-screen is an optimization only - it reduces the work done
             // in precise conflict detection but doesn't replace it for correctness.
+            //
+            // T87.x: Track wave build timing for profiling
+            let wave_build_start = std::time::Instant::now();
             let conflicts = Self::detect_conflicts_with_prescreen(
                 &contexts, 
                 &pending_indices, 
                 &analyzed_map
             );
+            #[cfg(feature = "metrics")]
+            {
+                let wave_build_secs = wave_build_start.elapsed().as_secs_f64();
+                crate::metrics::exec_stm_observe_wave_build_seconds(wave_build_secs);
+            }
             let conflict_set: HashSet<usize> = conflicts.into_iter().collect();
             conflicts_this_block += conflict_set.len() as u64;
 
@@ -1634,6 +1662,8 @@ mod tests {
         // T76.7: Check new fields
         assert_eq!(config.exec_lanes, 16);
         assert_eq!(config.wave_cap, 0); // 0 = unlimited
+        // T87.1: Check wave_aggressive
+        assert!(!config.wave_aggressive);
     }
 
     #[test]
@@ -1644,6 +1674,7 @@ mod tests {
             wave_timeout_ms: 500,
             exec_lanes: 32,
             wave_cap: 100,
+            wave_aggressive: true, // T87.1
         };
         let exec = StmExecutor::with_config(config);
         assert_eq!(exec.threads(), 8);
@@ -1652,6 +1683,8 @@ mod tests {
         // T76.7: Check new fields
         assert_eq!(exec.config().exec_lanes, 32);
         assert_eq!(exec.config().wave_cap, 100);
+        // T87.1: Check wave_aggressive
+        assert!(exec.config().wave_aggressive);
     }
 
     // T76.7: Test exec_lanes and wave_cap configuration from environment
@@ -1662,12 +1695,14 @@ mod tests {
         // Clear env vars to test defaults
         std::env::remove_var("EEZO_EXEC_LANES");
         std::env::remove_var("EEZO_EXEC_WAVE_CAP");
+        std::env::remove_var("EEZO_STM_WAVE_AGGRESSIVE"); // T87.1
         
         let config = StmConfig::from_env(4);
         
         assert_eq!(config.threads, 4);
         assert_eq!(config.exec_lanes, 16); // default
         assert_eq!(config.wave_cap, 0); // default, unlimited
+        assert!(!config.wave_aggressive); // T87.1: default off
     }
 
     #[test]
@@ -1686,6 +1721,37 @@ mod tests {
         // Clean up
         std::env::remove_var("EEZO_EXEC_LANES");
         std::env::remove_var("EEZO_EXEC_WAVE_CAP");
+    }
+
+    // T87.1: Test wave_aggressive configuration from environment
+    #[test]
+    fn test_stm_config_from_env_wave_aggressive() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        // Test enabling wave_aggressive
+        std::env::set_var("EEZO_STM_WAVE_AGGRESSIVE", "1");
+        let config = StmConfig::from_env(4);
+        assert!(config.wave_aggressive);
+        
+        std::env::set_var("EEZO_STM_WAVE_AGGRESSIVE", "true");
+        let config = StmConfig::from_env(4);
+        assert!(config.wave_aggressive);
+        
+        std::env::set_var("EEZO_STM_WAVE_AGGRESSIVE", "yes");
+        let config = StmConfig::from_env(4);
+        assert!(config.wave_aggressive);
+        
+        // Test disabling
+        std::env::set_var("EEZO_STM_WAVE_AGGRESSIVE", "0");
+        let config = StmConfig::from_env(4);
+        assert!(!config.wave_aggressive);
+        
+        std::env::set_var("EEZO_STM_WAVE_AGGRESSIVE", "false");
+        let config = StmConfig::from_env(4);
+        assert!(!config.wave_aggressive);
+        
+        // Clean up
+        std::env::remove_var("EEZO_STM_WAVE_AGGRESSIVE");
     }
 
     #[test]

@@ -149,6 +149,8 @@ use crate::metrics::{
     init_profiling_mode,
     // T83.0: Enhanced SigPool metrics
     register_t83_sigpool_metrics,
+    // T87.x: Deep Performance Pass metrics
+    register_t87_deep_perf_metrics,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -3208,6 +3210,9 @@ async fn main() -> anyhow::Result<()> {
 
         // T83.0: Enhanced SigPool metrics (micro-batching + cache)
         register_t83_sigpool_metrics();
+
+        // T87.x: Deep Performance Pass metrics (wave build timing, aggressive mode)
+        register_t87_deep_perf_metrics();
 
         // T76.11: Set consensus mode gauge based on current mode
         // 0 = Legacy, 1 = Hybrid (dag-hybrid with ordering), 2 = DAG
