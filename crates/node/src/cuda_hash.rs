@@ -22,6 +22,10 @@ use eezo_cuda_hash::{CudaBlake3Engine, CudaBlake3Error};
 // Static flag to track whether we've logged CUDA init status
 static CUDA_INIT_LOGGED: AtomicBool = AtomicBool::new(false);
 
+/// Number of bytes to display when logging hash prefixes (4 bytes = 8 hex chars).
+#[cfg(feature = "cuda-hash")]
+const HASH_DISPLAY_PREFIX_BYTES: usize = 4;
+
 /// T91.2: Check if CUDA hashing is enabled via EEZO_CUDA_HASH_ENABLED env var.
 ///
 /// Returns true only if EEZO_CUDA_HASH_ENABLED=1.
@@ -95,7 +99,9 @@ pub fn run_t91_2_cuda_hash_shadow(
     }
 
     // 4. Get reference to engine (guaranteed to be Some after init)
-    let engine = cuda_engine.as_ref().unwrap();
+    let engine = cuda_engine.as_ref().expect(
+        "T91.2: cuda_engine should be Some after successful initialization"
+    );
 
     // 5. Prepare input slices for hash_many
     let input_slices: Vec<&[u8]> = tx_bytes.iter().map(|v| v.as_slice()).collect();
@@ -130,8 +136,8 @@ pub fn run_t91_2_cuda_hash_shadow(
                     log::warn!(
                         "T91.2: CUDA/CPU hash mismatch at tx index {}: CUDA=0x{} CPU=0x{}",
                         i,
-                        hex::encode(&cuda[..4]),
-                        hex::encode(&cpu[..4])
+                        hex::encode(&cuda[..HASH_DISPLAY_PREFIX_BYTES]),
+                        hex::encode(&cpu[..HASH_DISPLAY_PREFIX_BYTES])
                     );
                     crate::metrics::cuda_hash_mismatch_inc();
                 }
