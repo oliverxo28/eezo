@@ -1,5 +1,6 @@
 // =============================================================================
 // T71.0 / T71.1 / T71.2 — Safe GPU hashing adapter for the node
+// T90.0 — GPU Hash Plumbing for eezo-node (non-consensus, feature-gated)
 //
 // This module provides a GPU-accelerated hashing option inside the node for
 // block commitments. Key properties:
@@ -20,10 +21,345 @@
 //   - New gauge: eezo_node_gpu_hash_enabled (0=disabled/failed, 1=enabled)
 //   - Better error logging with full error chain
 //   - Clarified metric semantics (attempts_total vs error_total)
+//
+// T90.0: GPU Hash Plumbing milestone — clean GPU hash module for eezo-node.
+//   - Reuses eezo-prover GPU BLAKE3 (wgpu/WGSL) patterns
+//   - Feature-gated: `gpu-hash` Cargo feature
+//   - Env-gated: `EEZO_GPU_HASH_ENABLED=1` (default: off)
+//   - Non-consensus: GPU hashes are verified against CPU but not used for state roots
+//   - Clear metrics: eezo_gpu_hash_* for observability
+//
+// Modules reused from eezo-prover:
+//   - crates/eezo-prover/src/gpu_hash.rs: GpuBlake3Context, Blake3GpuBatch, Blake3GpuBackend
+//   - wgpu/WGSL shader pipeline for BLAKE3 compute
+//
+// Differences between prover and node GPU usage:
+//   - Prover: primarily batch hashing for proofs, synchronous
+//   - Node: single-message hashing for block body, with CPU validation
+//   - Node uses EEZO_GPU_HASH_ENABLED env var (default: off)
+//   - Prover uses EEZO_GPU_HASH_REAL env var
 // =============================================================================
 
 use std::env;
 use std::sync::OnceLock;
+use std::time::Instant;
+
+// =============================================================================
+// T90.0 — GpuHashBackend API (clean interface for node GPU hashing)
+// =============================================================================
+
+/// Error type for GPU hash backend operations.
+///
+/// T90.0: Provides clear error variants for GPU hashing failures.
+#[derive(Debug, Clone)]
+pub enum GpuHashBackendError {
+    /// GPU device is not available (no adapter, headless, driver issues).
+    DeviceUnavailable(String),
+    /// GPU compute operation failed during hash computation.
+    ComputeFailure(String),
+    /// Feature is disabled at compile time.
+    FeatureDisabled,
+    /// Feature is disabled at runtime via env var.
+    RuntimeDisabled,
+}
+
+impl std::fmt::Display for GpuHashBackendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GpuHashBackendError::DeviceUnavailable(msg) => {
+                write!(f, "GPU device unavailable: {}", msg)
+            }
+            GpuHashBackendError::ComputeFailure(msg) => {
+                write!(f, "GPU compute failure: {}", msg)
+            }
+            GpuHashBackendError::FeatureDisabled => {
+                write!(f, "gpu-hash feature is not compiled in")
+            }
+            GpuHashBackendError::RuntimeDisabled => {
+                write!(f, "GPU hashing disabled (EEZO_GPU_HASH_ENABLED != 1)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GpuHashBackendError {}
+
+/// T90.0: Check if GPU hashing is enabled via EEZO_GPU_HASH_ENABLED env var.
+///
+/// Returns true only if EEZO_GPU_HASH_ENABLED=1.
+/// Default is off (returns false).
+pub fn is_gpu_hash_enabled() -> bool {
+    env::var("EEZO_GPU_HASH_ENABLED")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// GPU BLAKE3 hashing backend for eezo-node.
+///
+/// T90.0: This struct provides a clean API for GPU-accelerated BLAKE3 hashing.
+/// It wraps the eezo-prover GPU backend and provides:
+///   - Feature-gated compilation (`gpu-hash` feature)
+///   - Runtime enable/disable via `EEZO_GPU_HASH_ENABLED=1`
+///   - Batch hashing of multiple messages
+///   - Graceful fallback on GPU failures
+///
+/// The backend uses the same BLAKE3 semantics as CPU hashing (same personalization,
+/// same endianness) to ensure bit-for-bit identical results.
+#[cfg(feature = "gpu-hash")]
+pub struct GpuHashBackend {
+    /// The underlying GPU context from eezo-prover.
+    ctx: eezo_prover::gpu_hash::GpuBlake3Context,
+}
+
+#[cfg(feature = "gpu-hash")]
+impl GpuHashBackend {
+    /// Create a new GPU hash backend.
+    ///
+    /// T90.0: This attempts to initialize the GPU backend if:
+    ///   1. The `gpu-hash` feature is compiled in
+    ///   2. `EEZO_GPU_HASH_ENABLED=1` is set in the environment
+    ///   3. A suitable GPU adapter and device are available
+    ///
+    /// Returns `Err(GpuHashBackendError::RuntimeDisabled)` if EEZO_GPU_HASH_ENABLED != 1.
+    /// Returns `Err(GpuHashBackendError::DeviceUnavailable)` if GPU init fails.
+    pub fn new() -> Result<Self, GpuHashBackendError> {
+        // Check runtime env var first
+        if !is_gpu_hash_enabled() {
+            return Err(GpuHashBackendError::RuntimeDisabled);
+        }
+
+        // Temporarily set EEZO_GPU_HASH_REAL=1 for eezo-prover initialization
+        let original_val = env::var("EEZO_GPU_HASH_REAL").ok();
+        env::set_var("EEZO_GPU_HASH_REAL", "1");
+
+        // Scope guard to restore env var
+        struct EnvGuard(Option<String>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(v) => env::set_var("EEZO_GPU_HASH_REAL", v),
+                    None => env::remove_var("EEZO_GPU_HASH_REAL"),
+                }
+            }
+        }
+        let _env_guard = EnvGuard(original_val);
+
+        use eezo_prover::gpu_hash::GpuBlake3Context;
+
+        match GpuBlake3Context::new() {
+            Ok(ctx) if ctx.is_available() => {
+                log::info!("T90.0: GpuHashBackend initialized successfully");
+                crate::metrics::gpu_hash_enabled_set(1);
+                Ok(GpuHashBackend { ctx })
+            }
+            Ok(_) => {
+                log::warn!(
+                    "T90.0: GPU adapter found but device/queue unavailable"
+                );
+                crate::metrics::gpu_hash_enabled_set(0);
+                crate::metrics::gpu_hash_failures_inc();
+                Err(GpuHashBackendError::DeviceUnavailable(
+                    "adapter found but device/queue unavailable".to_string(),
+                ))
+            }
+            Err(e) => {
+                log::warn!("T90.0: GPU initialization failed: {}", e);
+                crate::metrics::gpu_hash_enabled_set(0);
+                crate::metrics::gpu_hash_failures_inc();
+                Err(GpuHashBackendError::DeviceUnavailable(e.to_string()))
+            }
+        }
+    }
+
+    /// Hash a batch of messages using BLAKE3 on the GPU.
+    ///
+    /// T90.0: Returns a Vec of 32-byte BLAKE3 digests, one per input message.
+    /// Uses the same BLAKE3 semantics as CPU hashing.
+    ///
+    /// # Arguments
+    /// * `inputs` - Slice of byte vectors to hash
+    ///
+    /// # Returns
+    /// * `Ok(Vec<[u8; 32]>)` - Vector of 32-byte digests
+    /// * `Err(GpuHashBackendError)` - If GPU compute fails
+    pub fn blake3_batch(&self, inputs: &[Vec<u8>]) -> Result<Vec<[u8; 32]>, GpuHashBackendError> {
+        use eezo_prover::gpu_hash::{Blake3GpuBackend, Blake3GpuBatch};
+
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let start = Instant::now();
+        let n = inputs.len();
+
+        // Build concatenated input blob and metadata
+        let mut input_blob: Vec<u8> = Vec::new();
+        let mut offsets: Vec<u32> = Vec::with_capacity(n);
+        let mut lens: Vec<u32> = Vec::with_capacity(n);
+        let mut total_bytes: u64 = 0;
+
+        for msg in inputs {
+            let off = input_blob.len();
+            input_blob.extend_from_slice(msg);
+            offsets.push(off.try_into().map_err(|_| {
+                GpuHashBackendError::ComputeFailure("offset overflow".to_string())
+            })?);
+            lens.push(msg.len().try_into().map_err(|_| {
+                GpuHashBackendError::ComputeFailure("length overflow".to_string())
+            })?);
+            total_bytes += msg.len() as u64;
+        }
+
+        let mut digests_out = vec![0u8; n * 32];
+
+        let mut batch = Blake3GpuBatch {
+            input_blob: &input_blob,
+            offsets: &offsets,
+            lens: &lens,
+            digests_out: &mut digests_out,
+        };
+
+        self.ctx
+            .hash_batch(&mut batch)
+            .map_err(|e| GpuHashBackendError::ComputeFailure(e.to_string()))?;
+
+        // Record metrics
+        let elapsed = start.elapsed().as_secs_f64();
+        crate::metrics::gpu_hash_jobs_inc();
+        crate::metrics::gpu_hash_latency_observe(elapsed);
+        crate::metrics::gpu_hash_bytes_inc(total_bytes);
+
+        // Convert flat buffer to Vec of arrays
+        let mut result = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut digest = [0u8; 32];
+            digest.copy_from_slice(&digests_out[i * 32..(i + 1) * 32]);
+            result.push(digest);
+        }
+
+        Ok(result)
+    }
+
+    /// Hash a single message using BLAKE3 on the GPU.
+    ///
+    /// Convenience wrapper around `blake3_batch` for single-message hashing.
+    pub fn blake3_single(&self, input: &[u8]) -> Result<[u8; 32], GpuHashBackendError> {
+        let inputs = vec![input.to_vec()];
+        let results = self.blake3_batch(&inputs)?;
+        results.into_iter().next().ok_or_else(|| {
+            GpuHashBackendError::ComputeFailure(
+                "blake3_batch returned empty result for single input".to_string()
+            )
+        })
+    }
+}
+
+/// T90.0: Stub GpuHashBackend when gpu-hash feature is disabled.
+#[cfg(not(feature = "gpu-hash"))]
+pub struct GpuHashBackend {
+    _private: (),
+}
+
+#[cfg(not(feature = "gpu-hash"))]
+impl GpuHashBackend {
+    /// Stub new() that returns FeatureDisabled error.
+    pub fn new() -> Result<Self, GpuHashBackendError> {
+        Err(GpuHashBackendError::FeatureDisabled)
+    }
+
+    /// Stub blake3_batch that always fails.
+    pub fn blake3_batch(&self, _inputs: &[Vec<u8>]) -> Result<Vec<[u8; 32]>, GpuHashBackendError> {
+        Err(GpuHashBackendError::FeatureDisabled)
+    }
+
+    /// Stub blake3_single that always fails.
+    pub fn blake3_single(&self, _input: &[u8]) -> Result<[u8; 32], GpuHashBackendError> {
+        Err(GpuHashBackendError::FeatureDisabled)
+    }
+}
+
+// =============================================================================
+// T90.0 — Diagnostic GPU vs CPU hash comparison
+// =============================================================================
+
+/// T90.0: Compare GPU and CPU hashes for a batch of inputs.
+///
+/// This function:
+/// 1. Computes CPU hashes as ground truth
+/// 2. If EEZO_GPU_HASH_ENABLED=1 and GPU is available, computes GPU hashes
+/// 3. Asserts that GPU hashes match CPU hashes bit-for-bit
+/// 4. Returns CPU hashes (always canonical for consensus)
+///
+/// Any mismatch is logged as an error and counted in metrics.
+/// Consensus always uses CPU hashes.
+pub fn hash_batch_with_gpu_check(inputs: &[Vec<u8>]) -> Vec<[u8; 32]> {
+    // 1. Compute CPU hashes (ground truth)
+    let cpu_hashes: Vec<[u8; 32]> = inputs
+        .iter()
+        .map(|msg| *blake3::hash(msg).as_bytes())
+        .collect();
+
+    // 2. Check if GPU is enabled
+    if !is_gpu_hash_enabled() {
+        return cpu_hashes;
+    }
+
+    // 3. Try to create GPU backend and compute hashes
+    #[cfg(feature = "gpu-hash")]
+    {
+        // Use a cached backend (avoid reinitializing on every call)
+        // Note: GPU initialization is cached once per process. This is intentional:
+        // - GPU init is expensive (wgpu device enumeration, shader compilation)
+        // - Transient failures are rare in production (hardware doesn't appear mid-run)
+        // - For T90.0, this is diagnostic/experimental; reinit can be added in T90.x
+        // - Node restart is the recommended way to retry GPU initialization
+        static GPU_BACKEND: OnceLock<Option<GpuHashBackend>> = OnceLock::new();
+        
+        let backend = GPU_BACKEND.get_or_init(|| {
+            match GpuHashBackend::new() {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    log::warn!("T90.0: GPU backend init failed (cached): {}", e);
+                    None
+                }
+            }
+        });
+
+        if let Some(gpu) = backend {
+            match gpu.blake3_batch(inputs) {
+                Ok(gpu_hashes) => {
+                    // 4. Compare GPU vs CPU
+                    let mut mismatch_count = 0;
+                    for (i, (cpu, gpu)) in cpu_hashes.iter().zip(gpu_hashes.iter()).enumerate() {
+                        if cpu != gpu {
+                            mismatch_count += 1;
+                            log::error!(
+                                "T90.0: GPU/CPU hash mismatch at index {}: CPU={} GPU={}",
+                                i,
+                                hex::encode(cpu),
+                                hex::encode(gpu)
+                            );
+                        }
+                    }
+                    if mismatch_count > 0 {
+                        crate::metrics::gpu_hash_mismatch_inc_by(mismatch_count);
+                        log::error!(
+                            "T90.0: {} GPU/CPU hash mismatches detected (using CPU as canonical)",
+                            mismatch_count
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::error!("T90.0: GPU batch hash failed: {}", e);
+                    crate::metrics::gpu_hash_failures_inc();
+                }
+            }
+        }
+    }
+
+    // Always return CPU hashes (canonical for consensus)
+    cpu_hashes
+}
 
 /// The hash backend mode for the node.
 ///
@@ -569,5 +905,146 @@ mod tests {
                 mode
             );
         }
+    }
+
+    // =========================================================================
+    // T90.0: GPU Hash Plumbing tests
+    // =========================================================================
+
+    #[test]
+    fn t90_0_gpu_hash_backend_error_display() {
+        // T90.0: Test error display formatting
+        let err = GpuHashBackendError::DeviceUnavailable("no adapter".to_string());
+        assert!(err.to_string().contains("no adapter"));
+
+        let err = GpuHashBackendError::ComputeFailure("shader error".to_string());
+        assert!(err.to_string().contains("shader error"));
+
+        let err = GpuHashBackendError::FeatureDisabled;
+        assert!(err.to_string().contains("feature"));
+
+        let err = GpuHashBackendError::RuntimeDisabled;
+        assert!(err.to_string().contains("EEZO_GPU_HASH_ENABLED"));
+    }
+
+    #[test]
+    fn t90_0_is_gpu_hash_enabled_default_off() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        // Clear the env var to test default
+        std::env::remove_var("EEZO_GPU_HASH_ENABLED");
+        assert!(!is_gpu_hash_enabled());
+    }
+
+    #[test]
+    fn t90_0_is_gpu_hash_enabled_off_when_zero() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        std::env::set_var("EEZO_GPU_HASH_ENABLED", "0");
+        assert!(!is_gpu_hash_enabled());
+        std::env::remove_var("EEZO_GPU_HASH_ENABLED");
+    }
+
+    #[test]
+    fn t90_0_is_gpu_hash_enabled_on_when_one() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        std::env::set_var("EEZO_GPU_HASH_ENABLED", "1");
+        assert!(is_gpu_hash_enabled());
+        std::env::remove_var("EEZO_GPU_HASH_ENABLED");
+    }
+
+    #[test]
+    fn t90_0_hash_batch_with_gpu_check_returns_cpu_hashes() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        // Ensure GPU is disabled
+        std::env::remove_var("EEZO_GPU_HASH_ENABLED");
+
+        let inputs = vec![
+            b"message 1".to_vec(),
+            b"message 2".to_vec(),
+            b"".to_vec(),
+            vec![0u8; 1000],
+        ];
+
+        let results = hash_batch_with_gpu_check(&inputs);
+
+        // Verify each result matches CPU BLAKE3
+        for (input, result) in inputs.iter().zip(results.iter()) {
+            let expected = *blake3::hash(input).as_bytes();
+            assert_eq!(*result, expected);
+        }
+    }
+
+    #[test]
+    fn t90_0_hash_batch_empty_inputs() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        std::env::remove_var("EEZO_GPU_HASH_ENABLED");
+
+        let inputs: Vec<Vec<u8>> = vec![];
+        let results = hash_batch_with_gpu_check(&inputs);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn t90_0_gpu_hash_backend_new_returns_error_when_disabled() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        std::env::remove_var("EEZO_GPU_HASH_ENABLED");
+
+        let result = GpuHashBackend::new();
+        assert!(result.is_err());
+
+        // Check the error type
+        match result {
+            #[cfg(feature = "gpu-hash")]
+            Err(GpuHashBackendError::RuntimeDisabled) => (),
+            #[cfg(not(feature = "gpu-hash"))]
+            Err(GpuHashBackendError::FeatureDisabled) => (),
+            _ => panic!("Expected RuntimeDisabled or FeatureDisabled error"),
+        }
+    }
+
+    #[test]
+    fn t90_0_hash_batch_various_sizes() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        std::env::remove_var("EEZO_GPU_HASH_ENABLED");
+
+        // Test various input sizes including edge cases
+        let inputs = vec![
+            vec![],                  // empty
+            vec![0u8; 1],           // 1 byte
+            vec![0u8; 64],          // single BLAKE3 chunk
+            vec![0u8; 65],          // just over one chunk
+            vec![0u8; 1024],        // 1 KB
+        ];
+
+        let results = hash_batch_with_gpu_check(&inputs);
+        assert_eq!(results.len(), inputs.len());
+
+        for (input, result) in inputs.iter().zip(results.iter()) {
+            let expected = *blake3::hash(input).as_bytes();
+            assert_eq!(*result, expected, "Hash mismatch for input of size {}", input.len());
+        }
+    }
+
+    /// T90.0: Test that metrics are registered and can be accessed.
+    /// This test verifies that the T90.0 GPU hash metrics are properly defined
+    /// and can be registered without panicking.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn t90_0_metrics_registration() {
+        // Call the registration function - should not panic
+        crate::metrics::register_t90_gpu_hash_metrics();
+        
+        // The metrics should now be accessible via the global registry.
+        // We can't easily verify the metric values here without a full node,
+        // but we can verify the registration succeeds.
+        
+        // Set the enabled gauge to 0 (disabled) and verify it works
+        crate::metrics::gpu_hash_enabled_set(0);
+        
+        // These calls should not panic
+        crate::metrics::gpu_hash_jobs_inc();
+        crate::metrics::gpu_hash_failures_inc();
+        crate::metrics::gpu_hash_latency_observe(0.001);
+        crate::metrics::gpu_hash_bytes_inc(100);
+        crate::metrics::gpu_hash_mismatch_inc_by(1);
     }
 }

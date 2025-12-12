@@ -151,6 +151,8 @@ use crate::metrics::{
     register_t83_sigpool_metrics,
     // T87.x: Deep Performance Pass metrics
     register_t87_deep_perf_metrics,
+    // T90.0: GPU Hash Plumbing metrics
+    register_t90_gpu_hash_metrics,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -3213,6 +3215,25 @@ async fn main() -> anyhow::Result<()> {
 
         // T87.x: Deep Performance Pass metrics (wave build timing, aggressive mode)
         register_t87_deep_perf_metrics();
+
+        // T90.0: GPU Hash Plumbing metrics
+        register_t90_gpu_hash_metrics();
+        // T90.0: Initialize GPU hash enabled gauge and log status
+        // The gauge starts at 0 (GPU not yet initialized). When the first block
+        // is committed and hash_batch_with_gpu_check is called, GpuHashBackend::new()
+        // will update the gauge to 1 if GPU init succeeds.
+        {
+            use crate::gpu_hash::is_gpu_hash_enabled;
+            crate::metrics::gpu_hash_enabled_set(0);
+            if is_gpu_hash_enabled() {
+                log::info!(
+                    "T90.0: GPU hashing will be attempted (EEZO_GPU_HASH_ENABLED=1); \
+                     eezo_gpu_hash_enabled gauge will update on first use"
+                );
+            } else {
+                log::info!("T90.0: GPU hashing disabled (EEZO_GPU_HASH_ENABLED not set to 1)");
+            }
+        }
 
         // T76.11: Set consensus mode gauge based on current mode
         // 0 = Legacy, 1 = Hybrid (dag-hybrid with ordering), 2 = DAG
