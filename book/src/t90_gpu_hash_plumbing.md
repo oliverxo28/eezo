@@ -234,3 +234,52 @@ T90.0 is complete when:
 4. ✅ Consensus rules, block/header/tx formats unchanged
 5. ✅ GPU failures → graceful CPU fallback with logging/metrics
 6. ✅ Documentation added to the book
+
+## T90.0b Follow-up: Non-Persistence Mode Support
+
+### Issue
+
+The original T90.0 implementation placed the GPU hash diagnostic inside the persistence-guarded block,
+which meant it never ran in builds without the `persistence` feature enabled.
+
+### Fix
+
+T90.0b moves the GPU hash diagnostic outside the persistence guard by:
+
+1. Adding a helper function `run_t90_0b_gpu_hash_diagnostic()` that encapsulates the diagnostic logic
+2. Calling this function after every block commit, regardless of persistence feature
+3. The diagnostic runs after `compute_block_body_hash_with_gpu()` (T71.0) but before DAG shadow block sending
+
+### Verification
+
+To verify T90.0b is working in your non-persistence DAG+STM build:
+
+```bash
+# Build without persistence feature
+cargo build -p eezo-node --release \
+  --features "pq44-runtime,metrics,checkpoints,stm-exec,dag-consensus,gpu-hash"
+
+# Run with GPU hashing enabled
+EEZO_GPU_HASH_ENABLED=1 \
+EEZO_CONSENSUS_MODE=dag-primary \
+./target/release/eezo-node --genesis genesis.min.json --datadir /tmp/eezo-t90b
+
+# Before spam
+curl -s http://127.0.0.1:9898/metrics | rg '^eezo_gpu_hash'
+# Expected: eezo_gpu_hash_enabled 0, all other counters at 0
+
+# After spamming ~2000 transactions
+curl -s http://127.0.0.1:9898/metrics | rg '^eezo_gpu_hash'
+# Expected:
+# - If GPU init succeeded: eezo_gpu_hash_enabled 1, jobs_total > 0, bytes_total > 0
+# - If GPU init failed: eezo_gpu_hash_enabled 0, failures_total > 0
+```
+
+### Acceptance Criteria (T90.0b)
+
+1. ✅ GPU diagnostic runs in non-persistence builds when `EEZO_GPU_HASH_ENABLED=1`
+2. ✅ `eezo_gpu_hash_enabled` flips to 1 on first successful GPU use
+3. ✅ `eezo_gpu_hash_jobs_total` and `eezo_gpu_hash_bytes_total` increment on GPU success
+4. ✅ `eezo_gpu_hash_failures_total` increments on GPU failure
+5. ✅ `eezo_txs_included_total` continues to behave exactly as before
+6. ✅ When `EEZO_GPU_HASH_ENABLED=0` or unset, GPU diagnostic path is not invoked
