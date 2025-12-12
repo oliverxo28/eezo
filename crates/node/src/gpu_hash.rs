@@ -246,7 +246,11 @@ impl GpuHashBackend {
     pub fn blake3_single(&self, input: &[u8]) -> Result<[u8; 32], GpuHashBackendError> {
         let inputs = vec![input.to_vec()];
         let results = self.blake3_batch(&inputs)?;
-        Ok(results.into_iter().next().unwrap_or([0u8; 32]))
+        results.into_iter().next().ok_or_else(|| {
+            GpuHashBackendError::ComputeFailure(
+                "blake3_batch returned empty result for single input".to_string()
+            )
+        })
     }
 }
 
@@ -304,13 +308,18 @@ pub fn hash_batch_with_gpu_check(inputs: &[Vec<u8>]) -> Vec<[u8; 32]> {
     #[cfg(feature = "gpu-hash")]
     {
         // Use a cached backend (avoid reinitializing on every call)
+        // Note: GPU initialization is cached once per process. This is intentional:
+        // - GPU init is expensive (wgpu device enumeration, shader compilation)
+        // - Transient failures are rare in production (hardware doesn't appear mid-run)
+        // - For T90.0, this is diagnostic/experimental; reinit can be added in T90.x
+        // - Node restart is the recommended way to retry GPU initialization
         static GPU_BACKEND: OnceLock<Option<GpuHashBackend>> = OnceLock::new();
         
         let backend = GPU_BACKEND.get_or_init(|| {
             match GpuHashBackend::new() {
                 Ok(b) => Some(b),
                 Err(e) => {
-                    log::warn!("T90.0: GPU backend init failed: {}", e);
+                    log::warn!("T90.0: GPU backend init failed (cached): {}", e);
                     None
                 }
             }
