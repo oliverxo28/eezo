@@ -284,6 +284,7 @@ pub enum PersistenceMsg {
 
 /// Handle for sending messages to the persistence worker.
 #[cfg(feature = "persistence")]
+#[derive(Clone)]
 pub struct PersistenceWorkerHandle {
     /// Channel sender for persistence messages.
     sender: mpsc::Sender<PersistenceMsg>,
@@ -664,5 +665,129 @@ mod tests {
         // Default should be false when env var not set
         std::env::remove_var("EEZO_PERSIST_ASYNC");
         assert!(!is_async_persist_enabled());
+    }
+    
+    #[test]
+    fn test_committed_mem_head_multi_block_sequence() {
+        // Simulates committing multiple blocks in sequence
+        let head = CommittedMemHead::new();
+        head.set_enabled(true);
+        
+        let addr1 = Address([0x11; 20]);
+        let addr2 = Address([0x22; 20]);
+        let addr3 = Address([0x33; 20]);
+        
+        // Block 1: Create addr1 and addr2
+        let mut accounts1 = HashMap::new();
+        accounts1.insert(addr1, Account { balance: 1000, nonce: 0 });
+        accounts1.insert(addr2, Account { balance: 2000, nonce: 0 });
+        head.apply_write_set(&BlockWriteSet {
+            height: 1,
+            accounts: accounts1,
+            supply: Supply::default(),
+            write_snapshot: false,
+        });
+        
+        // Block 2: Modify addr1, create addr3
+        let mut accounts2 = HashMap::new();
+        accounts2.insert(addr1, Account { balance: 900, nonce: 1 }); // spent 100
+        accounts2.insert(addr3, Account { balance: 100, nonce: 0 }); // received 100
+        head.apply_write_set(&BlockWriteSet {
+            height: 2,
+            accounts: accounts2,
+            supply: Supply::default(),
+            write_snapshot: false,
+        });
+        
+        // Block 3: Modify addr2 and addr3
+        let mut accounts3 = HashMap::new();
+        accounts3.insert(addr2, Account { balance: 1500, nonce: 1 }); // spent 500
+        accounts3.insert(addr3, Account { balance: 600, nonce: 1 }); // received 500
+        head.apply_write_set(&BlockWriteSet {
+            height: 3,
+            accounts: accounts3,
+            supply: Supply::default(),
+            write_snapshot: false,
+        });
+        
+        // Verify final state
+        assert_eq!(head.head_height(), 3);
+        assert_eq!(head.get_account(&addr1).unwrap().balance, 900);
+        assert_eq!(head.get_account(&addr1).unwrap().nonce, 1);
+        assert_eq!(head.get_account(&addr2).unwrap().balance, 1500);
+        assert_eq!(head.get_account(&addr3).unwrap().balance, 600);
+        
+        // Simulate persistence catching up
+        head.mark_persisted(2);
+        head.prune();
+        
+        // Accounts modified in block 3 should still be visible
+        assert!(head.get_account(&addr2).is_some());
+        assert!(head.get_account(&addr3).is_some());
+        // addr1 was last modified in block 2, so it should be pruned
+        assert!(head.get_account(&addr1).is_none());
+        
+        // Final prune
+        head.mark_persisted(3);
+        head.prune();
+        assert_eq!(head.account_count(), 0);
+    }
+    
+    #[test]
+    fn test_block_write_set_construction() {
+        // Test that BlockWriteSet can be properly constructed
+        let mut accounts = HashMap::new();
+        accounts.insert(Address([1u8; 20]), Account { balance: 100, nonce: 5 });
+        
+        let write_set = BlockWriteSet {
+            height: 42,
+            accounts,
+            supply: Supply::default(),
+            write_snapshot: true,
+        };
+        
+        assert_eq!(write_set.height, 42);
+        assert!(write_set.write_snapshot);
+        assert_eq!(write_set.accounts.len(), 1);
+    }
+    
+    #[test]
+    fn test_committed_mem_head_supply_tracking() {
+        let head = CommittedMemHead::new();
+        head.set_enabled(true);
+        
+        // Block 1: Initial supply
+        let supply1 = Supply {
+            native_mint_total: 1_000_000,
+            bridge_mint_total: 0,
+            burn_total: 0,
+        };
+        head.apply_write_set(&BlockWriteSet {
+            height: 1,
+            accounts: HashMap::new(),
+            supply: supply1.clone(),
+            write_snapshot: false,
+        });
+        
+        let s1 = head.get_supply().unwrap();
+        assert_eq!(s1.native_mint_total, 1_000_000);
+        
+        // Block 2: More minting
+        let supply2 = Supply {
+            native_mint_total: 1_100_000,
+            bridge_mint_total: 50_000,
+            burn_total: 10_000,
+        };
+        head.apply_write_set(&BlockWriteSet {
+            height: 2,
+            accounts: HashMap::new(),
+            supply: supply2.clone(),
+            write_snapshot: false,
+        });
+        
+        let s2 = head.get_supply().unwrap();
+        assert_eq!(s2.native_mint_total, 1_100_000);
+        assert_eq!(s2.bridge_mint_total, 50_000);
+        assert_eq!(s2.burn_total, 10_000);
     }
 }

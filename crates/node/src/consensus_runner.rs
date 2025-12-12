@@ -358,7 +358,13 @@ use eezo_ledger::persistence::StateSnapshot;
 #[cfg(feature = "persistence")]
 use crate::persistence_worker::{
     is_async_persist_enabled, log_async_persist_status,
-    CommittedMemHead, PersistenceWorker, PersistenceWorkerHandle,
+    BlockWriteSet, CommittedMemHead, PersistenceWorker, PersistenceWorkerHandle,
+};
+
+// T83.3: Block execution pipelining imports
+use crate::block_pipeline::{
+    is_pipeline_enabled, log_pipeline_status,
+    BlockPipeline, PreparedBlock,
 };
 
 // --------------------
@@ -1380,11 +1386,16 @@ impl CoreRunnerHandle {
         } else {
             None
         };
-        // NOTE: mem_head and async_persist_enabled will be used in block commit
-        // path when the full integration is complete. For now they are stored
-        // in the struct for future use.
-        let _mem_head_c = mem_head.clone();
-        let _async_persist_enabled_c = async_persist_enabled;
+        // T83.2: Clone async persistence handles for use in spawned task
+        let mem_head_c = mem_head.clone();
+        let async_persist_enabled_c = async_persist_enabled;
+        // Clone the persist_worker for use in the spawned task
+        let persist_worker_c = persist_worker.clone();
+
+        // T83.3: Create block execution pipeline
+        let pipeline_enabled = is_pipeline_enabled();
+        let pipeline = BlockPipeline::new();
+        let pipeline_state = pipeline.state();
 
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
@@ -1397,13 +1408,16 @@ impl CoreRunnerHandle {
                 crate::metrics::register_t77_dag_ordering_latency_metrics();
             }
             
+            // T83.3: Log pipeline status
+            log_pipeline_status();
+            
             // T81.1: Log consensus mode at startup (persistence variant)
             #[cfg(feature = "dag-consensus")]
             {
                 let dag_ordering_enabled = dag_ordering_enabled_from_env();
                 log::info!(
-                    "consensus: mode={:?}, dag_ordering_enabled={}",
-                    hybrid_mode_cfg, dag_ordering_enabled
+                    "consensus: mode={:?}, dag_ordering_enabled={}, pipeline_enabled={}",
+                    hybrid_mode_cfg, dag_ordering_enabled, pipeline_enabled
                 );
             }
             
@@ -2166,36 +2180,115 @@ impl CoreRunnerHandle {
                             crate::metrics::EEZO_BLOCK_HEIGHT.set(height as i64);
                         }
 
+                        // T83.3: Mark block as committed in pipeline
+                        // This allows the pipeline to discard stale prepared blocks
+                        // and trigger preparation of the next block
+                        {
+                            let mut state = pipeline_state.lock();
+                            state.mark_committed(height);
+                        }
+
                         // capture the committed header hash once, reuse later for checkpoint
                         let mut last_commit_hash_opt: Option<[u8;32]> = None;
                         if log_every == 0 || height % log_every == 0 {
                             log::info!("consensus: committed height={}", height);
                         }
-                        // --- FIX: Persist FULL BLOCK ---
-                        #[cfg(feature = "persistence")] // Already guarded by function cfg
+                        // --- T83.2: Persist FULL BLOCK (sync or async) ---
+                        #[cfg(feature = "persistence")]
                         if let Some(ref db_handle) = db_c {
-
-                            // --- Start Replacement ---
-                            // Use blk_opt derived above
                             if let Some(ref blk) = blk_opt {
-                                // We need hdr and txs for matching the original logic's calls
                                 let hdr = &blk.header;
 
-                                if hdr.height == height { // Sanity check height
-
-                                    // 1. Block is already constructed as blk
-
+                                if hdr.height == height {
                                     last_commit_hash_opt = Some(hdr.hash());
-
-                                    // 2. Save the full block AND header (passing blk as the block data)
-                                    if let Err(e) = db_handle.put_header_and_block(height, hdr, blk) {
-                                        log::error!("❌ runner: failed to persist block at h={}: {}", height, e);
+                                    
+                                    // T83.2: Check if async persistence is enabled
+                                    if async_persist_enabled_c {
+                                        // --- ASYNC PATH ---
+                                        // 1. Apply block state changes to in-memory head
+                                        // (Note: The actual state is already in node.accounts/supply,
+                                        // we track modified accounts in mem_head for read-after-write)
+                                        {
+                                            let node_guard = node_c.lock().await;
+                                            // Build write-set from current committed state
+                                            // In a full implementation, we'd track only changed accounts
+                                            // For now, we apply the full accounts to mem_head
+                                            let write_set = BlockWriteSet {
+                                                height,
+                                                accounts: node_guard.accounts.iter()
+                                                    .map(|(addr, acct)| (*addr, acct.clone()))
+                                                    .collect(),
+                                                supply: node_guard.supply.clone(),
+                                                write_snapshot: false, // will handle snapshots separately
+                                            };
+                                            mem_head_c.apply_write_set(&write_set);
+                                        }
+                                        
+                                        // 2. Determine if we need a snapshot at this height
+                                        let snapshot_interval = std::env::var("EEZO_SNAPSHOT_INTERVAL")
+                                            .ok()
+                                            .and_then(|s| s.parse::<u64>().ok())
+                                            .or_else(|| {
+                                                std::env::var("EEZO_CHECKPOINT_EVERY")
+                                                    .ok()
+                                                    .and_then(|s| s.parse::<u64>().ok())
+                                            })
+                                            .unwrap_or(1000);
+                                        
+                                        let snap_opt = if snapshot_interval > 0 && height % snapshot_interval == 0 {
+                                            let node_guard = node_c.lock().await;
+                                            Some(StateSnapshot {
+                                                height: node_guard.height,
+                                                accounts: node_guard.accounts.clone(),
+                                                supply: node_guard.supply.clone(),
+                                                state_root: [0u8; 32],
+                                                bridge: None,
+                                                #[cfg(feature = "eth-ssz")]
+                                                codec_version: 1,
+                                                #[cfg(feature = "eth-ssz")]
+                                                state_root_v2: [0u8; 32],
+                                            })
+                                        } else {
+                                            None
+                                        };
+                                        
+                                        // 3. Enqueue to persistence worker
+                                        if let Some(ref pw) = persist_worker_c {
+                                            if let Err(e) = pw.enqueue_block(
+                                                height,
+                                                hdr.clone(),
+                                                blk.clone(),
+                                                snap_opt,
+                                            ).await {
+                                                // Channel closed - fall back to sync write
+                                                log::error!(
+                                                    "❌ runner: async persist enqueue failed at h={}: {}, falling back to sync",
+                                                    height, e
+                                                );
+                                                // Fallback to synchronous write
+                                                if let Err(e2) = db_handle.put_header_and_block(height, hdr, blk) {
+                                                    log::error!("❌ runner: sync fallback persist failed at h={}: {}", height, e2);
+                                                }
+                                            } else {
+                                                log::debug!("runner: enqueued block h={} for async persistence", height);
+                                            }
+                                        } else {
+                                            // Worker not available, fallback to sync
+                                            log::warn!("runner: persist_worker not available at h={}, using sync write", height);
+                                            if let Err(e) = db_handle.put_header_and_block(height, hdr, blk) {
+                                                log::error!("❌ runner: failed to persist block at h={}: {}", height, e);
+                                            }
+                                        }
                                     } else {
-                                        log::debug!("runner: persisted block at h={}", height);
+                                        // --- SYNC PATH (original behavior) ---
+                                        if let Err(e) = db_handle.put_header_and_block(height, hdr, blk) {
+                                            log::error!("❌ runner: failed to persist block at h={}: {}", height, e);
+                                        } else {
+                                            log::debug!("runner: persisted block at h={}", height);
+                                        }
                                     }
                                 } else {
                                     log::warn!(
-
                                         "runner: header height mismatch (commit={}, header={}) at h={}",
                                         height, hdr.height, height
                                     );
@@ -2203,59 +2296,48 @@ impl CoreRunnerHandle {
                             } else {
                                 log::warn!("runner: last_committed_header() or last_committed_txs() is None at h={} (unexpected)", height);
                             }
-                            // --- End Replacement ---
                         }
-                        // --- END FIX ---
+                        // --- END T83.2 Block Persistence ---
 
 
-                        // --- Phase 1 Snapshot Writing Logic (as per teacher patch) ---
+                        // --- Phase 1 Snapshot Writing Logic (sync mode only) ---
+                        // T83.2: Skip this section if async mode is enabled (snapshots handled above)
+                        #[cfg(feature = "persistence")]
+                        if !async_persist_enabled_c {
+                            if let Some(ref db_handle) = db_c {
+                                let snapshot_interval = std::env::var("EEZO_SNAPSHOT_INTERVAL")
+                                    .ok()
+                                    .and_then(|s| s.parse::<u64>().ok())
+                                    .or_else(|| {
+                                        std::env::var("EEZO_CHECKPOINT_EVERY")
+                                            .ok()
+                                            .and_then(|s| s.parse::<u64>().ok())
+                                    })
+                                    .unwrap_or(1000);
 
-                        // ── PHASE 1: Write a state snapshot at the configured interval ───────────
-                        #[cfg(feature = "persistence")] // Already guarded by function cfg
-                        if let Some(ref db_handle) = db_c { // Use the cloned db handle
+                                if snapshot_interval > 0 && height % snapshot_interval == 0 {
+                                    log::debug!("runner: h={} matches snapshot interval {}", height, snapshot_interval);
+                                    let node_guard = node_c.lock().await;
+                                    let snap = StateSnapshot {
+                                        height: node_guard.height,
+                                        accounts: node_guard.accounts.clone(),
+                                        supply: node_guard.supply.clone(),
+                                        state_root: [0u8; 32],
+                                        bridge: None,
+                                        #[cfg(feature = "eth-ssz")]
+                                        codec_version: 1,
+                                        #[cfg(feature = "eth-ssz")]
+                                        state_root_v2: [0u8; 32],
+                                    };
+                                    drop(node_guard);
 
-                            let snapshot_interval = std::env::var("EEZO_SNAPSHOT_INTERVAL")
-                                .ok()
-                                .and_then(|s| s.parse::<u64>().ok())
-
-                                .or_else(|| {
-                                    std::env::var("EEZO_CHECKPOINT_EVERY")
-                                        .ok()
-
-                                        .and_then(|s| s.parse::<u64>().ok())
-                                })
-
-                                .unwrap_or(1000); // Default interval
-
-                            if snapshot_interval > 0 && height % snapshot_interval == 0 {
-                                log::debug!("runner: h={} matches snapshot interval {}", height, snapshot_interval);
-                                // Lock only to read the committed state; drop lock before I/O.
-                                let node_guard = node_c.lock().await;
-                                let snap = StateSnapshot {
-                                    height: node_guard.height,             // committed height
-                                    accounts: node_guard.accounts.clone(), // clone committed state
-
-                                    supply:   node_guard.supply.clone(),
-                                    state_root: [0u8; 32],                 // Phase 1: zero OK, could use prev_hash if needed later
-                                    bridge: None,                          // TODO: Clone bridge state
-
-                                    #[cfg(feature = "eth-ssz")]
-                                    codec_version: 1,
-
-                                    #[cfg(feature = "eth-ssz")]
-                                    state_root_v2: [0u8; 32],              // Phase 1: zero → reader falls back
-                                };
-                                drop(node_guard); // Release lock before DB write
-
-                                match db_handle.put_state_snapshot(&snap) {
-                                    Ok(_)  => log::info!("✅ runner: wrote state snapshot at h={}", height),
-
-                                    Err(e) => log::error!("❌ runner: snapshot write failed at h={}: {}", height, e),
+                                    match db_handle.put_state_snapshot(&snap) {
+                                        Ok(_) => log::info!("✅ runner: wrote state snapshot at h={}", height),
+                                        Err(e) => log::error!("❌ runner: snapshot write failed at h={}: {}", height, e),
+                                    }
                                 }
                             }
-
                         }
-                        // ──────────────────────────────────────────────────────────────────────────
                         // --- END Phase 1 Snapshot Logic ---
 
 
