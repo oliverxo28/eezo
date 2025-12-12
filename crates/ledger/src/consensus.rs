@@ -35,7 +35,6 @@ use thiserror::Error;
 use crate::Address;
 
 // T85.0: EEZO consensus is DAG-only. HotStuff code has been removed.
-use crate::block::BlockId;
 use std::sync::Arc;
 
 #[inline]

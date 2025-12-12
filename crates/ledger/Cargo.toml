@@ -133,10 +133,7 @@ name = "block_validate_apply"
 path = "tests/block_validate_apply.rs"
 required-features = ["pq44-runtime"]
 
-[[test]]
-name = "double_sign"
-path = "tests/double_sign.rs"
-required-features = ["pq44-runtime"]
+# T85.0: double_sign test removed (HotStuff code deleted)
 
 [[test]]
 name = "mempool_admit"

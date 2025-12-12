@@ -2,8 +2,8 @@
 
 use once_cell::sync::Lazy;
 use prometheus::{
-    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
-    register_int_gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_histogram, register_histogram_vec, register_int_counter,
+    register_int_gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntGauge,
 };
 
 //
