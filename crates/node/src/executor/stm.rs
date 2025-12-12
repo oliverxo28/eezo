@@ -42,7 +42,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use rayon::prelude::*;
 
 use eezo_ledger::consensus::SingleNode;
-use eezo_ledger::{Address, Account, Accounts, Supply, SignedTx, Block};
+use eezo_ledger::{Address, Account, Accounts, Supply, SignedTx, Block, AccountArena};
 use eezo_ledger::block::{BlockHeader, txs_root};
 use eezo_ledger::tx::{apply_tx, validate_tx_stateful, TxStateError};
 use eezo_ledger::sender_from_pubkey_first20;
@@ -544,6 +544,73 @@ impl TxContext {
     fn reset_for_retry(&mut self) {
         self.read_set.clear();
         self.write_set.clear();
+        self.spec_result = None;
+        self.attempt += 1;
+    }
+}
+
+// =============================================================================
+// T87.4: Arena-Based Transaction Execution Types
+// =============================================================================
+
+/// T87.4: Arena-based transaction execution context.
+///
+/// Instead of storing Address values, this stores u32 indices into an AccountArena.
+/// All address lookups are resolved once at block start, and during execution
+/// all state access is done via Vec indexing for better cache locality.
+#[derive(Clone, Debug)]
+struct ArenaTxContext {
+    /// Transaction index in the block's tx list
+    tx_idx: usize,
+    /// Sender's index in the arena
+    sender_idx: u32,
+    /// Receiver's index in the arena
+    receiver_idx: u32,
+    /// Current retry attempt (0-based)
+    attempt: u16,
+    /// Current status
+    status: TxStatus,
+    /// Speculative result (only set if status == Committed)
+    spec_result: Option<ArenaSpeculativeResult>,
+}
+
+/// T87.4: Arena-based speculative execution result.
+///
+/// Like SpeculativeResult, but stores indices instead of addresses.
+#[derive(Clone, Debug)]
+struct ArenaSpeculativeResult {
+    /// Sender's index in the arena
+    sender_idx: u32,
+    /// Receiver's index in the arena
+    receiver_idx: u32,
+    /// New sender account state after tx
+    sender_account: Account,
+    /// New receiver account state after tx
+    receiver_account: Account,
+    /// Fee burned
+    fee: u128,
+}
+
+impl ArenaTxContext {
+    /// Create a new ArenaTxContext from an AnalyzedTx and AccountArena.
+    ///
+    /// Resolves sender and receiver addresses to arena indices.
+    fn from_analyzed(analyzed: &AnalyzedTx, arena: &mut AccountArena, base: &Accounts) -> Self {
+        let sender_idx = arena.ensure_account(&analyzed.sender, base);
+        let receiver_idx = arena.ensure_account(&analyzed.tx.core.to, base);
+        
+        Self {
+            tx_idx: analyzed.tx_idx,
+            sender_idx,
+            receiver_idx,
+            attempt: 0,
+            status: TxStatus::NeedsRetry,
+            spec_result: None,
+        }
+    }
+
+    /// Reset for retry in next wave.
+    fn reset_for_retry(&mut self) {
         self.spec_result = None;
         self.attempt += 1;
     }
@@ -1446,6 +1513,343 @@ impl StmExecutor {
         (contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block)
     }
 
+    /// T87.4: Execute all transactions using arena-indexed STM kernel.
+    ///
+    /// This version uses:
+    /// - `AccountArena`: All touched accounts stored contiguously in a Vec
+    /// - `ArenaTxContext`: Indices instead of addresses for O(1) access
+    /// - Same conflict detection semantics as legacy kernel
+    ///
+    /// The arena is built once at block start by pre-loading all touched accounts.
+    /// During execution, all state access is done via Vec indexing (cache-friendly).
+    ///
+    /// Returns (committed_txs, waves, conflicts, retries, aborted)
+    fn execute_stm_with_arena(
+        &self,
+        txs: &[SignedTx],
+        accounts: &mut Accounts,
+        supply: &mut Supply,
+    ) -> (Vec<SignedTx>, u64, u64, u64, u64) {
+        let n = txs.len();
+        if n == 0 {
+            return (Vec::new(), 0, 0, 0, 0);
+        }
+
+        // T87.4: Measure arena build time
+        let arena_build_start = std::time::Instant::now();
+
+        // Pre-analyze all transactions
+        let analyzed_txs = analyze_batch(txs);
+        
+        // Build arena with all touched accounts
+        let base_accounts = accounts.clone();
+        let mut arena = AccountArena::with_capacity(analyzed_txs.len() * 2);
+        
+        // Build ArenaTxContext for each analyzed tx
+        let mut arena_contexts: Vec<ArenaTxContext> = analyzed_txs
+            .iter()
+            .map(|atx| ArenaTxContext::from_analyzed(atx, &mut arena, &base_accounts))
+            .collect();
+        
+        // Map from tx_idx to arena_contexts index (for failed analysis txs)
+        let idx_to_arena: HashMap<usize, usize> = arena_contexts
+            .iter()
+            .enumerate()
+            .map(|(i, ctx)| (ctx.tx_idx, i))
+            .collect();
+
+        #[cfg(feature = "metrics")]
+        {
+            let arena_build_secs = arena_build_start.elapsed().as_secs_f64();
+            crate::metrics::exec_stm_observe_arena_build_seconds(arena_build_secs);
+            crate::metrics::exec_stm_arena_accounts_inc(arena.len() as u64);
+        }
+
+        // STM metrics tracking
+        let mut waves_this_block: u64 = 0;
+        let mut conflicts_this_block: u64 = 0;
+        let mut retries_this_block: u64 = 0;
+        let mut aborted_this_block: u64 = 0;
+
+        // Track which txs have been finally committed
+        let mut finally_committed: HashSet<usize> = HashSet::new();
+
+        // Wave-based execution loop
+        loop {
+            waves_this_block += 1;
+            log::debug!("STM(arena): starting wave {}", waves_this_block);
+
+            // Find transactions that need execution in this wave
+            let pending: Vec<(usize, u16)> = arena_contexts
+                .iter()
+                .filter(|c| c.status == TxStatus::NeedsRetry)
+                .map(|c| (c.tx_idx, c.attempt))
+                .collect();
+
+            if pending.is_empty() {
+                break;
+            }
+
+            // Check for max retries before execution
+            for &(tx_idx, attempt) in &pending {
+                if attempt >= self.config.max_retries as u16 {
+                    if let Some(&arena_idx) = idx_to_arena.get(&tx_idx) {
+                        arena_contexts[arena_idx].status = TxStatus::Aborted;
+                        log::warn!("STM(arena): tx {} aborted after {} retries", tx_idx, attempt);
+                        aborted_this_block += 1;
+                    }
+                }
+            }
+            
+            // Filter out aborted txs
+            let pending: Vec<(usize, u16)> = pending
+                .into_iter()
+                .filter(|&(tx_idx, _)| {
+                    idx_to_arena.get(&tx_idx)
+                        .map(|&idx| arena_contexts[idx].status == TxStatus::NeedsRetry)
+                        .unwrap_or(false)
+                })
+                .collect();
+            
+            if pending.is_empty() {
+                break;
+            }
+
+            // Count retries
+            for &(_, attempt) in &pending {
+                if attempt > 0 {
+                    retries_this_block += 1;
+                }
+            }
+
+            // Take a snapshot of the arena for speculative execution
+            let arena_snapshot = arena.snapshot();
+
+            // Execute transactions speculatively in parallel
+            let wave_results: Vec<(usize, ArenaTxContext)> = pending
+                .par_iter()
+                .filter_map(|&(tx_idx, attempt)| {
+                    idx_to_arena.get(&tx_idx).map(|&arena_idx| {
+                        let ctx = &arena_contexts[arena_idx];
+                        let result = Self::execute_tx_with_arena(
+                            ctx,
+                            &analyzed_txs.iter().find(|a| a.tx_idx == tx_idx).unwrap().tx,
+                            attempt,
+                            &arena_snapshot,
+                        );
+                        (arena_idx, result)
+                    })
+                })
+                .collect();
+
+            // Update contexts with parallel results
+            for (arena_idx, result) in wave_results {
+                arena_contexts[arena_idx] = result;
+            }
+
+            // Build sorted pending indices for conflict detection
+            let mut pending_indices: Vec<usize> = pending.iter().map(|&(idx, _)| idx).collect();
+            pending_indices.sort();
+
+            // T87.4: Detect conflicts using arena-based contexts
+            let wave_build_start = std::time::Instant::now();
+            let conflicts = Self::detect_conflicts_arena(&arena_contexts, &pending_indices, &idx_to_arena);
+            #[cfg(feature = "metrics")]
+            {
+                let wave_build_secs = wave_build_start.elapsed().as_secs_f64();
+                crate::metrics::exec_stm_observe_wave_build_seconds(wave_build_secs);
+            }
+            let conflict_set: HashSet<usize> = conflicts.into_iter().collect();
+            conflicts_this_block += conflict_set.len() as u64;
+
+            // Process results in tx index order and apply to arena
+            for tx_idx in pending_indices {
+                if let Some(&arena_idx) = idx_to_arena.get(&tx_idx) {
+                    let ctx = &mut arena_contexts[arena_idx];
+                    
+                    if ctx.status != TxStatus::Committed {
+                        continue;
+                    }
+
+                    if conflict_set.contains(&tx_idx) {
+                        ctx.status = TxStatus::NeedsRetry;
+                        ctx.attempt += 1;
+                        ctx.spec_result = None;
+                        log::debug!("STM(arena): tx {} conflicts, scheduling retry (attempt {})", tx_idx, ctx.attempt);
+                    } else {
+                        // Apply speculative result to arena
+                        if let Some(ref spec) = ctx.spec_result {
+                            arena.set_account(spec.sender_idx, spec.sender_account.clone());
+                            arena.set_account(spec.receiver_idx, spec.receiver_account.clone());
+                            arena.record_fee(spec.fee);
+                        }
+                        
+                        finally_committed.insert(tx_idx);
+                    }
+                }
+            }
+
+            // Break if no more pending txs
+            let still_pending = arena_contexts
+                .iter()
+                .filter(|c| c.status == TxStatus::NeedsRetry)
+                .count();
+            if still_pending == 0 {
+                break;
+            }
+        }
+
+        // Apply arena changes to actual state
+        arena.apply_to_state(accounts, supply);
+
+        // Build committed_txs
+        let mut committed_indices: Vec<usize> = finally_committed.into_iter().collect();
+        committed_indices.sort();
+        let committed_txs: Vec<SignedTx> = committed_indices
+            .into_iter()
+            .map(|idx| txs[idx].clone())
+            .collect();
+
+        // Emit wave-building metrics
+        #[cfg(feature = "metrics")]
+        {
+            crate::metrics::exec_stm_waves_built_inc(waves_this_block);
+        }
+
+        log::debug!(
+            "STM(arena): completed {} waves, {} committed, {} failed/aborted, {} conflicts, {} retries, arena_size={}",
+            waves_this_block,
+            committed_txs.len(),
+            n - committed_txs.len(),
+            conflicts_this_block,
+            retries_this_block,
+            arena.len()
+        );
+
+        (committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block)
+    }
+
+    /// T87.4: Execute a single transaction speculatively using arena indices.
+    fn execute_tx_with_arena(
+        ctx: &ArenaTxContext,
+        tx: &Arc<SignedTx>,
+        attempt: u16,
+        arena: &AccountArena,
+    ) -> ArenaTxContext {
+        let mut new_ctx = ArenaTxContext {
+            tx_idx: ctx.tx_idx,
+            sender_idx: ctx.sender_idx,
+            receiver_idx: ctx.receiver_idx,
+            attempt,
+            status: TxStatus::NeedsRetry,
+            spec_result: None,
+        };
+        
+        // Read accounts from arena (O(1) Vec access)
+        let sender_acc = arena.account(ctx.sender_idx);
+        let receiver_acc = arena.account(ctx.receiver_idx);
+        
+        // Validate nonce and balance
+        let core = &tx.core;
+        if sender_acc.nonce != core.nonce {
+            // Temporary failure - may succeed after earlier txs commit
+            new_ctx.status = TxStatus::NeedsRetry;
+            return new_ctx;
+        }
+        
+        let need = core.amount.saturating_add(core.fee);
+        if sender_acc.balance < need {
+            new_ctx.status = TxStatus::NeedsRetry;
+            return new_ctx;
+        }
+        
+        // Compute new states
+        let mut new_sender = sender_acc.clone();
+        new_sender.balance = new_sender.balance.saturating_sub(need);
+        new_sender.nonce = new_sender.nonce.saturating_add(1);
+        
+        let mut new_receiver = receiver_acc.clone();
+        new_receiver.balance = new_receiver.balance.saturating_add(core.amount);
+        
+        new_ctx.spec_result = Some(ArenaSpeculativeResult {
+            sender_idx: ctx.sender_idx,
+            receiver_idx: ctx.receiver_idx,
+            sender_account: new_sender,
+            receiver_account: new_receiver,
+            fee: core.fee,
+        });
+        
+        new_ctx.status = TxStatus::Committed;
+        new_ctx
+    }
+
+    /// T87.4: Detect conflicts for arena-based execution.
+    ///
+    /// Uses the same conflict semantics as legacy kernel but with arena indices.
+    fn detect_conflicts_arena(
+        contexts: &[ArenaTxContext],
+        pending_indices: &[usize],
+        idx_to_arena: &HashMap<usize, usize>,
+    ) -> Vec<usize> {
+        let mut conflicts = Vec::new();
+        
+        // Track committed writes by arena index -> tx_idx
+        let mut committed_writes: HashMap<u32, usize> = HashMap::new();
+
+        // Process in tx index order for determinism
+        let mut sorted_pending: Vec<usize> = pending_indices.to_vec();
+        sorted_pending.sort();
+
+        let mut wave_size = 0usize;
+
+        for &tx_idx in &sorted_pending {
+            let arena_idx = match idx_to_arena.get(&tx_idx) {
+                Some(&idx) => idx,
+                None => continue,
+            };
+            let ctx = &contexts[arena_idx];
+            
+            if ctx.status != TxStatus::Committed {
+                continue;
+            }
+
+            let mut has_conflict = false;
+
+            // Check read-after-write conflicts: did we read something written by an earlier tx?
+            // Sender reads their own account
+            if let Some(&writer_idx) = committed_writes.get(&ctx.sender_idx) {
+                if writer_idx < tx_idx {
+                    has_conflict = true;
+                }
+            }
+            // Receiver reads its account
+            if !has_conflict {
+                if let Some(&writer_idx) = committed_writes.get(&ctx.receiver_idx) {
+                    if writer_idx < tx_idx {
+                        has_conflict = true;
+                    }
+                }
+            }
+
+            if has_conflict {
+                conflicts.push(tx_idx);
+            } else {
+                // Record our writes for conflict detection with later txs
+                committed_writes.insert(ctx.sender_idx, tx_idx);
+                committed_writes.insert(ctx.receiver_idx, tx_idx);
+                wave_size += 1;
+            }
+        }
+
+        // Emit wave size metric
+        #[cfg(feature = "metrics")]
+        {
+            crate::metrics::exec_stm_observe_wave_size(wave_size);
+        }
+
+        conflicts
+    }
+
     /// T82.4: Detect conflicts in a wave using pre-screening optimization.
     ///
     /// This method uses a two-phase approach:
@@ -1605,12 +2009,17 @@ impl Executor for StmExecutor {
     /// - State changes tracked in overlay (no full state clone per wave)
     /// - Overlay applied to base state at block commit
     ///
+    /// T87.4: When EEZO_STM_KERNEL_MODE=arena, uses arena-indexed execution:
+    /// - All touched accounts stored contiguously in a Vec
+    /// - Access via indices instead of HashMap lookups
+    /// - Same semantics, better cache locality
+    ///
     /// The implementation:
     /// 1. Takes a read-only base snapshot of accounts
     /// 2. Analyzes all txs to build AnalyzedTx with conflict metadata
-    /// 3. Runs STM scheduling loop (wave-based execution with overlay)
+    /// 3. Runs STM scheduling loop (wave-based execution)
     /// 4. Detects and resolves conflicts deterministically
-    /// 5. Applies overlay to base state at block commit
+    /// 5. Applies changes to base state at block commit
     /// 6. Builds the Block from committed transactions
     fn execute_block(
         &self,
@@ -1639,10 +2048,20 @@ impl Executor for StmExecutor {
         let mut accounts = node.accounts.clone();
         let mut supply = node.supply.clone();
 
-        // T82.1: Execute transactions using STM with overlay
-        // This uses AnalyzedTx and BlockOverlay for efficient execution
-        let (_contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block) = 
-            self.execute_stm_with_overlay(&input.txs, &mut accounts, &mut supply);
+        // T87.4: Select kernel based on configuration
+        let (committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block) = 
+            match self.config.kernel_mode {
+                StmKernelMode::Arena => {
+                    // T87.4: Use arena-indexed kernel for better cache locality
+                    self.execute_stm_with_arena(&input.txs, &mut accounts, &mut supply)
+                }
+                StmKernelMode::Legacy => {
+                    // T82.1: Use overlay-based kernel (default)
+                    let (_contexts, txs, waves, conflicts, retries, aborted) = 
+                        self.execute_stm_with_overlay(&input.txs, &mut accounts, &mut supply);
+                    (txs, waves, conflicts, retries, aborted)
+                }
+            };
         let tx_count = committed_txs.len();
 
         // T73.4: Emit STM-specific metrics (legacy eezo_stm_* prefix)
@@ -1677,8 +2096,10 @@ impl Executor for StmExecutor {
         let block = Block { header, txs: committed_txs };
 
         let elapsed = start.elapsed();
+        let kernel_mode_str = if self.config.kernel_mode.is_arena() { "arena" } else { "overlay" };
         log::info!(
-            "STM: executed {} txs ({} committed) in {:?}, waves={}, conflicts={}, retries={}, aborted={}",
+            "STM({}): executed {} txs ({} committed) in {:?}, waves={}, conflicts={}, retries={}, aborted={}",
+            kernel_mode_str,
             input.txs.len(),
             tx_count,
             elapsed,

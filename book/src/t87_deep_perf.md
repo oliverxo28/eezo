@@ -325,13 +325,71 @@ Date: [TODO]
 
 ---
 
+## T87.4: Arena-Indexed STM Kernel
+
+T87.4 introduces an alternative STM kernel implementation that uses cache-friendly contiguous storage for better performance.
+
+### Overview
+
+The arena kernel replaces HashMap-based account lookups with Vec indexing:
+
+1. At block start, all touched accounts are loaded into a contiguous `Vec<Account>`
+2. Each `Address` is mapped to a `u32` index
+3. During execution, all state access is done via Vec indexing (O(1), cache-friendly)
+
+### Configuration
+
+```bash
+# Enable arena kernel (opt-in)
+export EEZO_STM_KERNEL_MODE=arena
+
+# Disable (default)
+export EEZO_STM_KERNEL_MODE=legacy
+# or simply unset the variable
+```
+
+### Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `eezo_exec_stm_kernel_mode` | Gauge | Current kernel mode: 0=legacy, 1=arena |
+| `eezo_exec_stm_arena_accounts_total` | Counter | Accounts loaded into arena across all blocks |
+| `eezo_exec_stm_arena_build_seconds` | Histogram | Time to build arena per block |
+
+### Comparison Workflow
+
+```bash
+# Run with legacy kernel, capture TPS
+export EEZO_STM_KERNEL_MODE=legacy
+./scripts/tps_benchmark.sh --duration 30 --warmup 10 --verbose
+
+# Run with arena kernel, capture TPS
+export EEZO_STM_KERNEL_MODE=arena
+./scripts/tps_benchmark.sh --duration 30 --warmup 10 --verbose
+
+# Compare metrics
+curl -s http://127.0.0.1:9898/metrics | grep eezo_exec_stm
+```
+
+### Invariants
+
+The arena kernel preserves all existing invariants:
+- Same ledger rules, same nonce/balance semantics
+- Same conflict detection and resolution
+- Same final state roots as legacy kernel
+- No changes to wire formats or consensus rules
+
+For detailed documentation, see [T87.4: Arena Kernel](t87_arena_kernel.md).
+
+---
+
 ## Next Steps
 
 If further optimization is needed:
 
-1. **T87.4**: RocksDB write batching tuning
-2. **T87.5**: SIMD-accelerated bloom filters for conflict pre-screen
-3. **T87.6**: Lock-free account overlay
+1. **T87.5**: SIMD-accelerated bloom filters for conflict pre-screen
+2. **T87.6**: Lock-free account overlay
+3. **T87.7**: RocksDB write batching tuning
 
 ---
 
@@ -340,3 +398,4 @@ If further optimization is needed:
 - [T82.0: TPS Baseline](t82_tps_baseline.md)
 - [T84.5: Performance Plateau](t84_plateau.md)
 - [T86.0: Soak Profile](t86_soak_profile.md)
+- [T87.4: Arena Kernel](t87_arena_kernel.md)
