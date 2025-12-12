@@ -1047,4 +1047,67 @@ mod tests {
         crate::metrics::gpu_hash_bytes_inc(100);
         crate::metrics::gpu_hash_mismatch_inc_by(1);
     }
+
+    /// T90.0b: Test that `is_gpu_hash_enabled` correctly reports based on env var.
+    /// This test verifies that the GPU hash diagnostic check works correctly
+    /// in non-persistence builds when EEZO_GPU_HASH_ENABLED is set.
+    #[test]
+    fn t90_0b_gpu_hash_enabled_check() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        
+        // Test: when EEZO_GPU_HASH_ENABLED=1, the check returns true
+        std::env::set_var("EEZO_GPU_HASH_ENABLED", "1");
+        assert!(is_gpu_hash_enabled(), "T90.0b: GPU hash should be enabled when EEZO_GPU_HASH_ENABLED=1");
+        
+        // Test: when EEZO_GPU_HASH_ENABLED=0, the check returns false
+        std::env::set_var("EEZO_GPU_HASH_ENABLED", "0");
+        assert!(!is_gpu_hash_enabled(), "T90.0b: GPU hash should be disabled when EEZO_GPU_HASH_ENABLED=0");
+        
+        // Test: when EEZO_GPU_HASH_ENABLED is unset, the check returns false (default off)
+        std::env::remove_var("EEZO_GPU_HASH_ENABLED");
+        assert!(!is_gpu_hash_enabled(), "T90.0b: GPU hash should be disabled by default");
+    }
+
+    /// T90.0b: Test that `hash_batch_with_gpu_check` can be called with GPU enabled.
+    /// This test verifies that the GPU diagnostic path runs and produces correct
+    /// CPU hashes when EEZO_GPU_HASH_ENABLED=1. On machines without GPU, the
+    /// failures counter should increment; on machines with GPU, the jobs counter
+    /// should increment.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn t90_0b_gpu_hash_diagnostic_callable_with_enabled() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        
+        // Register metrics first
+        crate::metrics::register_t90_gpu_hash_metrics();
+        
+        // Enable GPU hashing
+        std::env::set_var("EEZO_GPU_HASH_ENABLED", "1");
+        
+        // Create test inputs similar to what a block would contain
+        let inputs = vec![
+            b"tx1: transfer from A to B".to_vec(),
+            b"tx2: transfer from C to D".to_vec(),
+            b"tx3: transfer from E to F".to_vec(),
+        ];
+        
+        // Call the diagnostic function - this should:
+        // 1. Compute CPU hashes (always succeeds)
+        // 2. Attempt GPU hashes if GPU is available
+        // 3. Compare and log mismatches (if any)
+        let results = hash_batch_with_gpu_check(&inputs);
+        
+        // Verify CPU hashes are correct (this is the invariant)
+        assert_eq!(results.len(), inputs.len());
+        for (input, result) in inputs.iter().zip(results.iter()) {
+            let expected = *blake3::hash(input).as_bytes();
+            assert_eq!(
+                *result, expected,
+                "T90.0b: hash_batch_with_gpu_check must return correct CPU hashes"
+            );
+        }
+        
+        // Clean up
+        std::env::remove_var("EEZO_GPU_HASH_ENABLED");
+    }
 }
