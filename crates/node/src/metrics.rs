@@ -557,18 +557,9 @@ pub static EEZO_BRIDGE_OUTBOX_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 	.expect("metric registered")
 });
 
-
- // Eagerly register ledger consensus metrics so they appear in /metrics even before use.
+ // T85.0: Legacy HotStuff metrics have been removed. Only DAG metrics remain.
 #[cfg(all(feature = "metrics", feature = "pq44-runtime"))]
 pub fn register_ledger_consensus_metrics() {
-    // Deref'ing Lazy<T> forces initialization & registration.
-    let _ = &*eezo_ledger::metrics::CONSENSUS_PROPOSALS_TOTAL;
-    let _ = &*eezo_ledger::metrics::CONSENSUS_VOTES_PREPARE;
-    let _ = &*eezo_ledger::metrics::CONSENSUS_VOTES_PRECOMMIT;
-    let _ = &*eezo_ledger::metrics::CONSENSUS_VOTES_COMMIT;
-    let _ = &*eezo_ledger::metrics::CONSENSUS_QC_FORMED_TOTAL;
-    let _ = &*eezo_ledger::metrics::CONSENSUS_VIEW;
-    let _ = &*eezo_ledger::metrics::CONSENSUS_COMMIT_HEIGHT;
 	// T32 metrics (ensure presence on /metrics even before first observation)
 	eezo_ledger::metrics::register_t32_metrics();
 	// T51 metrics: force initialization of mempool metrics
