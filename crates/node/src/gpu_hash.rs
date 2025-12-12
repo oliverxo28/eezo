@@ -1023,4 +1023,28 @@ mod tests {
             assert_eq!(*result, expected, "Hash mismatch for input of size {}", input.len());
         }
     }
+
+    /// T90.0: Test that metrics are registered and can be accessed.
+    /// This test verifies that the T90.0 GPU hash metrics are properly defined
+    /// and can be registered without panicking.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn t90_0_metrics_registration() {
+        // Call the registration function - should not panic
+        crate::metrics::register_t90_gpu_hash_metrics();
+        
+        // The metrics should now be accessible via the global registry.
+        // We can't easily verify the metric values here without a full node,
+        // but we can verify the registration succeeds.
+        
+        // Set the enabled gauge to 0 (disabled) and verify it works
+        crate::metrics::gpu_hash_enabled_set(0);
+        
+        // These calls should not panic
+        crate::metrics::gpu_hash_jobs_inc();
+        crate::metrics::gpu_hash_failures_inc();
+        crate::metrics::gpu_hash_latency_observe(0.001);
+        crate::metrics::gpu_hash_bytes_inc(100);
+        crate::metrics::gpu_hash_mismatch_inc_by(1);
+    }
 }

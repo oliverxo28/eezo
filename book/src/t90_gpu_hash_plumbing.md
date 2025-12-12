@@ -142,13 +142,13 @@ All metrics are behind the `metrics` feature and use the `eezo_gpu_hash_*` prefi
 
 ```bash
 # Check if GPU is enabled
-curl -s localhost:9100/metrics | grep eezo_gpu_hash_enabled
+curl -s localhost:9898/metrics | grep eezo_gpu_hash_enabled
 
 # Watch for failures
-curl -s localhost:9100/metrics | grep eezo_gpu_hash_failures_total
+curl -s localhost:9898/metrics | grep eezo_gpu_hash_failures_total
 
 # Check mismatch rate (should be 0)
-curl -s localhost:9100/metrics | grep eezo_gpu_hash_mismatch_total
+curl -s localhost:9898/metrics | grep eezo_gpu_hash_mismatch_total
 ```
 
 ## Safety Notes
@@ -207,7 +207,7 @@ cargo build -p eezo-node --features "gpu-hash,dag-consensus"
 EEZO_GPU_HASH_ENABLED=1 ./target/debug/eezo-node ...
 
 # Verify metrics
-curl -s localhost:9100/metrics | grep eezo_gpu_hash
+curl -s localhost:9898/metrics | grep eezo_gpu_hash
 ```
 
 ## Future Work

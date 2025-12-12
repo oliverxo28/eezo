@@ -323,6 +323,9 @@ fn build_executor(threads: usize) -> Box<dyn Executor> {
 #[cfg(feature = "metrics")]
 use crate::metrics::{bridge_emitted_inc, bridge_latest_set, register_t36_bridge_metrics};
 
+// T90.0: GPU hash diagnostic (non-consensus)
+use crate::gpu_hash::{is_gpu_hash_enabled, hash_batch_with_gpu_check};
+
 // 1) Add the imports (top of file, with other use lines) - PATCH A
 #[cfg(feature = "metrics")]
 use eezo_ledger::metrics::{
@@ -968,6 +971,28 @@ impl CoreRunnerHandle {
                                         log::error!("❌ runner: failed to persist block at h={}: {}", height, e);
                                     } else {
                                         log::debug!("runner: persisted block at h={}", height);
+                                        
+                                        // T90.0: GPU hash diagnostic (non-consensus)
+                                        // If GPU hashing is enabled, run a diagnostic comparison of
+                                        // GPU vs CPU BLAKE3 hashes on the block's transaction bytes.
+                                        // This is purely observational - consensus uses CPU hashes.
+                                        if is_gpu_hash_enabled() && !block.txs.is_empty() {
+                                            let tx_bytes: Vec<Vec<u8>> = block.txs.iter()
+                                                .filter_map(|tx| {
+                                                    eezo_ledger::SignedTx::encode_rlp(tx).ok()
+                                                })
+                                                .collect();
+                                            if !tx_bytes.is_empty() {
+                                                // hash_batch_with_gpu_check computes CPU hashes,
+                                                // compares with GPU if available, and logs mismatches.
+                                                // The result is always CPU hashes (canonical).
+                                                let _ = hash_batch_with_gpu_check(&tx_bytes);
+                                                log::debug!(
+                                                    "T90.0: GPU hash diagnostic ran for block h={} ({} txs)",
+                                                    height, tx_bytes.len()
+                                                );
+                                            }
+                                        }
                                     }
                                 } else {
                                     log::warn!(
