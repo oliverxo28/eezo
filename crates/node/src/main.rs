@@ -88,6 +88,8 @@ mod gpu_hash;
 mod persistence_worker;
 // T83.3: Block execution pipelining
 mod block_pipeline;
+// T84.0: Incremental state root computation
+mod incremental_state;
 
 use peers::{parse_peers_from_env, peers_handler, PeerMap, PeerService};
 use accounts::{Accounts, AccountView, FaucetReq};
