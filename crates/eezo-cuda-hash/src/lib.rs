@@ -226,7 +226,7 @@ fn init_cuda_runtime() -> Result<i32, CudaBlake3Error> {
     
     #[cfg(feature = "cuda")]
     {
-        use rustacuda::prelude::*;
+        use rustacuda::{CudaFlags, device::Device};
         
         // Initialize CUDA runtime
         rustacuda::init(CudaFlags::empty())
