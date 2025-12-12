@@ -3725,17 +3725,17 @@ mod executor_mode_tests {
     }
 
     #[test]
-    fn test_hybrid_mode_config_standard_when_legacy_alias_used() {
+    fn test_hybrid_mode_config_standard_when_unknown_mode_used() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         
-        // T81.5: Test that "hotstuff" alias does NOT enable any special mode
-        // It's treated as an unknown/invalid mode and HybridModeConfig::from_env()
-        // falls through to Standard (since it doesn't match dag-hybrid or dag-primary).
-        std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
+        // T85.0: Test that unknown modes do NOT enable any special mode
+        // They're treated as invalid and HybridModeConfig::from_env()
+        // falls through to Standard (since they don't match dag-hybrid or dag-primary).
+        std::env::set_var("EEZO_CONSENSUS_MODE", "unknown-mode");
         std::env::set_var("EEZO_DAG_ORDERING_ENABLED", "true");
         
         // HybridModeConfig::from_env() only recognizes dag-primary and dag-hybrid
-        // Any other value (including hotstuff) results in Standard
+        // Any other value results in Standard
         assert_eq!(HybridModeConfig::from_env(), HybridModeConfig::Standard);
         
         std::env::remove_var("EEZO_CONSENSUS_MODE");

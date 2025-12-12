@@ -2,8 +2,8 @@
 
 use once_cell::sync::Lazy;
 use prometheus::{
-    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
-    register_int_gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_histogram, register_histogram_vec, register_int_counter,
+    register_int_gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntGauge,
 };
 
 //
@@ -404,70 +404,17 @@ pub fn inc_sidecar_rejected() {
     EEZO_QC_SIDECAR_V2_REJECTED_TOTAL.inc();
 }
 
-// ── T27: Consensus metrics ───────────────────────────────────────────
-#[cfg(feature = "metrics")]
-pub static CONSENSUS_PROPOSALS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "eezo_consensus_proposals_total",
-        "Total number of consensus proposals broadcast (all views)"
-    )
-    .expect("register eezo_consensus_proposals_total")
-});
-
-#[cfg(feature = "metrics")]
-pub static CONSENSUS_VOTES_PREPARE: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "eezo_consensus_votes_prepare_total",
-        "Total number of Prepare votes observed"
-    )
-    .expect("register eezo_consensus_votes_prepare_total")
-});
-
-#[cfg(feature = "metrics")]
-pub static CONSENSUS_VOTES_PRECOMMIT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "eezo_consensus_votes_precommit_total",
-        "Total number of PreCommit votes observed"
-    )
-    .expect("register eezo_consensus_votes_precommit_total")
-});
-
-#[cfg(feature = "metrics")]
-pub static CONSENSUS_VOTES_COMMIT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "eezo_consensus_votes_commit_total",
-        "Total number of Commit votes observed"
-    )
-    .expect("register eezo_consensus_votes_commit_total")
-});
-
-#[cfg(feature = "metrics")]
-pub static CONSENSUS_QC_FORMED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "eezo_consensus_qc_formed_total",
-        "Number of quorum certificates formed, by phase",
-        &["phase"] // phase ∈ {prepare, precommit, commit}
-    )
-    .expect("register eezo_consensus_qc_formed_total")
-});
-
-#[cfg(feature = "metrics")]
-pub static CONSENSUS_VIEW: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!(
-        "eezo_consensus_view",
-        "Current consensus view (monotonic in single-node tests)"
-    )
-    .expect("register eezo_consensus_view")
-});
-
-#[cfg(feature = "metrics")]
-pub static CONSENSUS_COMMIT_HEIGHT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "eezo_consensus_commits_total",
-        "Total number of blocks committed by consensus"
-    )
-    .expect("register eezo_consensus_commits_total")
-});
+// ── T85.0: HotStuff consensus metrics have been removed ──────────────────────
+// EEZO's consensus is now DAG-only. The following HotStuff-specific metrics
+// have been removed:
+// - CONSENSUS_PROPOSALS_TOTAL
+// - CONSENSUS_VOTES_PREPARE
+// - CONSENSUS_VOTES_PRECOMMIT
+// - CONSENSUS_VOTES_COMMIT
+// - CONSENSUS_QC_FORMED_TOTAL
+// - CONSENSUS_VIEW
+// - CONSENSUS_COMMIT_HEIGHT
+// See book/src/t81_consensus_history.md for historical context.
 
 // ── T32: Unified SLO/observability schema (lowercase, works across crates) ─────────
 // These are *additional* metrics; they do not replace your existing ones.
