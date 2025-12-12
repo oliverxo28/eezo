@@ -12,6 +12,7 @@ members = [
   "crates/eezo-prover",
   "crates/eezo-ssz-bridge",
   "crates/eezo-snark",
+  "crates/eezo-cuda-hash",  # T91.0: CUDA BLAKE3 engine
   "eezo-relay"       # new relay crate
 ]
 resolver = "2"
