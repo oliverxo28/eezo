@@ -173,7 +173,8 @@ impl AccountArena {
     /// Panics if `idx` is out of bounds or is the reserved supply index (0).
     #[inline]
     pub fn account(&self, idx: u32) -> &Account {
-        debug_assert!(idx > 0, "Cannot access supply slot as account");
+        assert!(idx > 0 && (idx as usize) < self.accounts.len(), 
+            "Account index {} out of bounds (max: {})", idx, self.accounts.len() - 1);
         &self.accounts[idx as usize]
     }
 
@@ -186,7 +187,8 @@ impl AccountArena {
     /// Panics if `idx` is out of bounds or is the reserved supply index (0).
     #[inline]
     pub fn account_mut(&mut self, idx: u32) -> &mut Account {
-        debug_assert!(idx > 0, "Cannot modify supply slot as account");
+        assert!(idx > 0 && (idx as usize) < self.accounts.len(), 
+            "Account index {} out of bounds (max: {})", idx, self.accounts.len() - 1);
         let idx_usize = idx as usize;
         self.modified[idx_usize] = true;
         &mut self.accounts[idx_usize]
@@ -199,7 +201,8 @@ impl AccountArena {
     /// Panics if `idx` is out of bounds or is the reserved supply index (0).
     #[inline]
     pub fn set_account(&mut self, idx: u32, account: Account) {
-        debug_assert!(idx > 0, "Cannot set supply slot as account");
+        assert!(idx > 0 && (idx as usize) < self.accounts.len(), 
+            "Account index {} out of bounds (max: {})", idx, self.accounts.len() - 1);
         let idx_usize = idx as usize;
         self.accounts[idx_usize] = account;
         self.modified[idx_usize] = true;

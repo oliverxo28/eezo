@@ -594,7 +594,14 @@ struct ArenaSpeculativeResult {
 impl ArenaTxContext {
     /// Create a new ArenaTxContext from an AnalyzedTx and AccountArena.
     ///
-    /// Resolves sender and receiver addresses to arena indices.
+    /// Resolves sender and receiver addresses to arena indices by loading them
+    /// from the base state if not already present in the arena.
+    ///
+    /// # Note
+    ///
+    /// This method mutates the arena by adding any accounts that aren't already
+    /// present. This is intentional - all touched accounts should be loaded into
+    /// the arena before execution begins.
     fn from_analyzed(analyzed: &AnalyzedTx, arena: &mut AccountArena, base: &Accounts) -> Self {
         let sender_idx = arena.ensure_account(&analyzed.sender, base);
         let receiver_idx = arena.ensure_account(&analyzed.tx.core.to, base);
