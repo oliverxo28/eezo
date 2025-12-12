@@ -282,8 +282,9 @@ echo ""
 echo "[4/4] Sending transactions (pattern: $PATTERN)..."
 echo ""
 
-# Standard chain_id for devnet (20 bytes of 0x01)
-CHAIN_ID="0x0101010101010101010101010101010101010101"
+# Standard chain_id for devnet (20 bytes: 19 zeros + 0x01)
+# MUST match genesis.min.json chain_id = [0,0,0,...,0,1]
+CHAIN_ID="0x0000000000000000000000000000000000000001"
 
 # Track progress
 START_TIME=$(date +%s)
