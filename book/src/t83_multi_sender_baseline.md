@@ -37,6 +37,7 @@ Single-sender spam testing (using `scripts/spam_tps.sh`) is useful for measuring
 - **No write-write conflicts**: All transactions come from one sender with sequential nonces
 - **No contention on receiver state**: Typically targets a single receiver address
 - **Unrealistic workload**: Real blockchain traffic comes from many independent senders
+- **STM waves = 1**: With a single sender, transactions have sequential nonces and cannot be parallelized, resulting in wave size of 1 (one tx per wave). This is expected behavior, not a bug.
 
 ### What Multi-sender Testing Provides
 
@@ -247,6 +248,132 @@ STM Executor Metrics (T82.0):
 
 ---
 
+## Detailed Runbook: Proper Command Timing
+
+The key to reliable TPS measurements is starting the benchmark **before** starting the spam, so the measurement window captures all transactions.
+
+### Scenario A: Single Sender Baseline (Sequential Nonces)
+
+```bash
+# ─────────────────────────────────────────────────────────────────────────────
+# Terminal 1: Start the node (with all T82–T84 performance flags)
+# ─────────────────────────────────────────────────────────────────────────────
+cd ~/Block/eezo
+
+EEZO_MEMPOOL_ACTOR_ENABLED=1 \
+EEZO_CONSENSUS_MODE=dag-primary \
+EEZO_PERSIST_ASYNC=1 \
+EEZO_PIPELINE_ENABLED=1 \
+EEZO_LAZY_STATE_ROOT=1 \
+EEZO_EXEC_LANES=32 \
+EEZO_SIGPOOL_THREADS=4 \
+EEZO_SIGPOOL_BATCH_SIZE=128 \
+cargo run -p eezo-node --features "pq44-runtime,metrics,checkpoints,stm-exec,dag-consensus" --bin eezo-node -- \
+  --genesis genesis.min.json \
+  --datadir /tmp/eezo-test
+
+# Wait for "Listening on 0.0.0.0:8080" message
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Terminal 2: Setup sender and fund account
+# ─────────────────────────────────────────────────────────────────────────────
+cd ~/Block/eezo
+
+# 1) Generate ML-DSA keypair
+eval "$(cargo run -p eezo-crypto --features pq44-runtime --bin ml_dsa_keygen)"
+
+# 2) Derive sender address from public key (first 20 bytes)
+export EEZO_TX_FROM="0x$(echo -n "${EEZO_TX_PK_HEX#0x}" | head -c 40)"
+export EEZO_TX_TO="0xcafebabecafebabecafebabecafebabecafebabe"
+export EEZO_TX_CHAIN_ID="0x0000000000000000000000000000000000000001"  # MUST match genesis
+export EEZO_TX_AMOUNT="1"
+export EEZO_TX_FEE="1"
+
+# 3) Fund the sender account
+curl -s -X POST http://127.0.0.1:8080/faucet \
+  -H "Content-Type: application/json" \
+  -d "{\"to\":\"$EEZO_TX_FROM\",\"amount\":\"100000000\"}" && echo " ✓ Funded"
+
+# 4) Ensure txgen is built
+cargo build -p eezo-node --bin eezo-txgen --features "pq44-runtime"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Terminal 3: Start benchmark FIRST (warmup period captures spam)
+# ─────────────────────────────────────────────────────────────────────────────
+cd ~/Block/eezo
+
+# Start benchmark with 10s warmup + 30s measurement
+# During warmup, start spam in Terminal 2
+./scripts/tps_benchmark.sh --duration 30 --warmup 10 --verbose
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Terminal 2 (DURING warmup period): Start spam
+# ─────────────────────────────────────────────────────────────────────────────
+./scripts/spam_tps.sh 5000 http://127.0.0.1:8080
+
+# Expected: TPS > 0, waves/block ≈ 1.0 (single sender = sequential nonces)
+```
+
+### Scenario B: Multi-sender Disjoint (32 Senders, Low Conflict)
+
+```bash
+# ─────────────────────────────────────────────────────────────────────────────
+# Terminal 1: Node already running (same as Scenario A)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Terminal 3: Start benchmark FIRST
+# ─────────────────────────────────────────────────────────────────────────────
+cd ~/Block/eezo
+
+# Use longer warmup (15s) to account for key generation time
+./scripts/tps_benchmark.sh --duration 40 --warmup 15 --verbose
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Terminal 2 (DURING warmup): Start multi-sender spam
+# ─────────────────────────────────────────────────────────────────────────────
+cd ~/Block/eezo
+
+./scripts/spam_multi_senders.sh \
+  --senders 32 \
+  --per-sender 200 \
+  --hot-receivers 32 \
+  --pattern disjoint \
+  --node http://127.0.0.1:8080
+
+# Expected output:
+#   Total tx issued: 6400
+#   Elapsed time: ~5-10s
+#
+# Expected benchmark results:
+#   TPS: > 0 (should see ~200-400 TPS depending on hardware)
+#   delta_txs: ~6400
+#   waves/block: 1.0-2.0 (low conflict with disjoint pattern)
+```
+
+### Why Timing Matters
+
+| Sequence | Result |
+|----------|--------|
+| Benchmark BEFORE spam | ✅ Captures all transactions |
+| Benchmark AFTER spam | ❌ TPS = 0 (transactions already processed) |
+| Benchmark during spam (no warmup) | ⚠️ Partial capture |
+
+### Verifying Transactions Were Applied
+
+Check node logs for `apply_tx` messages:
+```bash
+# In Terminal 1 (node), you should see lines like:
+# [INFO eezo_ledger::tx] apply_tx: ✅ success, sender=Address([...]) new_nonce=...
+```
+
+If you see NO `apply_tx` logs during multi-sender spam, check:
+1. **Chain ID mismatch** - Most common cause (see Troubleshooting)
+2. Signature verification errors in node logs
+3. Account funding failures
+
+---
+
 ## Recommended Baseline Experiments
 
 Run these experiments to establish conflict baselines for your hardware:
@@ -354,6 +481,25 @@ Wait a few seconds for it to start, then retry.
    - Check node logs for rejection reasons
    - Ensure accounts are properly funded
 
+### No apply_tx Logs During Multi-sender Spam
+
+If you see `apply_tx` logs during single-sender testing but NOT during multi-sender testing:
+
+1. **Chain ID Mismatch**: The most common cause. The script uses a hardcoded chain_id that must match your node's genesis config:
+   - Check `genesis.min.json` for the expected chain_id (typically `0x0000000000000000000000000000000000000001`)
+   - Ensure `spam_multi_senders.sh` uses the same chain_id
+   - Signature verification fails silently when chain_id doesn't match (no logs, just HTTP 400)
+
+2. **Timing Issue**: Your benchmark window may have started before transactions were submitted:
+   - Start the benchmark with `--warmup 5` BEFORE running spam
+   - Wait for spam to complete within the measurement window
+
+3. **Verify submissions are succeeding**:
+   ```bash
+   # Test a single tx and check response
+   ./scripts/spam_multi_senders.sh --senders 1 --per-sender 1 --node http://127.0.0.1:8080 2>&1
+   ```
+
 ### High Abort Rate
 
 If `eezo_exec_stm_aborted_total` is non-zero:
@@ -385,3 +531,27 @@ curl -s http://127.0.0.1:9898/metrics | grep eezo_exec_stm
 # eezo_exec_stm_conflict_prescreen_hits_total <count>
 # eezo_exec_stm_conflict_prescreen_misses_total <count>
 ```
+
+---
+
+## Technical Notes
+
+### Why Wave Size May Be Small (Future T87.0 Work)
+
+Even with 32 disjoint senders, you may observe `avg_wave_size ≈ 1.0`. This is due to:
+
+1. **Block timing**: If the block producer samples the mempool before all 32 senders have submitted their transactions, each block may only contain transactions from a subset of senders.
+
+2. **Nonce dependencies within sender**: All transactions from the same sender have sequential nonces (n, n+1, n+2...). The STM executor correctly identifies that these cannot run in parallel.
+
+3. **Current wave builder design**: The wave builder currently groups by sender read/write sets. Transactions from the same sender touch the same sender account (for balance/nonce updates), creating artificial dependencies.
+
+**Future optimization (T87.0)**: Enhance the wave builder to recognize that:
+- Sender nonce/balance reads can be speculated
+- Only the final write per sender needs serialization
+- Disjoint receiver writes are truly parallel
+
+For now, expect:
+- **Single sender**: wave_size = 1 (expected - sequential nonces)
+- **32 disjoint senders**: wave_size = 1-32 (depends on timing and mempool fill)
+- **Hotspot pattern**: wave_size = 1-2 (conflicts force serialization)
