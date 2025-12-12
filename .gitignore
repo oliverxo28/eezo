@@ -47,3 +47,6 @@ crates/node/src/backup/
 # Temp directories
 /tmp/.lock
 crates/node/t29_9-*
+
+# T86 soak test results
+t86_results/
