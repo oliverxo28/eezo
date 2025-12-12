@@ -12,6 +12,27 @@ set -euo pipefail
 # For local TPS benchmarks with unsigned tx, see the dev-unsafe profile in:
 #   book/src/dev_unsafe_modes.md
 #
+# ═══════════════════════════════════════════════════════════════════════════════
+# T84.5: High-Throughput TPS Profile
+# ═══════════════════════════════════════════════════════════════════════════════
+# For maximum TPS benchmarking (150–250 TPS on laptop), source the T84.5
+# configuration before running this script:
+#
+#   source devnet_tps.env
+#   ./scripts/devnet_dag_primary.sh
+#
+# Or run with explicit env vars:
+#   EEZO_MEMPOOL_ACTOR_ENABLED=1 \
+#   EEZO_PERSIST_ASYNC=1 \
+#   EEZO_PIPELINE_ENABLED=1 \
+#   EEZO_LAZY_STATE_ROOT=1 \
+#   EEZO_SIGPOOL_THREADS=4 \
+#   EEZO_SIGPOOL_BATCH_SIZE=128 \
+#   ./scripts/devnet_dag_primary.sh
+#
+# See book/src/t84_plateau.md for complete documentation.
+# ═══════════════════════════════════════════════════════════════════════════════
+#
 # Usage:
 #   ./scripts/devnet_dag_primary.sh
 #
@@ -49,6 +70,18 @@ export EEZO_EXEC_WAVE_CAP="${EEZO_EXEC_WAVE_CAP:-256}"
 # T79.0: Health Check Window (seconds for activity checks)
 # ───────────────────────────────────────────────────────────────────────────────
 export EEZO_DAG_PRIMARY_HEALTH_WINDOW_SECS="${EEZO_DAG_PRIMARY_HEALTH_WINDOW_SECS:-60}"
+
+# ───────────────────────────────────────────────────────────────────────────────
+# T84.5: High-Throughput Performance Settings (preserve from env if set)
+# These are optional; if not set, the node runs without these optimizations.
+# For max TPS, source devnet_tps.env first (see header comments).
+# ───────────────────────────────────────────────────────────────────────────────
+# EEZO_MEMPOOL_ACTOR_ENABLED - Enable mempool actor for better admission
+# EEZO_PERSIST_ASYNC         - Async RocksDB persistence (T83.2)
+# EEZO_PIPELINE_ENABLED      - Block execution pipelining (T83.3)
+# EEZO_LAZY_STATE_ROOT       - Incremental state root (T84.0)
+# EEZO_SIGPOOL_THREADS       - Signature verification threads (T83.0)
+# EEZO_SIGPOOL_BATCH_SIZE    - Signature micro-batch size (T83.0)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Data Directory (clean start by default)
@@ -91,6 +124,14 @@ echo "  EEZO_DAG_PRIMARY_HEALTH_WINDOW_SECS=$EEZO_DAG_PRIMARY_HEALTH_WINDOW_SECS
 echo "  EEZO_DATADIR=$EEZO_DATADIR"
 echo "  EEZO_LISTEN=$EEZO_LISTEN"
 echo "  EEZO_METRICS_BIND=$EEZO_METRICS_BIND"
+echo ""
+echo "T84.5 TPS Profile (if set):"
+echo "  EEZO_MEMPOOL_ACTOR_ENABLED=${EEZO_MEMPOOL_ACTOR_ENABLED:-<not set>}"
+echo "  EEZO_PERSIST_ASYNC=${EEZO_PERSIST_ASYNC:-<not set>}"
+echo "  EEZO_PIPELINE_ENABLED=${EEZO_PIPELINE_ENABLED:-<not set>}"
+echo "  EEZO_LAZY_STATE_ROOT=${EEZO_LAZY_STATE_ROOT:-<not set>}"
+echo "  EEZO_SIGPOOL_THREADS=${EEZO_SIGPOOL_THREADS:-<not set>}"
+echo "  EEZO_SIGPOOL_BATCH_SIZE=${EEZO_SIGPOOL_BATCH_SIZE:-<not set>}"
 echo ""
 echo "Build features: devnet-safe,metrics,pq44-runtime,checkpoints,stm-exec,dag-consensus"
 echo ""
