@@ -17,7 +17,7 @@ T91.0 introduced the foundational structure:
 - **Clean API**: `CudaBlake3Engine` and `CudaBlake3Error` types
 - **Safe behavior**: Never panics or segfaults on any machine
 
-## T91.1: CUDA BLAKE3 Batch Hashing (Current)
+## T91.1: CUDA BLAKE3 Batch Hashing (Completed)
 
 T91.1 adds real CUDA BLAKE3 batch hashing with CPU cross-check:
 
@@ -26,11 +26,73 @@ T91.1 adds real CUDA BLAKE3 batch hashing with CPU cross-check:
 - **Error handling**: Returns `ComputeFailure(msg)` on CUDA-side errors
 - **CPU remains canonical**: CUDA output is validated against CPU BLAKE3 in tests
 
-### What T91.1 Does NOT Do
+## T91.2: CUDA BLAKE3 Shadow Path for eezo-node (Current)
 
-- Integrate with eezo-node or eezo-prover (deferred to T91.2+)
-- Modify consensus-critical code paths
-- Change block/header/tx formats
+T91.2 integrates `eezo-cuda-hash` into `eezo-node` as a shadow hashing path:
+
+- **CPU BLAKE3 remains canonical**: No consensus changes
+- **Shadow comparison**: When enabled, CUDA hashes are compared against CPU BLAKE3
+- **Graceful fallback**: If CUDA is unavailable or fails, node continues with CPU-only
+- **Full metrics**: Prometheus metrics for observability
+
+### Cargo Feature
+
+Enable the CUDA hash feature when building eezo-node:
+
+```bash
+cargo build -p eezo-node --features "pq44-runtime,metrics,checkpoints,stm-exec,dag-consensus,cuda-hash" --release
+```
+
+### Runtime Configuration
+
+Set `EEZO_CUDA_HASH_ENABLED=1` to enable CUDA shadow hashing:
+
+```bash
+EEZO_CUDA_HASH_ENABLED=1 \
+EEZO_CONSENSUS_MODE=dag-primary \
+./target/release/eezo-node --genesis genesis.min.json --datadir /tmp/eezo-t91-cuda
+```
+
+### Prometheus Metrics
+
+The following metrics are available on the `/metrics` endpoint:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `eezo_cuda_hash_enabled` | gauge | 1 if CUDA engine initialized successfully, 0 otherwise |
+| `eezo_cuda_hash_jobs_total` | counter | Number of successful CUDA hash batch calls |
+| `eezo_cuda_hash_failures_total` | counter | Number of CUDA initialization or compute failures |
+| `eezo_cuda_hash_bytes_total` | counter | Total bytes hashed via CUDA |
+| `eezo_cuda_hash_mismatch_total` | counter | Number of CUDA/CPU hash mismatches detected |
+
+### Interpreting Metrics
+
+**Happy path (CUDA working correctly):**
+- `eezo_cuda_hash_enabled = 1`
+- `eezo_cuda_hash_jobs_total > 0` (increases with each block)
+- `eezo_cuda_hash_bytes_total > 0`
+- `eezo_cuda_hash_failures_total = 0`
+- `eezo_cuda_hash_mismatch_total = 0`
+
+**CUDA initialization failed:**
+- `eezo_cuda_hash_enabled = 0`
+- `eezo_cuda_hash_failures_total >= 1`
+- Node continues running, consensus unaffected
+
+**CUDA compute error:**
+- `eezo_cuda_hash_failures_total` increments
+- Node continues, falls back to CPU-only for that block
+
+**Hash mismatch detected:**
+- `eezo_cuda_hash_mismatch_total > 0`
+- Indicates a bug in CUDA implementation (should never happen)
+- CPU result is still used for consensus
+
+### What T91.2 Does NOT Do
+
+- Modify block headers, block hashes, or canonical BLAKE3 calls used by consensus
+- Change the source of truth (CPU BLAKE3 is always canonical)
+- Affect consensus behavior in any way (CUDA is purely diagnostic)
 
 ## Architecture
 
@@ -192,7 +254,7 @@ CPU BLAKE3 remains the canonical/authoritative implementation:
 
 - No consensus-critical code changes
 - CUDA output is cross-checked against CPU BLAKE3 in tests
-- Integration into eezo-node/eezo-prover will come in T91.2+
+- T91.2 integrates into eezo-node as shadow mode
 
 ## Future Work
 
@@ -200,8 +262,8 @@ CPU BLAKE3 remains the canonical/authoritative implementation:
 |-----------|-------|
 | T91.0 | ✅ CUDA plumbing, build detection, API skeleton |
 | T91.1 | ✅ CUDA BLAKE3 batch hashing + CPU cross-check tests |
-| T91.2 | Integration with eezo-prover |
-| T91.3 | Integration with eezo-node (shadow mode) |
+| T91.2 | ✅ Integration with eezo-node (shadow mode) |
+| T91.3 | Integration with eezo-prover |
 | T91.4 | Performance optimization |
 
 ## Acceptance Criteria
@@ -217,7 +279,7 @@ CPU BLAKE3 remains the canonical/authoritative implementation:
 7. ✅ No consensus-critical code changes
 8. ✅ Documentation added to the book
 
-### T91.1 (Current)
+### T91.1 (Completed)
 
 1. ✅ `hash_many()` performs real CUDA BLAKE3 batch hashing
 2. ✅ On CUDA failure: Returns `ComputeFailure(msg)`
@@ -227,11 +289,34 @@ CPU BLAKE3 remains the canonical/authoritative implementation:
 6. ✅ No changes to eezo-node or eezo-prover
 7. ✅ Documentation updated
 
+### T91.2 (Current)
+
+1. ✅ `cuda-hash` feature added to eezo-node Cargo.toml
+2. ✅ `eezo-cuda-hash` crate added as optional dependency
+3. ✅ Prometheus metrics: `eezo_cuda_hash_enabled`, `eezo_cuda_hash_jobs_total`, etc.
+4. ✅ `register_t91_cuda_hash_metrics()` helper called at boot
+5. ✅ `EEZO_CUDA_HASH_ENABLED` env var read at startup with logging
+6. ✅ `run_t91_2_cuda_hash_shadow()` helper in consensus_runner
+7. ✅ Lazy CudaBlake3Engine initialization per runner
+8. ✅ CUDA/CPU digest comparison with mismatch detection
+9. ✅ Node continues running even if CUDA fails
+10. ✅ Documentation updated
+
 ## Files Changed
+
+### T91.0/T91.1
 
 - `Cargo.toml`: Added `crates/eezo-cuda-hash` to workspace members
 - `crates/eezo-cuda-hash/Cargo.toml`: New crate manifest
 - `crates/eezo-cuda-hash/build.rs`: CUDA detection build script
 - `crates/eezo-cuda-hash/src/lib.rs`: Engine API and implementation
 - `crates/eezo-cuda-hash/README.md`: Crate documentation
-- `book/src/t91_cuda_hash.md`: This documentation file
+
+### T91.2
+
+- `crates/node/Cargo.toml`: Added `cuda-hash` feature and `eezo-cuda-hash` dependency
+- `crates/node/src/metrics.rs`: Added T91.2 metrics and helpers
+- `crates/node/src/cuda_hash.rs`: New module with `run_t91_2_cuda_hash_shadow()`
+- `crates/node/src/main.rs`: Module declaration, metrics registration, startup logging
+- `crates/node/src/consensus_runner.rs`: CUDA hash shadow call on block commit
+- `book/src/t91_cuda_hash.md`: This documentation file (updated)
