@@ -3652,6 +3652,75 @@ pub fn register_t82_4_wave_metrics() {
 }
 
 // -----------------------------------------------------------------------------
+// T87.x — Deep Performance Pass Metrics
+// -----------------------------------------------------------------------------
+//
+// These metrics track T87.x optimizations:
+// - Wave build timing (how long to construct each wave)
+// - Aggressive wave mode stats
+
+/// Histogram: Time to build each wave (conflict detection phase).
+/// This helps identify if wave building is a bottleneck.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_WAVE_BUILD_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_stm_wave_build_seconds",
+        "Time to build/detect conflicts for each wave (seconds) (T87.x)",
+        vec![0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
+    )
+    .unwrap()
+});
+
+/// Gauge: Whether aggressive wave mode is enabled.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_WAVE_AGGRESSIVE: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_exec_stm_wave_aggressive",
+        "1 if aggressive wave grouping is enabled, 0 otherwise (T87.1)"
+    )
+    .unwrap()
+});
+
+/// Helper: Observe wave build time (T87.x).
+#[inline]
+pub fn exec_stm_observe_wave_build_seconds(seconds: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_WAVE_BUILD_SECONDS.observe(seconds);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = seconds;
+    }
+}
+
+/// Helper: Set aggressive wave mode gauge (T87.1).
+#[inline]
+pub fn exec_stm_wave_aggressive_set(enabled: bool) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_WAVE_AGGRESSIVE.set(if enabled { 1 } else { 0 });
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = enabled;
+    }
+}
+
+/// Eagerly register T87.x deep perf metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t87_deep_perf_metrics() {
+    let _ = &*EEZO_EXEC_STM_WAVE_BUILD_SECONDS;
+    let _ = &*EEZO_EXEC_STM_WAVE_AGGRESSIVE;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t87_deep_perf_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
 // T82.0 — CPU Profiling Hooks
 // -----------------------------------------------------------------------------
 //
