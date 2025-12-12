@@ -624,6 +624,10 @@ impl CoreRunnerHandle {
 			#[cfg(feature = "metrics")]
 			register_t36_bridge_metrics();
             
+            // T91.2: CUDA BLAKE3 engine for shadow hashing (lazy initialized on first use)
+            #[cfg(feature = "cuda-hash")]
+            let mut cuda_engine: Option<eezo_cuda_hash::CudaBlake3Engine> = None;
+            
             // T81.1: Log consensus mode at startup (non-persistence variant)
             #[cfg(feature = "dag-consensus")]
             {
@@ -924,6 +928,18 @@ impl CoreRunnerHandle {
                         // Runs regardless of persistence feature to exercise GPU path in
                         // DagPrimary + STM mode without persistence.
                         run_t90_0b_gpu_hash_diagnostic(&blk_opt, height);
+
+                        // T91.2: CUDA BLAKE3 shadow hashing (non-consensus, feature-gated)
+                        // Compares CUDA hashes against CPU BLAKE3 for all tx payloads.
+                        #[cfg(feature = "cuda-hash")]
+                        if let Some(ref blk) = blk_opt {
+                            if !blk.txs.is_empty() {
+                                let tx_bytes: Vec<Vec<u8>> = blk.txs.iter()
+                                    .map(|tx| tx.to_bytes())
+                                    .collect();
+                                crate::cuda_hash::run_t91_2_cuda_hash_shadow(&mut cuda_engine, &tx_bytes);
+                            }
+                        }
 
                         // T75.0: Send committed block to shadow DAG (if enabled)
                         // This must not block or affect the main consensus path.
@@ -1451,6 +1467,10 @@ impl CoreRunnerHandle {
             if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled | HybridModeConfig::DagPrimary) {
                 crate::metrics::register_t77_dag_ordering_latency_metrics();
             }
+            
+            // T91.2: CUDA BLAKE3 engine for shadow hashing (lazy initialized on first use)
+            #[cfg(feature = "cuda-hash")]
+            let mut cuda_engine: Option<eezo_cuda_hash::CudaBlake3Engine> = None;
             
             // T83.3: Log pipeline status
             log_pipeline_status();
@@ -2162,6 +2182,18 @@ impl CoreRunnerHandle {
                         // Runs regardless of persistence feature to exercise GPU path in
                         // DagPrimary + STM mode with or without persistence.
                         run_t90_0b_gpu_hash_diagnostic(&blk_opt, height);
+
+                        // T91.2: CUDA BLAKE3 shadow hashing (non-consensus, feature-gated)
+                        // Compares CUDA hashes against CPU BLAKE3 for all tx payloads.
+                        #[cfg(feature = "cuda-hash")]
+                        if let Some(ref blk) = blk_opt {
+                            if !blk.txs.is_empty() {
+                                let tx_bytes: Vec<Vec<u8>> = blk.txs.iter()
+                                    .map(|tx| tx.to_bytes())
+                                    .collect();
+                                crate::cuda_hash::run_t91_2_cuda_hash_shadow(&mut cuda_engine, &tx_bytes);
+                            }
+                        }
 
                         // T75.0: Send committed block to shadow DAG (if enabled)
                         // T76.2: Also feed hybrid DAG handle for ordered batch consumption.

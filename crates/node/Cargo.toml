@@ -31,6 +31,8 @@ eezo-serde  = { path = "../serde" }
 eezo-prover = { path = "../eezo-prover", default-features = false, optional = true }
 # T75.0: DAG consensus shadow mode (optional, disabled by default)
 consensus-dag = { path = "../consensus-dag", optional = true }
+# T91.2: CUDA BLAKE3 engine for shadow hashing (optional, disabled by default)
+eezo-cuda-hash = { path = "../eezo-cuda-hash", optional = true }
 
 # Core libs
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "signal"] }
@@ -143,6 +145,12 @@ qc-sidecar-v2-enforce = []
 # GPU-accelerated BLAKE3 hashing. Node env: EEZO_NODE_GPU_HASH=off|shadow|prefer
 # Note: We also enable eezo-prover/stark-air to satisfy prover_loop.rs dependencies.
 gpu-hash = ["eezo-prover", "eezo-prover/gpu-hash", "eezo-prover/stark-air"]
+
+# T91.2: CUDA BLAKE3 shadow hashing path (optional, disabled by default).
+# When enabled, provides a CUDA-based BLAKE3 hashing path that shadows CPU BLAKE3.
+# Runtime: EEZO_CUDA_HASH_ENABLED=1 enables CUDA hash comparisons.
+# CPU BLAKE3 remains canonical; CUDA is for validation/comparison only.
+cuda-hash = ["eezo-cuda-hash"]
 
 # T73.1: Block-STM executor scaffolding (optional, for parallel tx execution)
 # Enables mvhashmap.rs and stm.rs modules in crates/node/src/executor/

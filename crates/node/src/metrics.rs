@@ -4101,6 +4101,134 @@ macro_rules! profiling_span {
 #[allow(unused_imports)]
 pub use profiling_span;
 
+// =============================================================================
+// T91.2 — CUDA BLAKE3 Shadow Path Metrics
+// =============================================================================
+//
+// These metrics track the T91.2 CUDA hash shadow path:
+// - eezo_cuda_hash_enabled: gauge (0/1) indicating CUDA hash engine availability
+// - eezo_cuda_hash_jobs_total: counter of successful CUDA hash batch calls
+// - eezo_cuda_hash_failures_total: counter of CUDA initialization or compute failures
+// - eezo_cuda_hash_bytes_total: counter of total bytes hashed via CUDA
+// - eezo_cuda_hash_mismatch_total: counter of CUDA/CPU hash mismatches
+
+/// T91.2: Gauge indicating whether CUDA hash engine was successfully initialized.
+/// Value: 0 = CUDA unavailable/disabled/init failed, 1 = CUDA successfully initialized.
+#[cfg(feature = "metrics")]
+pub static EEZO_CUDA_HASH_ENABLED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_cuda_hash_enabled",
+        "Whether CUDA hash engine was successfully initialized (0=no, 1=yes)"
+    )
+    .unwrap()
+});
+
+/// T91.2: Counter of successful CUDA hash batch calls.
+#[cfg(feature = "metrics")]
+pub static EEZO_CUDA_HASH_JOBS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_cuda_hash_jobs_total",
+        "Total number of successful CUDA hash batch calls"
+    )
+    .unwrap()
+});
+
+/// T91.2: Counter of CUDA hash failures (init or compute).
+#[cfg(feature = "metrics")]
+pub static EEZO_CUDA_HASH_FAILURES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_cuda_hash_failures_total",
+        "Total number of CUDA hash failures (init or compute)"
+    )
+    .unwrap()
+});
+
+/// T91.2: Counter of total bytes hashed via CUDA.
+#[cfg(feature = "metrics")]
+pub static EEZO_CUDA_HASH_BYTES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_cuda_hash_bytes_total",
+        "Total bytes hashed via CUDA"
+    )
+    .unwrap()
+});
+
+/// T91.2: Counter of CUDA/CPU hash mismatches detected.
+#[cfg(feature = "metrics")]
+pub static EEZO_CUDA_HASH_MISMATCH_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_cuda_hash_mismatch_total",
+        "Total CUDA/CPU hash mismatches detected (CUDA disagrees with CPU)"
+    )
+    .unwrap()
+});
+
+/// T91.2: Helper to set the CUDA hash enabled gauge.
+#[inline]
+pub fn cuda_hash_enabled_set(val: i64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_CUDA_HASH_ENABLED.set(val);
+    }
+    let _ = val;
+}
+
+/// T91.2: Helper to increment CUDA hash jobs counter.
+#[inline]
+pub fn cuda_hash_jobs_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_CUDA_HASH_JOBS_TOTAL.inc();
+    }
+}
+
+/// T91.2: Helper to increment CUDA hash failures counter.
+#[inline]
+pub fn cuda_hash_failures_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_CUDA_HASH_FAILURES_TOTAL.inc();
+    }
+}
+
+/// T91.2: Helper to increment CUDA hash bytes counter.
+#[inline]
+pub fn cuda_hash_bytes_inc(bytes: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_CUDA_HASH_BYTES_TOTAL.inc_by(bytes);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = bytes;
+    }
+}
+
+/// T91.2: Helper to increment CUDA/CPU mismatch counter.
+#[inline]
+pub fn cuda_hash_mismatch_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_CUDA_HASH_MISMATCH_TOTAL.inc();
+    }
+}
+
+/// T91.2: Eagerly register CUDA hash metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t91_cuda_hash_metrics() {
+    let _ = &*EEZO_CUDA_HASH_ENABLED;
+    let _ = &*EEZO_CUDA_HASH_JOBS_TOTAL;
+    let _ = &*EEZO_CUDA_HASH_FAILURES_TOTAL;
+    let _ = &*EEZO_CUDA_HASH_BYTES_TOTAL;
+    let _ = &*EEZO_CUDA_HASH_MISMATCH_TOTAL;
+}
+
+/// T91.2: No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t91_cuda_hash_metrics() {
+    // No metrics to register when the feature is off.
+}
+
 // -----------------------------------------------------------------------------
 // T82.0 — Unit tests for ProfilingMode
 // -----------------------------------------------------------------------------
