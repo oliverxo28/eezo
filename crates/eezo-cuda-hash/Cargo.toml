@@ -1,0 +1,38 @@
+[package]
+name = "eezo-cuda-hash"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "CUDA-accelerated BLAKE3 hashing for EEZO (T91.x)"
+readme = "README.md"
+
+[dependencies]
+# Error handling
+thiserror = { workspace = true }
+
+# CPU BLAKE3 for fallback/placeholder
+blake3 = { workspace = true }
+
+# Logging
+log = "0.4"
+
+# CUDA driver API wrapper (only used when cuda-hash feature is enabled and CUDA is present)
+# Note: rustacuda requires CUDA toolkit to be installed at build time for the actual CUDA code
+# When CUDA is not available, we compile a stub implementation
+rustacuda = { version = "0.1", optional = true }
+rustacuda_core = { version = "0.1", optional = true }
+
+[build-dependencies]
+# For detecting CUDA toolchain
+which = "5"
+
+[features]
+# Default: no CUDA dependency
+default = []
+
+# Enable CUDA support (requires CUDA toolkit at build time)
+cuda = ["rustacuda", "rustacuda_core"]
+
+[lib]
+path = "src/lib.rs"
