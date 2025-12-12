@@ -557,18 +557,9 @@ pub static EEZO_BRIDGE_OUTBOX_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 	.expect("metric registered")
 });
 
-
- // Eagerly register ledger consensus metrics so they appear in /metrics even before use.
+ // T85.0: Legacy HotStuff metrics have been removed. Only DAG metrics remain.
 #[cfg(all(feature = "metrics", feature = "pq44-runtime"))]
 pub fn register_ledger_consensus_metrics() {
-    // Deref'ing Lazy<T> forces initialization & registration.
-    let _ = &*eezo_ledger::metrics::CONSENSUS_PROPOSALS_TOTAL;
-    let _ = &*eezo_ledger::metrics::CONSENSUS_VOTES_PREPARE;
-    let _ = &*eezo_ledger::metrics::CONSENSUS_VOTES_PRECOMMIT;
-    let _ = &*eezo_ledger::metrics::CONSENSUS_VOTES_COMMIT;
-    let _ = &*eezo_ledger::metrics::CONSENSUS_QC_FORMED_TOTAL;
-    let _ = &*eezo_ledger::metrics::CONSENSUS_VIEW;
-    let _ = &*eezo_ledger::metrics::CONSENSUS_COMMIT_HEIGHT;
 	// T32 metrics (ensure presence on /metrics even before first observation)
 	eezo_ledger::metrics::register_t32_metrics();
 	// T51 metrics: force initialization of mempool metrics
@@ -2306,16 +2297,16 @@ pub fn register_dag_shadow_metrics() {
 /// Gauge: Active consensus mode (3=dag-primary is the only production mode).
 /// Set at startup based on EEZO_CONSENSUS_MODE environment variable.
 ///
-/// # T81.5: DAG-Only Semantics
+/// # T85.0: DAG-Only Semantics
 ///
-/// After T81.5, EEZO is DAG-only. The gauge values are:
+/// After T85.0, EEZO is 100% DAG-only. All HotStuff code has been removed.
+/// The gauge values are:
 /// - 3 = DagPrimary (PRODUCTION: the only recommended mode)
 /// - 2 = Dag (legacy transition mode)
 /// - 1 = DagHybrid with ordering enabled (deprecated transition mode)
-/// - 0 = Legacy0/DagHybrid-without-ordering (DEPRECATED, not valid in production)
+/// - 0 = DagHybrid-without-ordering (DEPRECATED, not valid in production)
 ///
-/// Note: "hotstuff" / "hs" are no longer valid mode strings and will cause
-/// a config error with fallback to dag-primary.
+/// Unknown mode strings will cause a config warning and fallback to dag-primary.
 #[cfg(feature = "metrics")]
 pub static EEZO_CONSENSUS_MODE_ACTIVE: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(

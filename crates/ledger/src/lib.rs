@@ -78,24 +78,16 @@ pub use consensus::{
     SingleNodeCfg, SlotSummary,
 };
 
-// Re-exports for T27 (legacy consensus pipeline — historical, see T81)
-#[cfg(feature = "pq44-runtime")]
-pub use consensus::{ConsensusCfg, ConsensusNetwork, HotStuff};
+// ═══════════════════════════════════════════════════════════════════════════════
+// T85.0: DAG-ONLY CONSENSUS
+// ═══════════════════════════════════════════════════════════════════════════════
+// EEZO's consensus in this branch is DAG-primary + STM. HotStuff has been
+// completely removed (T85.0). The only consensus mode available is DAG-based.
+// ═══════════════════════════════════════════════════════════════════════════════
 
-// --- Legacy consensus message types, aliased to avoid root name clash ---
-// Note: The "Hs" prefix is retained for backward compatibility but refers
-// to the historical pre-DAG consensus (T81.4: HotStuff is no longer active).
+// ValidatorId is still used by cert_store and DAG consensus components
 #[cfg(feature = "pq44-runtime")]
-pub use crate::consensus_msg::{
-    ConsensusMsg as HsConsensusMsg,
-    Phase,
-    Proposal as HsProposal,
-    QuorumCert as HsQuorumCert, // <-- alias legacy QC
-    SignedConsensusMsg as HsSignedConsensusMsg,
-    ValidatorId,
-    View,
-    Vote as HsVote,
-};
+pub use crate::consensus_msg::ValidatorId;
 
 #[cfg(feature = "metrics")]
 pub mod metrics;

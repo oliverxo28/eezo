@@ -455,7 +455,6 @@ struct DagStatusView {
 async fn dag_status_handler(State(state): State<AppState>) -> Json<DagStatusView> {
     // Read current consensus mode from env (same helper you already use)
     let mode = match env_consensus_mode() {
-        ConsensusMode::Legacy0 => "legacy-0".to_string(),
         ConsensusMode::Dag => "dag".to_string(),
         ConsensusMode::DagHybrid => "dag-hybrid".to_string(),
         ConsensusMode::DagPrimary => "dag-primary".to_string(),
@@ -1128,7 +1127,10 @@ fn env_u16(var: &str, default_v: u16) -> u16 {
 /// - Shadow/lab testing and comparison
 /// - Development debugging
 ///
-/// Legacy consensus NEVER decides block finality in production configurations.
+/// # T85.0: DAG-Only Consensus
+///
+/// EEZO's consensus in this branch is DAG-primary + STM. HotStuff has been
+/// completely removed. The only consensus modes available are DAG-based.
 ///
 /// ## Mode Hierarchy
 ///
@@ -1136,47 +1138,31 @@ fn env_u16(var: &str, default_v: u16) -> u16 {
 /// |------|-------------|----------------|
 /// | `DagPrimary` | DAG is sole consensus authority | ✅ Recommended |
 /// | `DagHybrid` | DAG primary with mempool fallback | Transition only |
-/// | `Dag` | DAG tx source with legacy commit | Legacy |
-/// | `Legacy0` | Pre-DAG consensus (historical) | ❌ Not for production |
+/// | `Dag` | DAG tx source (legacy transition) | Legacy only |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConsensusMode {
-    /// T81.5: Legacy pre-DAG block production (historical mode 0).
-    /// 
-    /// # Deprecation Notice
-    /// 
-    /// **This variant is deprecated and will be removed in a future release.**
-    /// EEZO is now DAG-only; use `DagPrimary` instead.
-    /// 
-    /// This variant remains in the enum for backward compatibility during the
-    /// transition period (T81.0–T81.4). It is not constructed in any build;
-    /// attempting to use `EEZO_CONSENSUS_MODE=hotstuff` or `hs` will result
-    /// in an error log and fallback to `DagPrimary`.
-    #[deprecated(since = "T81.5", note = "EEZO is DAG-only; use DagPrimary instead")]
-    Legacy0,
-    /// DAG mode: DAG is used for tx source + dry-run + shadow consensus,
-    /// but legacy path still commits blocks. Legacy transition mode.
+    /// DAG mode: DAG is used for tx source and ordering.
+    /// Legacy transition mode only.
     Dag,
     /// T76.1: Hybrid mode: DAG provides ordered batches as primary tx source,
     /// with mempool fallback. Transition mode only.
     DagHybrid,
-    /// T78.3/T80.0/T81.1: DAG-primary mode (PRODUCTION RECOMMENDED).
+    /// T78.3/T80.0/T81.1/T85.0: DAG-primary mode (PRODUCTION RECOMMENDED).
     /// DAG is the only source of tx ordering for committed blocks.
     /// No mempool fallback on the main path.
     DagPrimary,
 }
 
 impl ConsensusMode {
-    /// T76.11/T78.3/T80.0: Compute the gauge value for the consensus mode metric.
+    /// T76.11/T78.3/T80.0/T85.0: Compute the gauge value for the consensus mode metric.
     ///
     /// Returns:
-    /// - 0 for Legacy0 (legacy mode, not recommended)
+    /// - 0 for DagHybrid mode with DAG ordering disabled
     /// - 1 for DagHybrid mode with DAG ordering enabled (transition)
-    /// - 0 for DagHybrid mode with DAG ordering disabled (effectively legacy)
-    /// - 2 for full DAG mode (legacy)
+    /// - 2 for Dag mode (legacy transition)
     /// - 3 for DagPrimary mode (PRODUCTION: DAG is sole consensus authority)
     fn gauge_value(&self, dag_ordering_enabled: bool) -> i64 {
         match self {
-            ConsensusMode::Legacy0 => 0,
             ConsensusMode::DagHybrid => {
                 if dag_ordering_enabled { 1 } else { 0 }
             }
@@ -1188,82 +1174,43 @@ impl ConsensusMode {
 
 /// Parse consensus mode from EEZO_CONSENSUS_MODE environment variable.
 ///
+/// # T85.0: DAG-Only Consensus
+///
+/// EEZO's consensus in this branch is DAG-primary + STM. HotStuff has been
+/// completely removed.
+///
 /// # Production Configuration
 ///
 /// For production deployments (devnet/testnet/mainnet), use:
 /// - `EEZO_CONSENSUS_MODE=dag-primary` (or rely on devnet-safe/dag-only defaults)
 ///
-/// # Supported Mode Values (T81.5)
+/// # Supported Mode Values
 ///
-/// - `""`, unset → Default based on build profile (see below)
+/// - `""`, unset → Default based on build profile (DagPrimary in all builds)
 /// - `"dag-primary"`, `"dag_primary"` → DagPrimary (PRODUCTION RECOMMENDED)
 /// - `"dag-hybrid"`, `"dag_hybrid"` → DagHybrid (transition mode only)
 /// - `"dag"` → Dag (legacy transition mode)
 ///
-/// # Rejected Values (T81.5)
-///
-/// - `"hotstuff"`, `"hs"` → **ERROR**: These values are no longer valid.
-///   EEZO is DAG-only; use `dag-primary` instead. Node will log an error
-///   and fall back to `dag-primary`.
-/// - Unknown strings log a warning and fall back to the default.
-///
 /// # Build Profile Defaults
 ///
-/// - **`dag-only` feature**: Always DagPrimary (legacy modes unavailable)
-/// - **`devnet-safe` feature**: Default is DagPrimary
-/// - **Generic build**: Default is DagPrimary (T81.5: changed from Legacy0)
+/// - All builds default to DagPrimary (T85.0: EEZO is DAG-only)
 fn env_consensus_mode() -> ConsensusMode {
-    // T80.0: dag-only builds always use DagPrimary
-    #[cfg(feature = "dag-only")]
-    let default_mode = {
-        log::info!(
-            "[T80.0 dag-only] build profile active: DAG is the only consensus mode"
-        );
-        ConsensusMode::DagPrimary
-    };
-    
-    // T78.7: devnet-safe builds default to DagPrimary
-    #[cfg(all(feature = "devnet-safe", not(feature = "dag-only")))]
-    let default_mode = {
-        log::info!(
-            "[T78.7 devnet-safe] build profile active: default consensus mode is dag-primary"
-        );
-        ConsensusMode::DagPrimary
-    };
-    
-    // T81.5: Generic builds now also default to DagPrimary (DAG-only era)
-    #[cfg(not(any(feature = "devnet-safe", feature = "dag-only")))]
-    let default_mode = {
-        log::info!(
-            "[T81.5] Generic build: default consensus mode is dag-primary (EEZO is DAG-only)"
-        );
-        ConsensusMode::DagPrimary
-    };
+    // T85.0: All builds now default to DagPrimary (DAG-only era)
+    let default_mode = ConsensusMode::DagPrimary;
 
     match env::var("EEZO_CONSENSUS_MODE") {
         Ok(raw) => {
             let s = raw.trim().to_ascii_lowercase();
             match s.as_str() {
-                // Empty string uses the default mode (depends on build profile)
+                // Empty string uses the default mode
                 "" => default_mode,
-                
-                // T81.5: hotstuff/hs is NO LONGER VALID - log error and use dag-primary
-                "hotstuff" | "hs" => {
-                    log::error!(
-                        "[T81.5] EEZO_CONSENSUS_MODE={} is no longer supported. \
-                         EEZO is DAG-only; please use EEZO_CONSENSUS_MODE=dag-primary. \
-                         Falling back to dag-primary.",
-                        raw.trim()
-                    );
-                    ConsensusMode::DagPrimary
-                }
                 
                 "dag" => ConsensusMode::Dag,
                 "dag-hybrid" | "dag_hybrid" => ConsensusMode::DagHybrid,
                 "dag-primary" | "dag_primary" => ConsensusMode::DagPrimary,
                 unknown => {
                     log::warn!(
-                        "[T81.5] consensus: unknown EEZO_CONSENSUS_MODE='{}'. \
+                        "[T85.0] consensus: unknown EEZO_CONSENSUS_MODE='{}'. \
                          EEZO is DAG-only; supported modes are: dag-primary, dag-hybrid, dag. \
                          Falling back to dag-primary.",
                         unknown
@@ -3665,13 +3612,8 @@ async fn main() -> anyhow::Result<()> {
         let tick_ms: u64 = env_u64("EEZO_CONSENSUS_TICK_MS", 200);
         let rollback_on_error = true;
 
+        // T85.0: All consensus modes are now DAG-based. Legacy0 has been removed.
         match consensus_mode {
-            ConsensusMode::Legacy0 => {
-                let single: SingleNode = SingleNode::new(cfg, sk, pk);
-                // NEW: pass the DB (Some(persistence.clone())) so T36.5 can read real roots/timestamp
-                let runner = CoreRunnerHandle::spawn(single, Some(persistence.clone()), tick_ms, rollback_on_error);
-                (Some(runner), None)
-            }
             ConsensusMode::Dag | ConsensusMode::DagHybrid | ConsensusMode::DagPrimary => {
                 // T73.fix / T76.1: In DAG and DagHybrid modes, we need BOTH runners:
                 // - CoreRunnerHandle: for actual block production (drains mempool, executes blocks, commits to ledger)
@@ -3779,12 +3721,8 @@ async fn main() -> anyhow::Result<()> {
         let tick_ms = env_u64("EEZO_CONSENSUS_TICK_MS", 200);
         let rollback_on_error = true;
 
+        // T85.0: All consensus modes are now DAG-based. Legacy0 has been removed.
         match consensus_mode {
-            ConsensusMode::Legacy0 => {
-                let single: SingleNode = SingleNode::new(cfg, sk, pk);
-                let runner = CoreRunnerHandle::spawn(single, tick_ms, rollback_on_error);
-                (Some(runner), None)
-            }
             ConsensusMode::Dag | ConsensusMode::DagHybrid | ConsensusMode::DagPrimary => {
                 // T73.fix / T76.1: In DAG and DagHybrid modes, we need BOTH runners:
                 // - CoreRunnerHandle: for actual block production (drains mempool, executes blocks, commits to ledger)
@@ -3841,11 +3779,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "pq44-runtime"))]
     let (core_runner, dag_runner): (Option<Arc<CoreRunnerHandle>>, Option<Arc<DagRunnerHandle>>) = (None, None);
 
-    // T81.4: Legacy consensus code (historical, not used in production)
-    // let hs: Arc<Mutex<eezo_ledger::HotStuff<StaticCertStore, consensus_runner::NodeLoopback>>> = {
-    //     let certs = Arc::new(StaticCertStore::new());
-    // consensus_runner::start_single_node_consensus(chain_id, certs)
-    // };
+    // T85.0: HotStuff code has been completely removed. EEZO is DAG-only.
 
     // ── T36.2: Start the consensus-core runner in testing mode and a QC holder
     #[cfg(all(feature = "consensus-core-adapter", feature = "consensus-core-testing", not(feature = "pq44-runtime")))]
@@ -5186,7 +5120,7 @@ mod consensus_mode_tests {
     fn test_consensus_mode_parsing() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        // T81.5: All builds now default to DagPrimary (EEZO is DAG-only)
+        // T85.0: All builds now default to DagPrimary (EEZO is DAG-only)
         std::env::remove_var("EEZO_CONSENSUS_MODE");
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
 
@@ -5194,18 +5128,8 @@ mod consensus_mode_tests {
         std::env::set_var("EEZO_CONSENSUS_MODE", "");
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary);
 
-        // T81.5: Legacy modes (hotstuff/hs) are NO LONGER VALID in any build.
-        // They log an error and fall back to DagPrimary.
-        std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
-        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Fallback
-
-        std::env::set_var("EEZO_CONSENSUS_MODE", "HOTSTUFF");
-        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Fallback
-
-        std::env::set_var("EEZO_CONSENSUS_MODE", "hs");
-        assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Fallback
-
-        std::env::set_var("EEZO_CONSENSUS_MODE", "HS");
+        // T85.0: Unknown modes fall back to DagPrimary.
+        std::env::set_var("EEZO_CONSENSUS_MODE", "unknown");
         assert_eq!(env_consensus_mode(), ConsensusMode::DagPrimary); // Fallback
 
         // Test dag (works in all builds)
@@ -5347,9 +5271,7 @@ mod consensus_mode_tests {
     fn test_consensus_mode_gauge_value_t78_3() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        // Test Legacy0 mode always returns 0
-        assert_eq!(ConsensusMode::Legacy0.gauge_value(false), 0);
-        assert_eq!(ConsensusMode::Legacy0.gauge_value(true), 0);
+        // T85.0: Legacy0 has been removed. All modes are now DAG-based.
 
         // Test DAG mode always returns 2
         assert_eq!(ConsensusMode::Dag.gauge_value(false), 2);
@@ -5444,18 +5366,18 @@ mod consensus_mode_tests {
     }
 
     /// T78.9/T81.5: Test that explicit consensus mode overrides devnet-safe defaults.
-    /// Note: hotstuff/hs are no longer valid and fall back to DagPrimary with an error.
+    /// T85.0: Test that unknown modes fall back to DagPrimary.
     #[cfg(feature = "devnet-safe")]
     #[test]
     fn test_devnet_safe_explicit_mode_override() {
         let _guard = ENV_LOCK.lock().expect("T78.9: failed to acquire env lock");
         
-        // T81.5: Legacy mode (hotstuff) is no longer valid - falls back to DagPrimary
-        std::env::set_var("EEZO_CONSENSUS_MODE", "hotstuff");
+        // T85.0: Unknown modes fall back to DagPrimary
+        std::env::set_var("EEZO_CONSENSUS_MODE", "unknown");
         assert_eq!(
             env_consensus_mode(),
             ConsensusMode::DagPrimary,
-            "T81.5: hotstuff is no longer valid, should fall back to DagPrimary"
+            "T85.0: unknown mode should fall back to DagPrimary"
         );
         
         // Explicitly set dag-hybrid mode - still works

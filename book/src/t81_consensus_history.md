@@ -49,6 +49,15 @@ T81 completed the transition:
 - T81.2: Updated health and metrics to be DAG-only
 - T81.3: Documentation cleanup and final verification
 
+### T85.0: Complete HotStuff Code Deletion
+
+T85.0 removed all remaining HotStuff code:
+- Deleted `HotStuff` struct and all related types (`VoteBook`, `CommitInfo`, `ConsensusCfg`, `ConsensusNetwork` trait)
+- Removed `ConsensusMode::Legacy0` variant
+- Deleted HotStuff-specific tests (`consensus_single.rs`, `double_sign.rs`)
+- Removed HotStuff metrics (votes, QCs, views)
+- Cleaned up all legacy consensus message types except `ValidatorId`
+
 ## Build Commands
 
 ### Official Production Build
@@ -147,15 +156,16 @@ Value `3` indicates dag-primary mode (the only production mode).
 
 ## Legacy Code Note
 
-The codebase retains some references to HotStuff for:
-- Historical documentation (this file, earlier milestone docs)
-- Test infrastructure that validates consensus message signing (shared with DAG)
-- Enum variants for backward compatibility (never constructed in dag-only builds)
+**T85.0: HotStuff code has been completely removed from the codebase.**
 
-These are **historical artifacts** and do not affect production behavior. In `dag-only` builds:
-- The `ConsensusMode::Hotstuff` variant exists but is never constructed
-- Consensus message types are shared infrastructure used by DAG consensus too
-- The compiler confirms unused code with warnings
+As of T85.0, the EEZO codebase is 100% DAG-only:
+- All HotStuff structs, traits, and implementations have been deleted
+- The `ConsensusMode::Legacy0` variant has been removed
+- HotStuff-specific metrics (votes, QCs, views) have been removed
+- Only `ValidatorId` type is retained from consensus_msg.rs (used by cert_store)
+
+Historical documentation referencing HotStuff remains for context, but no HotStuff code
+is present in this branch.
 
 ## References
 
