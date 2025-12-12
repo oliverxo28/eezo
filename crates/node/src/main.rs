@@ -1141,7 +1141,7 @@ fn env_u16(var: &str, default_v: u16) -> u16 {
 /// | `Dag` | DAG tx source (legacy transition) | Legacy only |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConsensusMode {
-    /// DAG mode: DAG is used for tx source + dry-run + shadow consensus.
+    /// DAG mode: DAG is used for tx source and ordering.
     /// Legacy transition mode only.
     Dag,
     /// T76.1: Hybrid mode: DAG provides ordered batches as primary tx source,
@@ -1157,9 +1157,9 @@ impl ConsensusMode {
     /// T76.11/T78.3/T80.0/T85.0: Compute the gauge value for the consensus mode metric.
     ///
     /// Returns:
+    /// - 0 for DagHybrid mode with DAG ordering disabled
     /// - 1 for DagHybrid mode with DAG ordering enabled (transition)
-    /// - 0 for DagHybrid mode with DAG ordering disabled (effectively legacy)
-    /// - 2 for full DAG mode (legacy transition)
+    /// - 2 for Dag mode (legacy transition)
     /// - 3 for DagPrimary mode (PRODUCTION: DAG is sole consensus authority)
     fn gauge_value(&self, dag_ordering_enabled: bool) -> i64 {
         match self {
