@@ -983,7 +983,8 @@ impl CoreRunnerHandle {
                                             if !tx_bytes.is_empty() {
                                                 // hash_batch_with_gpu_check computes CPU hashes,
                                                 // compares with GPU if available, and logs mismatches.
-                                                // The result is always CPU hashes (canonical).
+                                                // Result is discarded intentionally: this is diagnostic only,
+                                                // not used for consensus. Metrics and logs track GPU health.
                                                 let _ = hash_batch_with_gpu_check(&tx_bytes);
                                                 log::debug!(
                                                     "T90.0: GPU hash diagnostic ran for block h={} ({} txs)",

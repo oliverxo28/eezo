@@ -3225,7 +3225,6 @@ async fn main() -> anyhow::Result<()> {
         {
             use crate::gpu_hash::is_gpu_hash_enabled;
             crate::metrics::gpu_hash_enabled_set(0);
-            
             if is_gpu_hash_enabled() {
                 log::info!(
                     "T90.0: GPU hashing will be attempted (EEZO_GPU_HASH_ENABLED=1); \
