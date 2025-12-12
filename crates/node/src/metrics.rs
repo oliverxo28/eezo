@@ -3721,6 +3721,99 @@ pub fn register_t87_deep_perf_metrics() {
 }
 
 // -----------------------------------------------------------------------------
+// T87.4 — Arena-Indexed STM Kernel Metrics
+// -----------------------------------------------------------------------------
+//
+// These metrics track the T87.4 arena kernel performance:
+// - Kernel mode (legacy vs arena)
+// - Accounts loaded into arena per block
+// - Time to build arena per block
+
+/// Gauge: Current STM kernel mode (0=legacy, 1=arena).
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_KERNEL_MODE: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_exec_stm_kernel_mode",
+        "Current STM kernel mode: 0=legacy, 1=arena (T87.4)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total accounts loaded into arena across all blocks.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_ARENA_ACCOUNTS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_exec_stm_arena_accounts_total",
+        "Total accounts loaded into arena across all blocks (T87.4)"
+    )
+    .unwrap()
+});
+
+/// Histogram: Time to build arena per block.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_ARENA_BUILD_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_exec_stm_arena_build_seconds",
+        "Time to build arena per block (seconds) (T87.4)",
+        vec![0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
+    )
+    .unwrap()
+});
+
+/// Helper: Set STM kernel mode gauge (T87.4).
+#[inline]
+pub fn exec_stm_kernel_mode_set(is_arena: bool) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_KERNEL_MODE.set(if is_arena { 1 } else { 0 });
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = is_arena;
+    }
+}
+
+/// Helper: Increment arena accounts counter (T87.4).
+#[inline]
+pub fn exec_stm_arena_accounts_inc(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_ARENA_ACCOUNTS_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Observe arena build time (T87.4).
+#[inline]
+pub fn exec_stm_observe_arena_build_seconds(seconds: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_ARENA_BUILD_SECONDS.observe(seconds);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = seconds;
+    }
+}
+
+/// Eagerly register T87.4 arena kernel metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t87_arena_kernel_metrics() {
+    let _ = &*EEZO_EXEC_STM_KERNEL_MODE;
+    let _ = &*EEZO_EXEC_STM_ARENA_ACCOUNTS_TOTAL;
+    let _ = &*EEZO_EXEC_STM_ARENA_BUILD_SECONDS;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t87_arena_kernel_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
 // T82.0 — CPU Profiling Hooks
 // -----------------------------------------------------------------------------
 //

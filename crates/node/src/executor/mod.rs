@@ -27,6 +27,10 @@ pub use parallel::ParallelExecutor;
 #[cfg(feature = "stm-exec")]
 pub use stm::StmExecutor;
 
+// T87.4: Export StmConfig and StmKernelMode when stm-exec feature is enabled
+#[cfg(feature = "stm-exec")]
+pub use stm::{StmConfig, StmKernelMode};
+
 // ============================================================================
 // T73.5: Executor Equivalence Tests (Single vs STM)
 // ============================================================================
@@ -388,5 +392,194 @@ mod equivalence_tests {
 
         // Verify fees burned: 1 + 2 + 3 = 6
         assert_eq!(supply_after.burn_total, supply_before.burn_total + 6);
+    }
+
+    // ========================================================================
+    // T87.4: Arena Kernel Equivalence Test
+    // ========================================================================
+    //
+    // Verifies that the arena kernel produces the same results as the legacy
+    // overlay-based kernel for the same input.
+
+    #[test]
+    fn test_arena_kernel_equivalence_no_conflicts() {
+        use super::stm::{StmConfig, StmKernelMode};
+
+        // Create two nodes with identical initial state
+        let mut node_legacy = create_test_node();
+        let mut node_arena = create_test_node();
+
+        // Create 4 independent senders with unique addresses
+        let sender1_bytes: [u8; 20] = [0x01; 20];
+        let sender2_bytes: [u8; 20] = [0x02; 20];
+        let sender3_bytes: [u8; 20] = [0x03; 20];
+        let sender4_bytes: [u8; 20] = [0x04; 20];
+        let recipient_bytes: [u8; 20] = [0xca; 20];
+
+        // Fund senders on both nodes
+        for node in [&mut node_legacy, &mut node_arena] {
+            create_funded_sender(node, sender1_bytes, 100_000);
+            create_funded_sender(node, sender2_bytes, 100_000);
+            create_funded_sender(node, sender3_bytes, 100_000);
+            create_funded_sender(node, sender4_bytes, 100_000);
+        }
+        let recipient = Address(recipient_bytes);
+
+        // Create transactions from different senders (no conflicts)
+        let txs = vec![
+            create_test_tx(sender1_bytes, recipient, 1000, 1, 0),
+            create_test_tx(sender2_bytes, recipient, 2000, 2, 0),
+            create_test_tx(sender3_bytes, recipient, 3000, 3, 0),
+            create_test_tx(sender4_bytes, recipient, 4000, 4, 0),
+        ];
+
+        // Execute with legacy kernel
+        let legacy_config = StmConfig {
+            kernel_mode: StmKernelMode::Legacy,
+            ..StmConfig::default()
+        };
+        let legacy_executor = StmExecutor::with_config(legacy_config);
+        let input_legacy = ExecInput::new(txs.clone(), 1);
+        let outcome_legacy = legacy_executor.execute_block(&mut node_legacy, input_legacy);
+
+        // Execute with arena kernel
+        let arena_config = StmConfig {
+            kernel_mode: StmKernelMode::Arena,
+            ..StmConfig::default()
+        };
+        let arena_executor = StmExecutor::with_config(arena_config);
+        let input_arena = ExecInput::new(txs.clone(), 1);
+        let outcome_arena = arena_executor.execute_block(&mut node_arena, input_arena);
+
+        // Both should succeed
+        assert!(outcome_legacy.result.is_ok(), "Legacy kernel failed");
+        assert!(outcome_arena.result.is_ok(), "Arena kernel failed");
+
+        let block_legacy = outcome_legacy.result.unwrap();
+        let block_arena = outcome_arena.result.unwrap();
+
+        // Same number of transactions committed
+        assert_eq!(
+            block_legacy.txs.len(), 
+            block_arena.txs.len(),
+            "Different tx counts: legacy={}, arena={}",
+            block_legacy.txs.len(),
+            block_arena.txs.len()
+        );
+
+        // Same tx hashes (same order)
+        for (i, (tx_l, tx_a)) in block_legacy.txs.iter().zip(block_arena.txs.iter()).enumerate() {
+            assert_eq!(
+                tx_l.hash(), tx_a.hash(),
+                "Transaction {} hash mismatch between legacy and arena",
+                i
+            );
+        }
+
+        // Apply blocks to their respective nodes
+        apply_block_to_node(&mut node_legacy, &block_legacy);
+        apply_block_to_node(&mut node_arena, &block_arena);
+
+        // Compare final state for all touched accounts
+        for addr_bytes in [sender1_bytes, sender2_bytes, sender3_bytes, sender4_bytes, recipient_bytes] {
+            let addr = Address(addr_bytes);
+            let acct_legacy = node_legacy.accounts.get(&addr);
+            let acct_arena = node_arena.accounts.get(&addr);
+            
+            assert_eq!(
+                acct_legacy.balance, acct_arena.balance,
+                "Balance mismatch for {:?}: legacy={}, arena={}",
+                addr, acct_legacy.balance, acct_arena.balance
+            );
+            assert_eq!(
+                acct_legacy.nonce, acct_arena.nonce,
+                "Nonce mismatch for {:?}: legacy={}, arena={}",
+                addr, acct_legacy.nonce, acct_arena.nonce
+            );
+        }
+
+        // Compare supply state
+        assert_eq!(
+            node_legacy.supply.burn_total, 
+            node_arena.supply.burn_total,
+            "Supply burn_total mismatch: legacy={}, arena={}",
+            node_legacy.supply.burn_total,
+            node_arena.supply.burn_total
+        );
+    }
+
+    #[test]
+    fn test_arena_kernel_equivalence_sequential_nonces() {
+        use super::stm::{StmConfig, StmKernelMode};
+
+        // Create two nodes with identical initial state
+        let mut node_legacy = create_test_node();
+        let mut node_arena = create_test_node();
+
+        // Create a single sender with enough balance for many txs
+        let sender_bytes: [u8; 20] = [0x42; 20];
+        let recipient_bytes: [u8; 20] = [0xbe; 20];
+
+        for node in [&mut node_legacy, &mut node_arena] {
+            create_funded_sender(node, sender_bytes, 100_000);
+        }
+        let recipient = Address(recipient_bytes);
+
+        // Create 10 sequential transactions (nonces 0-9)
+        let txs: Vec<SignedTx> = (0..10u64)
+            .map(|nonce| create_test_tx(sender_bytes, recipient, 1000, 1, nonce))
+            .collect();
+
+        // Execute with legacy kernel
+        let legacy_config = StmConfig {
+            kernel_mode: StmKernelMode::Legacy,
+            ..StmConfig::default()
+        };
+        let legacy_executor = StmExecutor::with_config(legacy_config);
+        let input_legacy = ExecInput::new(txs.clone(), 1);
+        let outcome_legacy = legacy_executor.execute_block(&mut node_legacy, input_legacy);
+
+        // Execute with arena kernel
+        let arena_config = StmConfig {
+            kernel_mode: StmKernelMode::Arena,
+            ..StmConfig::default()
+        };
+        let arena_executor = StmExecutor::with_config(arena_config);
+        let input_arena = ExecInput::new(txs.clone(), 1);
+        let outcome_arena = arena_executor.execute_block(&mut node_arena, input_arena);
+
+        // Both should succeed
+        assert!(outcome_legacy.result.is_ok(), "Legacy kernel failed");
+        assert!(outcome_arena.result.is_ok(), "Arena kernel failed");
+
+        let block_legacy = outcome_legacy.result.unwrap();
+        let block_arena = outcome_arena.result.unwrap();
+
+        // Same number of transactions (all 10 should commit)
+        assert_eq!(block_legacy.txs.len(), 10);
+        assert_eq!(block_arena.txs.len(), 10);
+
+        // Apply blocks
+        apply_block_to_node(&mut node_legacy, &block_legacy);
+        apply_block_to_node(&mut node_arena, &block_arena);
+
+        // Compare sender final state
+        let sender = Address(sender_bytes);
+        let legacy_sender = node_legacy.accounts.get(&sender);
+        let arena_sender = node_arena.accounts.get(&sender);
+        
+        assert_eq!(legacy_sender.balance, arena_sender.balance);
+        assert_eq!(legacy_sender.nonce, arena_sender.nonce);
+        assert_eq!(legacy_sender.nonce, 10);
+
+        // Compare receiver final state
+        let legacy_receiver = node_legacy.accounts.get(&recipient);
+        let arena_receiver = node_arena.accounts.get(&recipient);
+        
+        assert_eq!(legacy_receiver.balance, arena_receiver.balance);
+        assert_eq!(legacy_receiver.balance, 10 * 1000);
+
+        // Compare supply
+        assert_eq!(node_legacy.supply.burn_total, node_arena.supply.burn_total);
     }
 }

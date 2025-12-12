@@ -31,6 +31,9 @@ pub mod address;
 
 pub mod accounts;
 
+// T87.4: Arena-indexed account storage for STM executor
+pub mod stm_arena;
+
 pub mod tx_types;
 
 pub mod tx_sig;
@@ -53,6 +56,9 @@ pub use supply::{MintSource, Supply, SupplyError};
 pub use address::Address;
 
 pub use accounts::{Account, Accounts};
+
+// T87.4: Arena-indexed account storage for STM executor
+pub use stm_arena::{AccountArena, SUPPLY_INDEX};
 
 pub use tx_types::{tx_domain_bytes, validate_tx_shape, SignedTx, TxCore, TxStatelessError};
 
