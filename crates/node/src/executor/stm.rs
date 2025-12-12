@@ -549,6 +549,52 @@ impl TxContext {
     }
 }
 
+// =============================================================================
+// T87.4: STM Kernel Mode Selection
+// =============================================================================
+
+/// Selects which STM kernel implementation to use.
+///
+/// T87.4: The arena kernel uses cache-friendly contiguous storage for accounts,
+/// while the legacy kernel uses HashMap-based lookups. Both produce identical
+/// results; the arena kernel is an optimization for better cache locality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StmKernelMode {
+    /// Use the existing HashMap-based implementation.
+    /// This is the default and matches pre-T87.4 behavior exactly.
+    #[default]
+    Legacy,
+    
+    /// Use the arena-indexed implementation for better cache locality.
+    /// Opt-in via EEZO_STM_KERNEL_MODE=arena.
+    Arena,
+}
+
+impl StmKernelMode {
+    /// Parse kernel mode from environment variable.
+    ///
+    /// Returns `Arena` if EEZO_STM_KERNEL_MODE is set to "arena".
+    /// Returns `Legacy` for any other value or if the variable is not set.
+    pub fn from_env() -> Self {
+        std::env::var("EEZO_STM_KERNEL_MODE")
+            .map(|v| {
+                let s = v.trim().to_ascii_lowercase();
+                if s == "arena" {
+                    StmKernelMode::Arena
+                } else {
+                    StmKernelMode::Legacy
+                }
+            })
+            .unwrap_or(StmKernelMode::Legacy)
+    }
+
+    /// Check if this is the arena kernel mode.
+    #[inline]
+    pub fn is_arena(&self) -> bool {
+        matches!(self, StmKernelMode::Arena)
+    }
+}
+
 /// Block-STM executor configuration.
 #[derive(Debug, Clone)]
 pub struct StmConfig {
@@ -567,6 +613,9 @@ pub struct StmConfig {
     /// T87.1: Enable aggressive wave grouping for better parallelism.
     /// Configured via EEZO_STM_WAVE_AGGRESSIVE env var (default: false).
     pub wave_aggressive: bool,
+    /// T87.4: STM kernel mode (legacy or arena).
+    /// Configured via EEZO_STM_KERNEL_MODE env var (default: legacy).
+    pub kernel_mode: StmKernelMode,
 }
 
 impl Default for StmConfig {
@@ -578,6 +627,7 @@ impl Default for StmConfig {
             exec_lanes: 16,
             wave_cap: 0, // 0 means unlimited
             wave_aggressive: false, // T87.1: opt-in
+            kernel_mode: StmKernelMode::Legacy, // T87.4: default to legacy
         }
     }
 }
@@ -598,6 +648,7 @@ impl StmConfig {
     /// - `EEZO_EXEC_LANES`: Number of execution lanes (default: 16, allow 32/48/64)
     /// - `EEZO_EXEC_WAVE_CAP`: Optional cap on txs per wave (default: 0 = unlimited)
     /// - `EEZO_STM_WAVE_AGGRESSIVE`: Enable aggressive wave grouping (default: 0)
+    /// - `EEZO_STM_KERNEL_MODE`: Kernel mode selection (default: legacy, optional: arena)
     pub fn from_env(threads: usize) -> Self {
         let max_retries = std::env::var("EEZO_STM_MAX_RETRIES")
             .ok()
@@ -639,6 +690,9 @@ impl StmConfig {
             })
             .unwrap_or(false);
 
+        // T87.4: Parse kernel_mode from environment (default legacy)
+        let kernel_mode = StmKernelMode::from_env();
+
         Self {
             threads,
             max_retries,
@@ -646,6 +700,7 @@ impl StmConfig {
             exec_lanes,
             wave_cap,
             wave_aggressive,
+            kernel_mode,
         }
     }
 }
@@ -681,13 +736,15 @@ impl StmExecutor {
     /// Create a new STM executor loading config from environment.
     /// T76.7: Also logs and sets gauges for exec_lanes and wave_cap.
     /// T87.1: Also logs and sets gauge for wave_aggressive.
+    /// T87.4: Also logs and sets gauge for kernel_mode.
     pub fn from_env(threads: usize) -> Self {
         let config = StmConfig::from_env(threads);
         
-        // T76.7 + T87.1: Log the configured values
+        // T76.7 + T87.1 + T87.4: Log the configured values
+        let kernel_mode_str = if config.kernel_mode.is_arena() { "arena" } else { "legacy" };
         log::info!(
-            "stm-executor: initialized with threads={} exec_lanes={} wave_cap={} (0=unlimited) wave_aggressive={}",
-            config.threads, config.exec_lanes, config.wave_cap, config.wave_aggressive
+            "stm-executor: initialized with threads={} exec_lanes={} wave_cap={} (0=unlimited) wave_aggressive={} kernel_mode={}",
+            config.threads, config.exec_lanes, config.wave_cap, config.wave_aggressive, kernel_mode_str
         );
         
         // T76.7: Set gauge metrics
@@ -697,6 +754,8 @@ impl StmExecutor {
             crate::metrics::exec_wave_cap_set(config.wave_cap);
             // T87.1: Set aggressive wave mode gauge
             crate::metrics::exec_stm_wave_aggressive_set(config.wave_aggressive);
+            // T87.4: Set kernel mode gauge
+            crate::metrics::exec_stm_kernel_mode_set(config.kernel_mode.is_arena());
         }
         
         Self { config }
@@ -1664,6 +1723,8 @@ mod tests {
         assert_eq!(config.wave_cap, 0); // 0 = unlimited
         // T87.1: Check wave_aggressive
         assert!(!config.wave_aggressive);
+        // T87.4: Check kernel_mode
+        assert_eq!(config.kernel_mode, StmKernelMode::Legacy);
     }
 
     #[test]
@@ -1675,6 +1736,7 @@ mod tests {
             exec_lanes: 32,
             wave_cap: 100,
             wave_aggressive: true, // T87.1
+            kernel_mode: StmKernelMode::Arena, // T87.4
         };
         let exec = StmExecutor::with_config(config);
         assert_eq!(exec.threads(), 8);
@@ -1685,6 +1747,8 @@ mod tests {
         assert_eq!(exec.config().wave_cap, 100);
         // T87.1: Check wave_aggressive
         assert!(exec.config().wave_aggressive);
+        // T87.4: Check kernel_mode
+        assert_eq!(exec.config().kernel_mode, StmKernelMode::Arena);
     }
 
     // T76.7: Test exec_lanes and wave_cap configuration from environment
@@ -1696,6 +1760,7 @@ mod tests {
         std::env::remove_var("EEZO_EXEC_LANES");
         std::env::remove_var("EEZO_EXEC_WAVE_CAP");
         std::env::remove_var("EEZO_STM_WAVE_AGGRESSIVE"); // T87.1
+        std::env::remove_var("EEZO_STM_KERNEL_MODE"); // T87.4
         
         let config = StmConfig::from_env(4);
         
@@ -1703,6 +1768,7 @@ mod tests {
         assert_eq!(config.exec_lanes, 16); // default
         assert_eq!(config.wave_cap, 0); // default, unlimited
         assert!(!config.wave_aggressive); // T87.1: default off
+        assert_eq!(config.kernel_mode, StmKernelMode::Legacy); // T87.4: default legacy
     }
 
     #[test]
@@ -1752,6 +1818,62 @@ mod tests {
         
         // Clean up
         std::env::remove_var("EEZO_STM_WAVE_AGGRESSIVE");
+    }
+
+    // T87.4: Test kernel_mode configuration from environment
+    #[test]
+    fn test_stm_config_from_env_kernel_mode() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        // Test arena kernel mode
+        std::env::set_var("EEZO_STM_KERNEL_MODE", "arena");
+        let config = StmConfig::from_env(4);
+        assert_eq!(config.kernel_mode, StmKernelMode::Arena);
+        assert!(config.kernel_mode.is_arena());
+        
+        // Test legacy kernel mode (explicit)
+        std::env::set_var("EEZO_STM_KERNEL_MODE", "legacy");
+        let config = StmConfig::from_env(4);
+        assert_eq!(config.kernel_mode, StmKernelMode::Legacy);
+        assert!(!config.kernel_mode.is_arena());
+        
+        // Test unknown value defaults to legacy
+        std::env::set_var("EEZO_STM_KERNEL_MODE", "unknown");
+        let config = StmConfig::from_env(4);
+        assert_eq!(config.kernel_mode, StmKernelMode::Legacy);
+        
+        // Clean up
+        std::env::remove_var("EEZO_STM_KERNEL_MODE");
+    }
+
+    // T87.4: Test StmKernelMode enum
+    #[test]
+    fn test_stm_kernel_mode_default() {
+        assert_eq!(StmKernelMode::default(), StmKernelMode::Legacy);
+    }
+
+    #[test]
+    fn test_stm_kernel_mode_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        // Test unset defaults to Legacy
+        std::env::remove_var("EEZO_STM_KERNEL_MODE");
+        assert_eq!(StmKernelMode::from_env(), StmKernelMode::Legacy);
+        
+        // Test "arena" value
+        std::env::set_var("EEZO_STM_KERNEL_MODE", "arena");
+        assert_eq!(StmKernelMode::from_env(), StmKernelMode::Arena);
+        
+        // Test "ARENA" (case insensitive)
+        std::env::set_var("EEZO_STM_KERNEL_MODE", "ARENA");
+        assert_eq!(StmKernelMode::from_env(), StmKernelMode::Arena);
+        
+        // Test other values default to Legacy
+        std::env::set_var("EEZO_STM_KERNEL_MODE", "other");
+        assert_eq!(StmKernelMode::from_env(), StmKernelMode::Legacy);
+        
+        // Clean up
+        std::env::remove_var("EEZO_STM_KERNEL_MODE");
     }
 
     #[test]
