@@ -978,9 +978,7 @@ impl CoreRunnerHandle {
                                         // This is purely observational - consensus uses CPU hashes.
                                         if is_gpu_hash_enabled() && !block.txs.is_empty() {
                                             let tx_bytes: Vec<Vec<u8>> = block.txs.iter()
-                                                .filter_map(|tx| {
-                                                    eezo_ledger::SignedTx::encode_rlp(tx).ok()
-                                                })
+                                                .map(|tx| tx.to_bytes())
                                                 .collect();
                                             if !tx_bytes.is_empty() {
                                                 // hash_batch_with_gpu_check computes CPU hashes,

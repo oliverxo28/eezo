@@ -3218,21 +3218,21 @@ async fn main() -> anyhow::Result<()> {
 
         // T90.0: GPU Hash Plumbing metrics
         register_t90_gpu_hash_metrics();
-        // T90.0: Initialize GPU hash enabled gauge based on env var and feature flag
+        // T90.0: Initialize GPU hash enabled gauge and log status
+        // The gauge starts at 0 (GPU not yet initialized). When the first block
+        // is committed and hash_batch_with_gpu_check is called, GpuHashBackend::new()
+        // will update the gauge to 1 if GPU init succeeds.
         {
             use crate::gpu_hash::is_gpu_hash_enabled;
-            let gpu_enabled = is_gpu_hash_enabled();
+            crate::metrics::gpu_hash_enabled_set(0);
             
-            if gpu_enabled {
-                log::info!("T90.0: GPU hashing enabled (EEZO_GPU_HASH_ENABLED=1)");
-                // The actual GPU backend initialization will happen lazily
-                // when hash_batch_with_gpu_check is called. For now, we just
-                // log the intent. The enabled gauge will be set by GpuHashBackend::new().
-                // Initialize to 0; will be updated when backend is actually used.
-                crate::metrics::gpu_hash_enabled_set(0);
+            if is_gpu_hash_enabled() {
+                log::info!(
+                    "T90.0: GPU hashing will be attempted (EEZO_GPU_HASH_ENABLED=1); \
+                     eezo_gpu_hash_enabled gauge will update on first use"
+                );
             } else {
                 log::info!("T90.0: GPU hashing disabled (EEZO_GPU_HASH_ENABLED not set to 1)");
-                crate::metrics::gpu_hash_enabled_set(0);
             }
         }
 
