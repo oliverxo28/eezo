@@ -392,7 +392,7 @@ source devnet_tps.env
 For Scenario A, you need to set up sender credentials:
 
 ```bash
-# Generate a keypair
+# Generate a keypair (ensure you trust the ml_dsa_keygen binary from your build)
 eval "$(./target/debug/ml_dsa_keygen)"
 
 # Fund the sender account
@@ -403,6 +403,9 @@ curl -X POST http://127.0.0.1:8080/faucet \
 # Then run the soak
 ./scripts/t86_soak_run.sh --scenario A --duration 300
 ```
+
+> **Note:** The `eval` command is used to source environment variables from the keygen output.
+> Only run this with binaries you have built yourself from trusted source code.
 
 ### Low TPS Across All Scenarios
 

@@ -584,8 +584,10 @@ if [[ $DELTA_TXS -gt 0 ]]; then
 fi
 
 # Check 7: Low TPS warning
-TPS_INT=${TPS%.*}  # Convert to integer for comparison
-if [[ ${TPS_INT:-0} -lt 50 && $TX_TARGET -gt 0 ]]; then
+# Use cut to extract integer part safely (handles both "150.00" and "150")
+TPS_INT=$(echo "$TPS" | cut -d. -f1)
+TPS_INT=${TPS_INT:-0}  # Default to 0 if empty
+if [[ $TPS_INT -lt 50 && $TX_TARGET -gt 0 ]]; then
     WARNINGS+=("TPS = $TPS (lower than expected for active load)")
 fi
 
