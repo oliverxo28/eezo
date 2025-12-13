@@ -84,6 +84,9 @@ mod accounts;
 mod executor;
 // T71.0: GPU hashing adapter
 mod gpu_hash;
+// T91.2: CUDA BLAKE3 shadow hashing
+#[cfg(feature = "cuda-hash")]
+mod cuda_hash;
 // T83.2: Async persistence pipeline
 mod persistence_worker;
 // T83.3: Block execution pipelining
@@ -153,6 +156,8 @@ use crate::metrics::{
     register_t87_deep_perf_metrics,
     // T90.0: GPU Hash Plumbing metrics
     register_t90_gpu_hash_metrics,
+    // T91.2: CUDA BLAKE3 shadow path metrics
+    register_t91_cuda_hash_metrics,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -3232,6 +3237,33 @@ async fn main() -> anyhow::Result<()> {
                 );
             } else {
                 log::info!("T90.0: GPU hashing disabled (EEZO_GPU_HASH_ENABLED not set to 1)");
+            }
+        }
+
+        // T91.2: CUDA BLAKE3 shadow path metrics
+        register_t91_cuda_hash_metrics();
+        // T91.2: Initialize CUDA hash enabled gauge and log status
+        // The gauge starts at 0 (CUDA not yet initialized). When the first block
+        // is committed and run_t91_2_cuda_hash_shadow is called, CudaBlake3Engine::new()
+        // will update the gauge to 1 if CUDA init succeeds.
+        {
+            #[cfg(feature = "cuda-hash")]
+            {
+                use crate::cuda_hash::is_cuda_hash_enabled;
+                crate::metrics::cuda_hash_enabled_set(0);
+                if is_cuda_hash_enabled() {
+                    log::info!(
+                        "T91.2: CUDA hashing will be attempted (EEZO_CUDA_HASH_ENABLED=1); \
+                         eezo_cuda_hash_enabled gauge will update on first use"
+                    );
+                } else {
+                    log::info!("T91.2: CUDA hashing disabled (EEZO_CUDA_HASH_ENABLED not set to 1)");
+                }
+            }
+            #[cfg(not(feature = "cuda-hash"))]
+            {
+                crate::metrics::cuda_hash_enabled_set(0);
+                log::info!("T91.2: CUDA hashing disabled (cuda-hash feature not compiled)");
             }
         }
 
