@@ -332,7 +332,7 @@ lanes=8 threads=16 wavecap=0 buckets=64 tx=2000 blocks=290 stm_time=3.1500s hash
 lanes=16 threads=16 wavecap=256 buckets=64 tx=2000 blocks=320 stm_time=2.9800s hash_time=0.004800s stm_per_tx=0.001490s hash_per_tx=0.00000240s tx_per_block=6.25 tps=195.40
 
 ═══════════════════════════════════════════════════════════════════════════════════
-  Sweep Complete: 24 configurations tested
+  Sweep Complete: 36 configurations tested
 ═══════════════════════════════════════════════════════════════════════════════════
 ```
 

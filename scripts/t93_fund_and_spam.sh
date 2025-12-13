@@ -46,15 +46,11 @@ command -v curl >/dev/null || { echo "[t93_fund_and_spam] error: curl is require
 # Find binaries
 # ─────────────────────────────────────────────────────────────────────────────
 KEYGEN_BIN=""
-TXGEN_BIN=""
 
-# Try release first, then debug
+# Try release first, then debug for keygen
 for dir in "target/release" "target/debug"; do
     if [[ -x "$dir/ml_dsa_keygen" ]] && [[ -z "$KEYGEN_BIN" ]]; then
         KEYGEN_BIN="$dir/ml_dsa_keygen"
-    fi
-    if [[ -x "$dir/eezo-txgen" ]] && [[ -z "$TXGEN_BIN" ]]; then
-        TXGEN_BIN="$dir/eezo-txgen"
     fi
 done
 
@@ -64,10 +60,18 @@ if [[ -z "$KEYGEN_BIN" ]]; then
     exit 1
 fi
 
-if [[ -z "$TXGEN_BIN" ]]; then
-    echo "[t93_fund_and_spam] error: eezo-txgen not found. Build with:" >&2
-    echo "  cargo build -p eezo-node --bin eezo-txgen --release" >&2
-    exit 1
+# spam_tps.sh hardcodes target/debug/eezo-txgen, so we need that binary to exist
+# Check if it exists, otherwise create a symlink from release if available
+if [[ ! -x "target/debug/eezo-txgen" ]]; then
+    if [[ -x "target/release/eezo-txgen" ]]; then
+        echo "[t93_fund_and_spam] creating symlink target/debug/eezo-txgen -> ../release/eezo-txgen"
+        mkdir -p target/debug
+        ln -sf ../release/eezo-txgen target/debug/eezo-txgen
+    else
+        echo "[t93_fund_and_spam] error: eezo-txgen not found in target/debug or target/release. Build with:" >&2
+        echo "  cargo build -p eezo-node --bin eezo-txgen" >&2
+        exit 1
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

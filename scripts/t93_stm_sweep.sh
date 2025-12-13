@@ -172,6 +172,15 @@ cargo build -p eezo-crypto --bin ml_dsa_keygen --release --quiet 2>/dev/null || 
 cargo build -p eezo-node --bin eezo-txgen --release --quiet 2>/dev/null || \
     cargo build -p eezo-node --bin eezo-txgen --release
 
+# spam_tps.sh hardcodes target/debug/eezo-txgen, so ensure it exists
+if [[ ! -x "target/debug/eezo-txgen" ]]; then
+    if [[ -x "target/release/eezo-txgen" ]]; then
+        echo "[t93_sweep] creating symlink target/debug/eezo-txgen -> ../release/eezo-txgen"
+        mkdir -p target/debug
+        ln -sf ../release/eezo-txgen target/debug/eezo-txgen
+    fi
+fi
+
 NODE_BIN="$REPO_ROOT/target/release/eezo-node"
 if [[ ! -x "$NODE_BIN" ]]; then
     echo "[t93_sweep] error: eezo-node binary not found at $NODE_BIN" >&2
@@ -285,10 +294,25 @@ for LANES in "${LANES_SET[@]}"; do
                 DELTA_BLOCKS=$(echo "$BLOCKS_AFTER - $BLOCKS_BEFORE" | bc)
                 
                 # Handle integer conversion for DELTA_TX and DELTA_BLOCKS
-                DELTA_TX_INT=${DELTA_TX%.*}
-                DELTA_BLOCKS_INT=${DELTA_BLOCKS%.*}
-                if [[ -z "$DELTA_TX_INT" ]]; then DELTA_TX_INT=0; fi
-                if [[ -z "$DELTA_BLOCKS_INT" ]]; then DELTA_BLOCKS_INT=0; fi
+                # bc returns integers without decimal point, so we need to handle both cases
+                # If the value contains a decimal point, strip it; otherwise use as-is
+                if [[ "$DELTA_TX" == *"."* ]]; then
+                    DELTA_TX_INT=${DELTA_TX%.*}
+                else
+                    DELTA_TX_INT="$DELTA_TX"
+                fi
+                if [[ "$DELTA_BLOCKS" == *"."* ]]; then
+                    DELTA_BLOCKS_INT=${DELTA_BLOCKS%.*}
+                else
+                    DELTA_BLOCKS_INT="$DELTA_BLOCKS"
+                fi
+                # Default to 0 if empty or non-numeric
+                if [[ -z "$DELTA_TX_INT" ]] || ! [[ "$DELTA_TX_INT" =~ ^-?[0-9]+$ ]]; then
+                    DELTA_TX_INT=0
+                fi
+                if [[ -z "$DELTA_BLOCKS_INT" ]] || ! [[ "$DELTA_BLOCKS_INT" =~ ^-?[0-9]+$ ]]; then
+                    DELTA_BLOCKS_INT=0
+                fi
                 
                 # Compute per-tx metrics
                 if [[ "$DELTA_TX_INT" -gt 0 ]]; then
