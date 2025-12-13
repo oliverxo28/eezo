@@ -4584,6 +4584,174 @@ pub fn register_t94_block_packing_metrics() {
 }
 
 // -----------------------------------------------------------------------------
+// T96.0 — Real DAG Ordering + Better Block Packing Metrics
+// -----------------------------------------------------------------------------
+//
+// These metrics track the new T96.0 DAG ordering mode:
+// - eezo_dag_ordering_enabled: Gauge showing if ordering is on (0/1)
+// - eezo_dag_ordered_txs_total: Counter of txs ordered via DAG
+// - eezo_dag_ordering_fallback_total: Counter of fallback events
+// - eezo_dag_block_tx_per_block_hist: Histogram of txs per block with DAG ordering
+
+/// Gauge: DAG ordering mode enabled (0=off, 1=on).
+/// Updated at startup and reflects EEZO_DAG_ORDERING_ENABLED config.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_ORDERING_ENABLED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_dag_ordering_enabled",
+        "Whether DAG ordering mode is enabled (0=off, 1=on) (T96.0)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total transactions ordered via the DAG ordering path.
+/// Incremented when blocks are built using DAG-ordered tx sequences.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_ORDERED_TXS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_ordered_txs_total",
+        "Total txs ordered via DAG ordering path (T96.0)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total fallback events when DAG ordering is enabled but unavailable.
+/// Incremented when DAG ordering is enabled but falls back to mempool for a block.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_ORDERING_FALLBACK_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_ordering_fallback_total",
+        "Total fallback events from DAG ordering to mempool (T96.0)"
+    )
+    .unwrap()
+});
+
+/// Histogram: Txs per block when DAG ordering is enabled.
+/// Useful for tracking block packing efficiency with DAG ordering.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_BLOCK_TX_PER_BLOCK_HIST: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_dag_block_tx_per_block_hist",
+        "Histogram of txs per block with DAG ordering (T96.0)",
+        vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2000.0]
+    )
+    .unwrap()
+});
+
+/// Histogram: Nonce span of txs in a DAG-ordered block.
+/// Lower values indicate better nonce contiguity.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_NONCE_SPAN_HIST: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "eezo_dag_nonce_span_hist",
+        "Histogram of avg nonce span per block with DAG ordering (T96.0)",
+        vec![0.0, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
+    )
+    .unwrap()
+});
+
+/// Counter: Simple transfer candidates (txs classified for fast path) via DAG ordering.
+#[cfg(feature = "metrics")]
+pub static EEZO_DAG_FASTPATH_CANDIDATES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_dag_fastpath_candidates_total",
+        "Total simple transfer candidates in DAG-ordered batches (T96.0)"
+    )
+    .unwrap()
+});
+
+/// Helper: Set DAG ordering enabled gauge.
+#[inline]
+pub fn dag_ordering_enabled_set(enabled: bool) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_ORDERING_ENABLED.set(if enabled { 1 } else { 0 });
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = enabled;
+    }
+}
+
+/// Helper: Increment DAG ordered txs counter.
+#[inline]
+pub fn dag_ordered_txs_inc(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_ORDERED_TXS_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment DAG ordering fallback counter.
+#[inline]
+pub fn dag_ordering_fallback_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_ORDERING_FALLBACK_TOTAL.inc();
+    }
+}
+
+/// Helper: Observe txs per block with DAG ordering.
+#[inline]
+pub fn dag_block_tx_per_block_observe(tx_count: usize) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_BLOCK_TX_PER_BLOCK_HIST.observe(tx_count as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = tx_count;
+    }
+}
+
+/// Helper: Observe avg nonce span for DAG-ordered block.
+#[inline]
+pub fn dag_nonce_span_observe(avg_span: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_NONCE_SPAN_HIST.observe(avg_span);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = avg_span;
+    }
+}
+
+/// Helper: Increment fast path candidates counter.
+#[inline]
+pub fn dag_fastpath_candidates_inc(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_DAG_FASTPATH_CANDIDATES_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Eagerly register T96.0 DAG ordering metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t96_dag_ordering_metrics() {
+    let _ = &*EEZO_DAG_ORDERING_ENABLED;
+    let _ = &*EEZO_DAG_ORDERED_TXS_TOTAL;
+    let _ = &*EEZO_DAG_ORDERING_FALLBACK_TOTAL;
+    let _ = &*EEZO_DAG_BLOCK_TX_PER_BLOCK_HIST;
+    let _ = &*EEZO_DAG_NONCE_SPAN_HIST;
+    let _ = &*EEZO_DAG_FASTPATH_CANDIDATES_TOTAL;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t96_dag_ordering_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
 // T82.0 — Unit tests for ProfilingMode
 // -----------------------------------------------------------------------------
 #[cfg(test)]
