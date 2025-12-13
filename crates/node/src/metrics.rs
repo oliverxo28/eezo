@@ -4468,6 +4468,90 @@ pub fn register_t92_perf_metrics() {
 }
 
 // -----------------------------------------------------------------------------
+// T94.0 — Block Packing & DAG Tick Tuning Metrics
+// -----------------------------------------------------------------------------
+
+/// T94.0: Counter for early tick events (when we trigger block building before
+/// the full tick interval expires due to mempool backlog).
+#[cfg(feature = "metrics")]
+pub static EEZO_T94_EARLY_TICK_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_t94_early_tick_total",
+        "Number of early tick events (block built before tick expired due to mempool backlog)"
+    )
+    .expect("register eezo_t94_early_tick_total")
+});
+
+/// T94.0: Increment the early tick counter.
+#[inline]
+pub fn t94_early_tick_inc() {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_T94_EARLY_TICK_TOTAL.inc();
+    }
+}
+
+/// T94.0: Gauge for block packing mode (0 = conservative, 1 = aggressive).
+#[cfg(feature = "metrics")]
+pub static EEZO_T94_BLOCK_PACKING_MODE: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_t94_block_packing_mode",
+        "Block packing mode (0 = conservative, 1 = aggressive)"
+    )
+    .expect("register eezo_t94_block_packing_mode")
+});
+
+/// T94.0: Set block packing mode gauge.
+#[inline]
+pub fn t94_block_packing_mode_set(is_aggressive: bool) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_T94_BLOCK_PACKING_MODE.set(if is_aggressive { 1 } else { 0 });
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = is_aggressive;
+    }
+}
+
+/// T94.0: Gauge for perf mode enabled status (0 = disabled, 1 = enabled).
+#[cfg(feature = "metrics")]
+pub static EEZO_T94_PERF_MODE_ENABLED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_t94_perf_mode_enabled",
+        "Perf mode enabled (0 = disabled, 1 = enabled)"
+    )
+    .expect("register eezo_t94_perf_mode_enabled")
+});
+
+/// T94.0: Set perf mode gauge.
+#[inline]
+pub fn t94_perf_mode_set(enabled: bool) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_T94_PERF_MODE_ENABLED.set(if enabled { 1 } else { 0 });
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = enabled;
+    }
+}
+
+/// T94.0: Eagerly register T94 block packing metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t94_block_packing_metrics() {
+    let _ = &*EEZO_T94_EARLY_TICK_TOTAL;
+    let _ = &*EEZO_T94_BLOCK_PACKING_MODE;
+    let _ = &*EEZO_T94_PERF_MODE_ENABLED;
+}
+
+/// T94.0: No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t94_block_packing_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
 // T82.0 — Unit tests for ProfilingMode
 // -----------------------------------------------------------------------------
 #[cfg(test)]
