@@ -505,6 +505,120 @@ impl HybridModeConfig {
     }
 }
 
+// ============================================================================
+// T94.0: Block Packing Policy
+// ============================================================================
+
+/// T94.0: Block packing policy controls how aggressively the node fills blocks.
+///
+/// In **Conservative** mode (default), the node uses the standard tick interval
+/// and waits for the full tick before building a block.
+///
+/// In **Aggressive** mode (for dev/perf testing), the node:
+/// - Triggers block building early if mempool has sufficient backlog
+/// - Attempts to fill blocks closer to EEZO_BLOCK_MAX_TX
+/// - Reduces idle time between blocks under heavy load
+///
+/// Controlled via `EEZO_BLOCK_PACKING_MODE` environment variable.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BlockPackingPolicy {
+    /// Conservative (default): respect full tick interval, safe for production
+    Conservative,
+    /// Aggressive: minimize idle time under load, for devnet perf testing
+    Aggressive,
+}
+
+impl BlockPackingPolicy {
+    /// Parse block packing policy from environment.
+    ///
+    /// Reads `EEZO_BLOCK_PACKING_MODE`:
+    /// - "aggressive" or "a" → Aggressive
+    /// - "conservative" or "c" or unset → Conservative
+    pub fn from_env() -> Self {
+        match std::env::var("EEZO_BLOCK_PACKING_MODE") {
+            Ok(v) => {
+                let s = v.trim().to_ascii_lowercase();
+                match s.as_str() {
+                    "aggressive" | "a" => BlockPackingPolicy::Aggressive,
+                    _ => BlockPackingPolicy::Conservative,
+                }
+            }
+            Err(_) => BlockPackingPolicy::Conservative,
+        }
+    }
+    
+    /// Check if aggressive mode is enabled.
+    pub fn is_aggressive(&self) -> bool {
+        matches!(self, BlockPackingPolicy::Aggressive)
+    }
+}
+
+impl Default for BlockPackingPolicy {
+    fn default() -> Self {
+        BlockPackingPolicy::Conservative
+    }
+}
+
+/// T94.0: Parse EEZO_PERF_MODE for tick tuning.
+///
+/// When `EEZO_PERF_MODE=1` (or `true`, `yes`, `on`), enables:
+/// - Early tick triggering when mempool has backlog
+/// - More aggressive block packing
+///
+/// This is a convenience flag that implies aggressive block packing.
+#[inline]
+fn is_perf_mode_enabled() -> bool {
+    match std::env::var("EEZO_PERF_MODE") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            matches!(s.as_str(), "1" | "true" | "yes" | "on")
+        }
+        Err(_) => false,
+    }
+}
+
+/// T94.0: Default early tick threshold when EEZO_BLOCK_MAX_TX is unlimited.
+/// This is a sensible default for typical devnet spam workloads.
+const DEFAULT_EARLY_TICK_THRESHOLD: usize = 250;
+
+/// T94.0: Get the minimum mempool backlog threshold for early tick.
+///
+/// When the mempool has at least this many transactions, and EEZO_PERF_MODE=1
+/// or EEZO_BLOCK_PACKING_MODE=aggressive, the block builder can fire early
+/// (before the full tick interval expires).
+///
+/// Configurable via `EEZO_EARLY_TICK_THRESHOLD`:
+/// - Default: EEZO_BLOCK_MAX_TX / 2 (or 250 if BLOCK_MAX_TX is not set)
+/// - Set to 0 to disable early tick (always wait for full interval)
+fn early_tick_threshold(block_max_tx: usize) -> usize {
+    match std::env::var("EEZO_EARLY_TICK_THRESHOLD") {
+        Ok(v) => {
+            match v.parse::<usize>() {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    log::warn!(
+                        "T94.0: failed to parse EEZO_EARLY_TICK_THRESHOLD='{}': {}, using default",
+                        v, e
+                    );
+                    if block_max_tx == usize::MAX {
+                        DEFAULT_EARLY_TICK_THRESHOLD
+                    } else {
+                        block_max_tx / 2
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            // Default: half of block_max_tx
+            if block_max_tx == usize::MAX {
+                DEFAULT_EARLY_TICK_THRESHOLD
+            } else {
+                block_max_tx / 2
+            }
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 enum BlockTxSource {
     /// Current behaviour: collect txs directly from mempool.
@@ -618,11 +732,30 @@ impl CoreRunnerHandle {
             }
         }
 
+        // T94.0: Block packing policy and perf mode (non-persistence variant)
+        let block_packing_policy = BlockPackingPolicy::from_env();
+        let perf_mode_enabled = is_perf_mode_enabled();
+        let early_tick_enabled = perf_mode_enabled || block_packing_policy.is_aggressive();
+        let early_tick_thresh = early_tick_threshold(block_max_tx);
+        
+        if early_tick_enabled {
+            log::info!(
+                "consensus: T94.0 perf mode enabled (packing={:?}, early_tick_threshold={}) (non-persistence)",
+                block_packing_policy, early_tick_thresh
+            );
+        } else {
+            log::info!("consensus: T94.0 block packing policy = {:?} (non-persistence)", block_packing_policy);
+        }
+
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
 			// expose T36.6 bridge metrics on /metrics immediately
 			#[cfg(feature = "metrics")]
 			register_t36_bridge_metrics();
+            
+            // T94.0: Register block packing metrics
+            #[cfg(feature = "metrics")]
+            crate::metrics::register_t94_block_packing_metrics();
             
             // T91.2: CUDA BLAKE3 engine for shadow hashing (lazy initialized on first use)
             #[cfg(feature = "cuda-hash")]
@@ -663,12 +796,50 @@ impl CoreRunnerHandle {
 
                .unwrap_or(2);
 
+            // T94.0: Track last block time for early tick logic
+            let mut last_block_time = std::time::Instant::now();
+
             loop {
                 // Use Relaxed ordering as per teacher's patch suggestion
                 if stop_c.load(Ordering::Relaxed) {
                     break;
                 }
-                ticker.tick().await;
+                
+                // T94.0: Early tick logic for aggressive block packing under load
+                // When perf mode is enabled and mempool has sufficient backlog,
+                // trigger block building early instead of waiting for the full tick.
+                if early_tick_enabled && early_tick_thresh > 0 {
+                    // Check mempool length without holding the node lock for long
+                    let mempool_len = {
+                        let guard = node_c.lock().await;
+                        guard.mempool.len()
+                    };
+                    
+                    if mempool_len >= early_tick_thresh {
+                        // Mempool has sufficient backlog - fire immediately
+                        // But only if at least 10ms has passed since last block (avoid spinning)
+                        let elapsed_since_last = last_block_time.elapsed();
+                        let min_interval = Duration::from_millis(10);
+                        if elapsed_since_last >= min_interval {
+                            log::debug!(
+                                "T94.0: early tick triggered (mempool_len={} >= threshold={}, elapsed={:?})",
+                                mempool_len, early_tick_thresh, elapsed_since_last
+                            );
+                            #[cfg(feature = "metrics")]
+                            crate::metrics::t94_early_tick_inc();
+                            // Don't wait for ticker, proceed directly to block building
+                        } else {
+                            // Wait for the remaining time
+                            tokio::time::sleep(min_interval - elapsed_since_last).await;
+                        }
+                    } else {
+                        // Not enough backlog - use normal tick
+                        ticker.tick().await;
+                    }
+                } else {
+                    // Normal tick behavior
+                    ticker.tick().await;
+                }
                 #[cfg(feature = "metrics")]
                 let slot_start = std::time::Instant::now();
 
@@ -1290,6 +1461,8 @@ impl CoreRunnerHandle {
                         }
                         // ────────────────────────────────────────────────────────────────
 
+                        // T94.0: Update last block time for early tick logic
+                        last_block_time = std::time::Instant::now();
 
                         // optional stop-at-height for test runs
                         if let Some(max_h) = max_h_opt {
@@ -1459,6 +1632,21 @@ impl CoreRunnerHandle {
         let pipeline = BlockPipeline::new();
         let pipeline_state = pipeline.state();
 
+        // T94.0: Block packing policy and perf mode
+        let block_packing_policy = BlockPackingPolicy::from_env();
+        let perf_mode_enabled = is_perf_mode_enabled();
+        let early_tick_enabled = perf_mode_enabled || block_packing_policy.is_aggressive();
+        let early_tick_thresh = early_tick_threshold(block_max_tx);
+        
+        if early_tick_enabled {
+            log::info!(
+                "consensus: T94.0 perf mode enabled (packing={:?}, early_tick_threshold={})",
+                block_packing_policy, early_tick_thresh
+            );
+        } else {
+            log::info!("consensus: T94.0 block packing policy = {:?}", block_packing_policy);
+        }
+
         let join = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(tick_ms.max(1)));
 			// expose T36.6 bridge metrics on /metrics immediately
@@ -1469,6 +1657,10 @@ impl CoreRunnerHandle {
             if matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled | HybridModeConfig::DagPrimary) {
                 crate::metrics::register_t77_dag_ordering_latency_metrics();
             }
+            
+            // T94.0: Register block packing metrics
+            #[cfg(feature = "metrics")]
+            crate::metrics::register_t94_block_packing_metrics();
             
             // T91.2: CUDA BLAKE3 engine for shadow hashing (lazy initialized on first use)
             #[cfg(feature = "cuda-hash")]
@@ -1495,10 +1687,48 @@ impl CoreRunnerHandle {
             let cp_every_env: Option<u64> = env::var("EEZO_CHECKPOINT_EVERY").ok().and_then(|s| s.parse().ok());
             let finality_depth: u64 = env::var("EEZO_FINALITY_DEPTH").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
 
+            // T94.0: Track last block time for early tick logic
+            let mut last_block_time = std::time::Instant::now();
+
             loop {
                 // Use Relaxed ordering
                 if stop_c.load(Ordering::Relaxed) { break; }
-                ticker.tick().await;
+                
+                // T94.0: Early tick logic for aggressive block packing under load
+                // When perf mode is enabled and mempool has sufficient backlog,
+                // trigger block building early instead of waiting for the full tick.
+                if early_tick_enabled && early_tick_thresh > 0 {
+                    // Check mempool length without holding the node lock for long
+                    let mempool_len = {
+                        let guard = node_c.lock().await;
+                        guard.mempool.len()
+                    };
+                    
+                    if mempool_len >= early_tick_thresh {
+                        // Mempool has sufficient backlog - fire immediately
+                        // But only if at least 10ms has passed since last block (avoid spinning)
+                        let elapsed_since_last = last_block_time.elapsed();
+                        let min_interval = Duration::from_millis(10);
+                        if elapsed_since_last >= min_interval {
+                            log::debug!(
+                                "T94.0: early tick triggered (mempool_len={} >= threshold={}, elapsed={:?})",
+                                mempool_len, early_tick_thresh, elapsed_since_last
+                            );
+                            #[cfg(feature = "metrics")]
+                            crate::metrics::t94_early_tick_inc();
+                            // Don't wait for ticker, proceed directly to block building
+                        } else {
+                            // Wait for the remaining time
+                            tokio::time::sleep(min_interval - elapsed_since_last).await;
+                        }
+                    } else {
+                        // Not enough backlog - use normal tick
+                        ticker.tick().await;
+                    }
+                } else {
+                    // Normal tick behavior
+                    ticker.tick().await;
+                }
                 #[cfg(feature = "metrics")]
                 let slot_start = std::time::Instant::now();
 
@@ -2590,6 +2820,10 @@ impl CoreRunnerHandle {
                                 // --- END MODIFIED BLOCK ---
                             }
                         }
+                        
+                        // T94.0: Update last block time for early tick logic
+                        last_block_time = std::time::Instant::now();
+                        
                         if let
                         Some(max_h) = max_h_opt { if height >= max_h { log::info!("consensus: reached EEZO_MAX_HEIGHT={} → stopping runner", max_h); break;
                         } }
@@ -4011,5 +4245,113 @@ mod executor_mode_tests {
         // Test that hybrid matches correctly
         assert!(matches!(hybrid_enabled, HybridModeConfig::HybridEnabled));
         assert!(!matches!(dag_primary, HybridModeConfig::HybridEnabled));
+    }
+
+    // -------------------------------------------------------------------------
+    // T94.0: Tests for BlockPackingPolicy
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_block_packing_policy_default() {
+        use super::BlockPackingPolicy;
+        assert_eq!(BlockPackingPolicy::default(), BlockPackingPolicy::Conservative);
+        assert!(!BlockPackingPolicy::Conservative.is_aggressive());
+        assert!(BlockPackingPolicy::Aggressive.is_aggressive());
+    }
+
+    #[test]
+    fn test_block_packing_policy_from_env() {
+        use super::BlockPackingPolicy;
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        // Test aggressive mode
+        std::env::set_var("EEZO_BLOCK_PACKING_MODE", "aggressive");
+        assert_eq!(BlockPackingPolicy::from_env(), BlockPackingPolicy::Aggressive);
+        
+        std::env::set_var("EEZO_BLOCK_PACKING_MODE", "a");
+        assert_eq!(BlockPackingPolicy::from_env(), BlockPackingPolicy::Aggressive);
+        
+        std::env::set_var("EEZO_BLOCK_PACKING_MODE", "AGGRESSIVE");
+        assert_eq!(BlockPackingPolicy::from_env(), BlockPackingPolicy::Aggressive);
+        
+        // Test conservative mode
+        std::env::set_var("EEZO_BLOCK_PACKING_MODE", "conservative");
+        assert_eq!(BlockPackingPolicy::from_env(), BlockPackingPolicy::Conservative);
+        
+        std::env::set_var("EEZO_BLOCK_PACKING_MODE", "c");
+        assert_eq!(BlockPackingPolicy::from_env(), BlockPackingPolicy::Conservative);
+        
+        // Test unknown values default to conservative
+        std::env::set_var("EEZO_BLOCK_PACKING_MODE", "unknown");
+        assert_eq!(BlockPackingPolicy::from_env(), BlockPackingPolicy::Conservative);
+        
+        std::env::set_var("EEZO_BLOCK_PACKING_MODE", "");
+        assert_eq!(BlockPackingPolicy::from_env(), BlockPackingPolicy::Conservative);
+        
+        // Test unset defaults to conservative
+        std::env::remove_var("EEZO_BLOCK_PACKING_MODE");
+        assert_eq!(BlockPackingPolicy::from_env(), BlockPackingPolicy::Conservative);
+    }
+
+    #[test]
+    fn test_perf_mode_from_env() {
+        use super::is_perf_mode_enabled;
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        // Test enabled values
+        std::env::set_var("EEZO_PERF_MODE", "1");
+        assert!(is_perf_mode_enabled());
+        
+        std::env::set_var("EEZO_PERF_MODE", "true");
+        assert!(is_perf_mode_enabled());
+        
+        std::env::set_var("EEZO_PERF_MODE", "yes");
+        assert!(is_perf_mode_enabled());
+        
+        std::env::set_var("EEZO_PERF_MODE", "on");
+        assert!(is_perf_mode_enabled());
+        
+        // Test disabled values
+        std::env::set_var("EEZO_PERF_MODE", "0");
+        assert!(!is_perf_mode_enabled());
+        
+        std::env::set_var("EEZO_PERF_MODE", "false");
+        assert!(!is_perf_mode_enabled());
+        
+        std::env::set_var("EEZO_PERF_MODE", "off");
+        assert!(!is_perf_mode_enabled());
+        
+        // Test unset defaults to disabled
+        std::env::remove_var("EEZO_PERF_MODE");
+        assert!(!is_perf_mode_enabled());
+    }
+
+    #[test]
+    fn test_early_tick_threshold() {
+        use super::{early_tick_threshold, DEFAULT_EARLY_TICK_THRESHOLD};
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        // Test with explicit threshold
+        std::env::set_var("EEZO_EARLY_TICK_THRESHOLD", "100");
+        assert_eq!(early_tick_threshold(500), 100);
+        
+        // Test with default (half of block_max_tx)
+        std::env::remove_var("EEZO_EARLY_TICK_THRESHOLD");
+        assert_eq!(early_tick_threshold(500), 250);
+        assert_eq!(early_tick_threshold(1000), 500);
+        
+        // Test with unlimited block_max_tx (uses DEFAULT_EARLY_TICK_THRESHOLD)
+        assert_eq!(early_tick_threshold(usize::MAX), DEFAULT_EARLY_TICK_THRESHOLD);
+        
+        // Test with zero threshold (disables early tick)
+        std::env::set_var("EEZO_EARLY_TICK_THRESHOLD", "0");
+        assert_eq!(early_tick_threshold(500), 0);
+        
+        // Test with invalid value (should use default and log warning)
+        std::env::set_var("EEZO_EARLY_TICK_THRESHOLD", "not_a_number");
+        assert_eq!(early_tick_threshold(500), 250); // falls back to block_max_tx / 2
+        assert_eq!(early_tick_threshold(usize::MAX), DEFAULT_EARLY_TICK_THRESHOLD);
+        
+        std::env::remove_var("EEZO_EARLY_TICK_THRESHOLD");
     }
 }
