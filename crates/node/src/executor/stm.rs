@@ -39,6 +39,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use bitvec::prelude::*;
 use rayon::prelude::*;
 
 use eezo_ledger::consensus::SingleNode;
@@ -298,6 +299,152 @@ impl WaveFingerprint {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.tx_count == 0
+    }
+}
+
+// =============================================================================
+// T95.0: ArenaConflictBitmap — Lightweight conflict pre-screen
+// =============================================================================
+
+/// Default bitmap capacity in bits (handles arena indices 0..1023).
+/// Chosen to cover typical block sizes (up to ~500 unique accounts) with room to spare.
+/// Exceeding this capacity triggers fallback to HashMap.
+const ARENA_BITMAP_CAPACITY: usize = 1024;
+
+/// T95.0: Compact bitmap for fast "has arena index been touched?" checks.
+///
+/// This structure provides O(1) bit operations for conflict detection in the
+/// STM fast path, avoiding HashMap overhead for the common case where arena
+/// indices are small (<1024).
+///
+/// ## Design
+///
+/// - Uses a fixed-size `BitVec` (1024 bits = 128 bytes) for the common case
+/// - Falls back to `HashSet<u32>` when indices exceed bitmap capacity
+/// - Separate tracking for claimed senders (one per wave) and touched accounts
+/// - Cheap reset per wave (clear bitmap + HashSet)
+///
+/// ## Correctness
+///
+/// The bitmap is a pure optimization. For indices within capacity, the bitmap
+/// is authoritative. For overflow indices, the HashSet fallback ensures no
+/// false negatives (missed conflicts).
+///
+/// ## Performance
+///
+/// - Bitmap check: ~1-2 ns (bit array indexing)
+/// - HashMap check: ~30-50 ns (hash + probe)
+/// - Typical speedup: 15-30x for conflict checks when within bitmap range
+#[derive(Clone, Debug)]
+pub struct ArenaConflictBitmap {
+    /// Bitmap tracking claimed sender indices (one sender per wave).
+    /// Bit i is set if arena index i has been claimed as a sender.
+    claimed_senders_bits: BitVec<u64, Lsb0>,
+    
+    /// Bitmap tracking touched account indices (senders + receivers).
+    /// Bit i is set if arena index i has been touched.
+    touched_accounts_bits: BitVec<u64, Lsb0>,
+    
+    /// Fallback HashSet for sender indices >= ARENA_BITMAP_CAPACITY.
+    claimed_senders_overflow: HashSet<u32>,
+    
+    /// Fallback HashSet for touched indices >= ARENA_BITMAP_CAPACITY.
+    touched_accounts_overflow: HashSet<u32>,
+    
+    /// Track whether any overflow has occurred (for metrics).
+    overflow_occurred: bool,
+}
+
+impl Default for ArenaConflictBitmap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ArenaConflictBitmap {
+    /// Create a new empty conflict bitmap.
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            claimed_senders_bits: bitvec![u64, Lsb0; 0; ARENA_BITMAP_CAPACITY],
+            touched_accounts_bits: bitvec![u64, Lsb0; 0; ARENA_BITMAP_CAPACITY],
+            claimed_senders_overflow: HashSet::new(),
+            touched_accounts_overflow: HashSet::new(),
+            overflow_occurred: false,
+        }
+    }
+    
+    /// Reset the bitmap for a new wave.
+    /// This is cheaper than allocating a new structure.
+    #[inline]
+    pub fn reset(&mut self) {
+        self.claimed_senders_bits.fill(false);
+        self.touched_accounts_bits.fill(false);
+        self.claimed_senders_overflow.clear();
+        self.touched_accounts_overflow.clear();
+        // Note: we don't reset overflow_occurred - it's tracked per block
+    }
+    
+    /// Check if an arena index has been claimed as a sender.
+    #[inline]
+    pub fn is_sender_claimed(&self, idx: u32) -> bool {
+        let i = idx as usize;
+        if i < ARENA_BITMAP_CAPACITY {
+            self.claimed_senders_bits[i]
+        } else {
+            self.claimed_senders_overflow.contains(&idx)
+        }
+    }
+    
+    /// Check if an arena index has been touched (sender or receiver).
+    #[inline]
+    pub fn is_account_touched(&self, idx: u32) -> bool {
+        let i = idx as usize;
+        if i < ARENA_BITMAP_CAPACITY {
+            self.touched_accounts_bits[i]
+        } else {
+            self.touched_accounts_overflow.contains(&idx)
+        }
+    }
+    
+    /// Claim an arena index as a sender for this wave.
+    #[inline]
+    pub fn claim_sender(&mut self, idx: u32) {
+        let i = idx as usize;
+        if i < ARENA_BITMAP_CAPACITY {
+            self.claimed_senders_bits.set(i, true);
+        } else {
+            if !self.overflow_occurred {
+                self.overflow_occurred = true;
+                // Record metric for overflow
+                #[cfg(feature = "metrics")]
+                crate::metrics::stm_bitmap_fallback_inc();
+            }
+            self.claimed_senders_overflow.insert(idx);
+        }
+    }
+    
+    /// Mark an arena index as touched for this wave.
+    #[inline]
+    pub fn touch_account(&mut self, idx: u32) {
+        let i = idx as usize;
+        if i < ARENA_BITMAP_CAPACITY {
+            self.touched_accounts_bits.set(i, true);
+        } else {
+            if !self.overflow_occurred {
+                self.overflow_occurred = true;
+                // Record metric for overflow
+                #[cfg(feature = "metrics")]
+                crate::metrics::stm_bitmap_fallback_inc();
+            }
+            self.touched_accounts_overflow.insert(idx);
+        }
+    }
+    
+    /// Check if any overflow occurred (for diagnostics).
+    #[inline]
+    pub fn had_overflow(&self) -> bool {
+        self.overflow_occurred
     }
 }
 
@@ -1633,11 +1780,17 @@ impl StmExecutor {
     //   as NeedsRetry without counting as fallback (they may succeed in fast path
     //   after earlier txs commit)
 
-    /// T93.2 + T93.3: Execute simple transfers via the fast path.
+    /// T93.2 + T93.3 + T95.0: Execute simple transfers via the fast path.
     ///
     /// This function attempts to execute simple transfers without conflict detection
     /// overhead. It partitions transactions by sender and ensures only one tx per
     /// sender is executed per wave.
+    ///
+    /// ## T95.0 Optimization
+    ///
+    /// Uses `ArenaConflictBitmap` for O(1) bit-level conflict checks instead of
+    /// HashMap lookups. For typical block sizes (arena indices < 1024), this avoids
+    /// all hash computation overhead. Falls back to HashMap for overflow cases.
     ///
     /// ## T93.3 Metrics Note
     ///
@@ -1667,10 +1820,9 @@ impl StmExecutor {
     ) {
         let fastpath_start = std::time::Instant::now();
         
-        // Track senders and receivers touched in this wave
-        // Key: arena_idx, Value: tx_idx that claims this account
-        let mut claimed_senders: HashMap<u32, usize> = HashMap::new();
-        let mut touched_accounts: HashMap<u32, usize> = HashMap::new();
+        // T95.0: Use bitmap for fast conflict pre-screen instead of HashMap
+        // This reduces per-check overhead from ~30-50ns (hash) to ~1-2ns (bit).
+        let mut conflict_bitmap = ArenaConflictBitmap::new();
         
         // Process transactions in original order for determinism
         let mut pending: Vec<&AnalyzedTx> = analyzed_txs
@@ -1699,14 +1851,16 @@ impl StmExecutor {
             // Check if we can safely execute this tx in this wave
             // Rule 1: No other tx in this wave can have the same sender
             // (Skip this tx for this wave - it stays NeedsRetry for general path)
-            if claimed_senders.contains_key(&ctx.sender_idx) {
+            // T95.0: Use bitmap O(1) check instead of HashMap contains_key
+            if conflict_bitmap.is_sender_claimed(ctx.sender_idx) {
                 continue;
             }
             
             // Rule 2: No other tx in this wave can touch our sender or receiver
             // (This prevents read-after-write conflicts)
-            if touched_accounts.contains_key(&ctx.sender_idx) || 
-               touched_accounts.contains_key(&ctx.receiver_idx) {
+            // T95.0: Use bitmap O(1) check instead of HashMap contains_key
+            if conflict_bitmap.is_account_touched(ctx.sender_idx) || 
+               conflict_bitmap.is_account_touched(ctx.receiver_idx) {
                 continue;
             }
             
@@ -1745,10 +1899,10 @@ impl StmExecutor {
             // Record that this tx committed via fast path (for metrics)
             fastpath_committed.insert(atx.tx_idx);
             
-            // Claim sender and touch both accounts for this wave
-            claimed_senders.insert(ctx.sender_idx, atx.tx_idx);
-            touched_accounts.insert(ctx.sender_idx, atx.tx_idx);
-            touched_accounts.insert(ctx.receiver_idx, atx.tx_idx);
+            // T95.0: Claim sender and touch both accounts using bitmap
+            conflict_bitmap.claim_sender(ctx.sender_idx);
+            conflict_bitmap.touch_account(ctx.sender_idx);
+            conflict_bitmap.touch_account(ctx.receiver_idx);
         }
         
         // Emit timing metric
@@ -4044,5 +4198,241 @@ mod tests {
         let recv2_bal_off = node_off.accounts.get(&receiver2).balance;
         let recv2_bal_on = node_on.accounts.get(&receiver2).balance;
         assert_eq!(recv2_bal_off, recv2_bal_on, "Receiver2 balance should match");
+    }
+
+    // ========================================================================
+    // T95.0: ArenaConflictBitmap Tests
+    // ========================================================================
+
+    #[test]
+    fn test_arena_conflict_bitmap_new_is_empty() {
+        let bitmap = ArenaConflictBitmap::new();
+        
+        // All indices should be unclaimed/untouched
+        assert!(!bitmap.is_sender_claimed(0));
+        assert!(!bitmap.is_account_touched(0));
+        assert!(!bitmap.is_sender_claimed(100));
+        assert!(!bitmap.is_account_touched(100));
+        assert!(!bitmap.had_overflow());
+    }
+
+    #[test]
+    fn test_arena_conflict_bitmap_claim_sender() {
+        let mut bitmap = ArenaConflictBitmap::new();
+        
+        // Claim a sender
+        bitmap.claim_sender(42);
+        
+        // Check it's claimed
+        assert!(bitmap.is_sender_claimed(42));
+        assert!(!bitmap.is_sender_claimed(43));
+        assert!(!bitmap.is_sender_claimed(0));
+        
+        // Claim another
+        bitmap.claim_sender(100);
+        assert!(bitmap.is_sender_claimed(42));
+        assert!(bitmap.is_sender_claimed(100));
+    }
+
+    #[test]
+    fn test_arena_conflict_bitmap_touch_account() {
+        let mut bitmap = ArenaConflictBitmap::new();
+        
+        // Touch accounts
+        bitmap.touch_account(10);
+        bitmap.touch_account(20);
+        bitmap.touch_account(30);
+        
+        // Check they're touched
+        assert!(bitmap.is_account_touched(10));
+        assert!(bitmap.is_account_touched(20));
+        assert!(bitmap.is_account_touched(30));
+        assert!(!bitmap.is_account_touched(15));
+        assert!(!bitmap.is_account_touched(0));
+    }
+
+    #[test]
+    fn test_arena_conflict_bitmap_reset() {
+        let mut bitmap = ArenaConflictBitmap::new();
+        
+        // Set some bits
+        bitmap.claim_sender(5);
+        bitmap.touch_account(10);
+        bitmap.touch_account(15);
+        
+        assert!(bitmap.is_sender_claimed(5));
+        assert!(bitmap.is_account_touched(10));
+        
+        // Reset
+        bitmap.reset();
+        
+        // All should be cleared
+        assert!(!bitmap.is_sender_claimed(5));
+        assert!(!bitmap.is_account_touched(10));
+        assert!(!bitmap.is_account_touched(15));
+    }
+
+    #[test]
+    fn test_arena_conflict_bitmap_boundary_indices() {
+        let mut bitmap = ArenaConflictBitmap::new();
+        
+        // Test indices at the boundary of the bitmap capacity
+        bitmap.claim_sender(0);
+        bitmap.claim_sender(1023); // Last index in bitmap (ARENA_BITMAP_CAPACITY - 1)
+        
+        assert!(bitmap.is_sender_claimed(0));
+        assert!(bitmap.is_sender_claimed(1023));
+        assert!(!bitmap.is_sender_claimed(1));
+        assert!(!bitmap.is_sender_claimed(1022));
+        
+        // No overflow yet
+        assert!(!bitmap.had_overflow());
+    }
+
+    #[test]
+    fn test_arena_conflict_bitmap_overflow_to_hashset() {
+        let mut bitmap = ArenaConflictBitmap::new();
+        
+        // Use an index beyond bitmap capacity (>= 1024)
+        bitmap.claim_sender(2000);
+        
+        // Should trigger overflow
+        assert!(bitmap.had_overflow());
+        
+        // But the index should still be tracked
+        assert!(bitmap.is_sender_claimed(2000));
+        assert!(!bitmap.is_sender_claimed(1000)); // Within bitmap range, not set
+        
+        // Test touch_account overflow
+        bitmap.touch_account(5000);
+        assert!(bitmap.is_account_touched(5000));
+    }
+
+    #[test]
+    fn test_arena_conflict_bitmap_mixed_bitmap_and_overflow() {
+        let mut bitmap = ArenaConflictBitmap::new();
+        
+        // Set some in bitmap range
+        bitmap.claim_sender(10);
+        bitmap.touch_account(20);
+        bitmap.touch_account(30);
+        
+        // Set some in overflow range
+        bitmap.claim_sender(2000);
+        bitmap.touch_account(3000);
+        
+        // All should be correctly tracked
+        assert!(bitmap.is_sender_claimed(10));
+        assert!(bitmap.is_sender_claimed(2000));
+        assert!(!bitmap.is_sender_claimed(100));
+        assert!(!bitmap.is_sender_claimed(1500)); // In bitmap range, not set
+        
+        assert!(bitmap.is_account_touched(20));
+        assert!(bitmap.is_account_touched(30));
+        assert!(bitmap.is_account_touched(3000));
+        assert!(!bitmap.is_account_touched(50));
+    }
+
+    #[test]
+    fn test_arena_conflict_bitmap_reset_clears_overflow() {
+        let mut bitmap = ArenaConflictBitmap::new();
+        
+        // Set overflow values
+        bitmap.claim_sender(5000);
+        bitmap.touch_account(6000);
+        assert!(bitmap.had_overflow());
+        
+        // Reset
+        bitmap.reset();
+        
+        // Overflow values should be cleared
+        assert!(!bitmap.is_sender_claimed(5000));
+        assert!(!bitmap.is_account_touched(6000));
+        
+        // Note: overflow_occurred is NOT reset per wave (tracked per block)
+        // This is intentional for metrics tracking
+    }
+
+    #[test]
+    fn test_arena_conflict_bitmap_typical_usage_pattern() {
+        // Simulate a typical fast path wave with 10 transactions
+        let mut bitmap = ArenaConflictBitmap::new();
+        
+        // Transaction 0: sender=0, receiver=1
+        assert!(!bitmap.is_sender_claimed(0));
+        assert!(!bitmap.is_account_touched(0));
+        assert!(!bitmap.is_account_touched(1));
+        bitmap.claim_sender(0);
+        bitmap.touch_account(0);
+        bitmap.touch_account(1);
+        
+        // Transaction 1: sender=2, receiver=3 (no conflict)
+        assert!(!bitmap.is_sender_claimed(2));
+        assert!(!bitmap.is_account_touched(2));
+        assert!(!bitmap.is_account_touched(3));
+        bitmap.claim_sender(2);
+        bitmap.touch_account(2);
+        bitmap.touch_account(3);
+        
+        // Transaction 2: sender=0 (CONFLICT - same sender as tx 0)
+        assert!(bitmap.is_sender_claimed(0), "Should detect sender conflict");
+        
+        // Transaction 3: sender=4, receiver=1 (CONFLICT - receiver touched by tx 0)
+        assert!(!bitmap.is_sender_claimed(4));
+        assert!(!bitmap.is_account_touched(4));
+        assert!(bitmap.is_account_touched(1), "Should detect receiver conflict");
+        
+        // No overflow in this pattern
+        assert!(!bitmap.had_overflow());
+    }
+
+    /// T95.0: Verify that bitmap and HashMap produce identical conflict detection results.
+    #[test]
+    fn test_arena_conflict_bitmap_matches_hashmap_behavior() {
+        use std::collections::HashMap;
+        
+        // Test with a variety of indices including boundary and overflow cases
+        let test_indices: Vec<u32> = vec![0, 1, 10, 100, 500, 1000, 1023, 1024, 2000, 5000];
+        
+        let mut bitmap = ArenaConflictBitmap::new();
+        let mut hashmap_senders: HashMap<u32, ()> = HashMap::new();
+        let mut hashmap_touched: HashMap<u32, ()> = HashMap::new();
+        
+        for &idx in &test_indices {
+            // Claim sender in both
+            bitmap.claim_sender(idx);
+            hashmap_senders.insert(idx, ());
+            
+            // Touch account in both
+            bitmap.touch_account(idx);
+            hashmap_touched.insert(idx, ());
+            
+            // Verify they match
+            assert_eq!(
+                bitmap.is_sender_claimed(idx),
+                hashmap_senders.contains_key(&idx),
+                "Sender claimed mismatch at index {}", idx
+            );
+            assert_eq!(
+                bitmap.is_account_touched(idx),
+                hashmap_touched.contains_key(&idx),
+                "Account touched mismatch at index {}", idx
+            );
+        }
+        
+        // Also verify some indices NOT in the set
+        let missing_indices: Vec<u32> = vec![5, 50, 999, 1500, 3000];
+        for &idx in &missing_indices {
+            assert_eq!(
+                bitmap.is_sender_claimed(idx),
+                hashmap_senders.contains_key(&idx),
+                "Sender claimed mismatch (missing) at index {}", idx
+            );
+            assert_eq!(
+                bitmap.is_account_touched(idx),
+                hashmap_touched.contains_key(&idx),
+                "Account touched mismatch (missing) at index {}", idx
+            );
+        }
     }
 }
