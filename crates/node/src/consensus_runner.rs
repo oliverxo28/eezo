@@ -757,12 +757,13 @@ impl CoreRunnerHandle {
             #[cfg(feature = "metrics")]
             {
                 crate::metrics::register_t94_block_packing_metrics();
-                crate::metrics::t94_perf_mode_set(early_tick_enabled);
-                crate::metrics::t94_block_packing_mode_set(early_tick_enabled);
+                crate::metrics::t94_perf_mode_set(perf_mode_enabled);
+                crate::metrics::t94_block_packing_mode_set(block_packing_policy.is_aggressive());
                 log::info!(
-                    "T94.0: metrics set - perf_mode_enabled={}, block_packing_mode={} (non-persistence)",
-                    if early_tick_enabled { 1 } else { 0 },
-                    if early_tick_enabled { "aggressive" } else { "conservative" }
+                    "T94.0: metrics set - perf_mode={}, packing={:?}, early_tick_enabled={} (non-persistence)",
+                    if perf_mode_enabled { 1 } else { 0 },
+                    block_packing_policy,
+                    early_tick_enabled
                 );
             }
             
@@ -1677,12 +1678,13 @@ impl CoreRunnerHandle {
             #[cfg(feature = "metrics")]
             {
                 crate::metrics::register_t94_block_packing_metrics();
-                crate::metrics::t94_perf_mode_set(early_tick_enabled);
-                crate::metrics::t94_block_packing_mode_set(early_tick_enabled);
+                crate::metrics::t94_perf_mode_set(perf_mode_enabled);
+                crate::metrics::t94_block_packing_mode_set(block_packing_policy.is_aggressive());
                 log::info!(
-                    "T94.0: metrics set - perf_mode_enabled={}, block_packing_mode={}",
-                    if early_tick_enabled { 1 } else { 0 },
-                    if early_tick_enabled { "aggressive" } else { "conservative" }
+                    "T94.0: metrics set - perf_mode={}, packing={:?}, early_tick_enabled={}",
+                    if perf_mode_enabled { 1 } else { 0 },
+                    block_packing_policy,
+                    early_tick_enabled
                 );
             }
             

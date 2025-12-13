@@ -129,9 +129,11 @@ When T94 perf mode is enabled, you should see:
 
 At startup:
 ```
-T94.0: metrics set - perf_mode_enabled=1, block_packing_mode=aggressive
-consensus: T94.0 perf mode enabled (packing=Aggressive, early_tick_threshold=1000)
+T94.0: metrics set - perf_mode=1, packing=Conservative, early_tick_enabled=true
+consensus: T94.0 perf mode enabled (packing=Conservative, early_tick_threshold=1000)
 ```
+
+Note: When `EEZO_PERF_MODE=1` is set, early tick is enabled even if `EEZO_BLOCK_PACKING_MODE` is conservative (default).
 
 During operation (logged every 10th early tick):
 ```
@@ -145,11 +147,11 @@ T94.0: early tick #11 (mempool_len=1200, threshold=1000, elapsed=15ms)
 curl -s http://127.0.0.1:9898/metrics | grep eezo_t94
 ```
 
-Expected output with perf mode enabled:
+Expected output with `EEZO_PERF_MODE=1`:
 ```
-eezo_t94_block_packing_mode 1
-eezo_t94_early_tick_total 42
-eezo_t94_perf_mode_enabled 1
+eezo_t94_block_packing_mode 0     # 0 = conservative packing policy
+eezo_t94_early_tick_total 42      # > 0 means early ticks fired
+eezo_t94_perf_mode_enabled 1      # 1 = perf mode enabled
 ```
 
 Expected output with perf mode disabled (default):
@@ -158,6 +160,8 @@ eezo_t94_block_packing_mode 0
 eezo_t94_early_tick_total 0
 eezo_t94_perf_mode_enabled 0
 ```
+
+Note: `eezo_t94_perf_mode_enabled` tracks `EEZO_PERF_MODE`, while `eezo_t94_block_packing_mode` tracks `EEZO_BLOCK_PACKING_MODE`. Either one being set enables early tick behavior.
 
 ## How to Run T93 Harness (Before/After Comparison)
 
