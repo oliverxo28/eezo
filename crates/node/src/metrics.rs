@@ -3972,8 +3972,32 @@ pub fn register_t87_arena_kernel_metrics() {
 }
 
 // -----------------------------------------------------------------------------
-// T93.2 — Simple Transfer Fast Path Metrics
+// T93.2 + T93.3 — Simple Transfer Fast Path Metrics
 // -----------------------------------------------------------------------------
+//
+// ## T93.3 Semantic Invariants
+//
+// These metrics track per-transaction outcomes (not per-wave or per-lane):
+//
+// 1. `eezo_stm_simple_candidate_total`: Number of transactions classified as
+//    SimpleTransfer by the analyzer. Incremented exactly once per tx at block
+//    start when the tx is tagged AnalyzedTxKind::SimpleTransfer.
+//
+// 2. `eezo_stm_simple_fastpath_total`: Number of candidate txs that were
+//    successfully executed via the fast path. Incremented once per tx when
+//    it commits via the fast path.
+//
+// 3. `eezo_stm_simple_fallback_total`: Number of candidate txs that were
+//    forced to fall back to the general STM path (e.g., conflict/scheduling
+//    invariant violated during fast path wave). Incremented once per tx when
+//    it ultimately commits via the general path.
+//
+// Expected invariants:
+//   eezo_stm_simple_candidate_total ≈ eezo_stm_simple_fastpath_total + eezo_stm_simple_fallback_total
+//   eezo_stm_simple_candidate_total <= eezo_txs_included_total
+//
+// All three are monotonic counters, updated in the executor flow to avoid
+// double-counting.
 
 /// Gauge: Simple fast path enabled (0=disabled, 1=enabled).
 #[cfg(feature = "metrics")]
@@ -3985,22 +4009,38 @@ pub static EEZO_EXEC_STM_SIMPLE_FASTPATH_ENABLED: Lazy<IntGauge> = Lazy::new(|| 
     .unwrap()
 });
 
-/// Counter: Total transactions executed via the simple fast path.
+/// T93.3: Counter for transactions classified as SimpleTransfer by the analyzer.
+/// Incremented exactly once per tx at block start when tagged as SimpleTransfer.
 #[cfg(feature = "metrics")]
-pub static EEZO_STM_SIMPLE_FASTPATH_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+pub static EEZO_STM_SIMPLE_CANDIDATE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
-        "eezo_stm_simple_fastpath_total",
-        "Total transactions successfully executed via the simple fast path (T93.2)"
+        "eezo_stm_simple_candidate_total",
+        "Transactions classified as SimpleTransfer by the analyzer (T93.3)"
     )
     .unwrap()
 });
 
-/// Counter: Total simple transactions that fell back to the general path.
+/// T93.3: Counter for candidate txs executed via the simple fast path.
+/// Incremented once per tx when it successfully commits via fast path.
+/// Invariant: fastpath + fallback ≈ candidate.
+#[cfg(feature = "metrics")]
+pub static EEZO_STM_SIMPLE_FASTPATH_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_stm_simple_fastpath_total",
+        "Candidate txs successfully executed via the simple fast path (T93.3)"
+    )
+    .unwrap()
+});
+
+/// T93.3: Counter for candidate txs that fell back to the general STM path.
+/// Incremented once per tx when it commits via the general path after being
+/// unable to use the fast path (conflict/scheduling invariant violated).
+/// Invariant: fastpath + fallback ≈ candidate.
 #[cfg(feature = "metrics")]
 pub static EEZO_STM_SIMPLE_FALLBACK_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "eezo_stm_simple_fallback_total",
-        "Total simple transactions routed to the general path (due to conflicts) (T93.2)"
+        "Candidate txs that fell back to the general STM path (T93.3)"
     )
     .unwrap()
 });
@@ -4028,7 +4068,22 @@ pub fn exec_stm_simple_fastpath_enabled_set(enabled: bool) {
     }
 }
 
-/// Helper: Increment simple fastpath counter (T93.2).
+/// T93.3: Helper to increment simple candidate counter.
+/// Called once per tx at block start when classified as SimpleTransfer.
+#[inline]
+pub fn stm_simple_candidate_inc(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STM_SIMPLE_CANDIDATE_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// T93.3: Helper to increment simple fastpath counter.
+/// Called once per tx when it successfully commits via fast path.
 #[inline]
 pub fn stm_simple_fastpath_inc(count: u64) {
     #[cfg(feature = "metrics")]
@@ -4041,7 +4096,9 @@ pub fn stm_simple_fastpath_inc(count: u64) {
     }
 }
 
-/// Helper: Increment simple fallback counter (T93.2).
+/// T93.3: Helper to increment simple fallback counter.
+/// Called once per tx when it commits via the general path after failing
+/// to use the fast path.
 #[inline]
 pub fn stm_simple_fallback_inc(count: u64) {
     #[cfg(feature = "metrics")]
@@ -4067,10 +4124,11 @@ pub fn stm_simple_time_add(seconds: f64) {
     }
 }
 
-/// Eagerly register T93.2 simple fastpath metrics so they appear on /metrics at boot.
+/// Eagerly register T93.2/T93.3 simple fastpath metrics so they appear on /metrics at boot.
 #[cfg(feature = "metrics")]
 pub fn register_t93_simple_fastpath_metrics() {
     let _ = &*EEZO_EXEC_STM_SIMPLE_FASTPATH_ENABLED;
+    let _ = &*EEZO_STM_SIMPLE_CANDIDATE_TOTAL;
     let _ = &*EEZO_STM_SIMPLE_FASTPATH_TOTAL;
     let _ = &*EEZO_STM_SIMPLE_FALLBACK_TOTAL;
     let _ = &*EEZO_STM_SIMPLE_TIME_SECONDS;
