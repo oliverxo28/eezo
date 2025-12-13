@@ -971,12 +971,53 @@ impl CoreRunnerHandle {
                     // 1–2. Collect transactions for this block from the chosen source.
                     // T68.1: If DAG source is selected and returned txs, use those;
                     // otherwise fall back to mempool.
-                    let txs = Self::collect_block_txs_with_dag_fallback(
+                    let collected_txs = Self::collect_block_txs_with_dag_fallback(
                         block_tx_source,
                         dag_txs,
                         &mut guard,
                         block_max_tx,
                     );
+                    
+                    // T96.3: Apply DAG ordering to collected txs in DagPrimary/HybridEnabled modes.
+                    // This ensures sender grouping + nonce sorting even in the non-persistence path.
+                    #[cfg(feature = "dag-consensus")]
+                    let txs = {
+                        let dag_ordering_enabled = dag_ordering_enabled_from_env();
+                        let is_dag_primary = matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary);
+                        let is_hybrid = matches!(hybrid_mode_cfg, HybridModeConfig::HybridEnabled);
+                        
+                        // T96.3: Diagnostic logging for ordering decision
+                        log::debug!(
+                            "T96.3: non-persist path: dag_ordering_enabled={} is_dag_primary={} is_hybrid={} collected_txs={}",
+                            dag_ordering_enabled, is_dag_primary, is_hybrid, collected_txs.len()
+                        );
+                        
+                        if dag_ordering_enabled && (is_dag_primary || is_hybrid) && !collected_txs.is_empty() {
+                            let (ordered_txs, ordering_stats) = order_txs_for_dag_block(
+                                &collected_txs,
+                                &guard.accounts,
+                                block_max_tx,
+                            );
+                            
+                            // T96.3: Update metrics using centralized helper
+                            record_dag_ordering_metrics(&ordering_stats, ordered_txs.len());
+                            
+                            // Log ordering stats for observability
+                            log::info!(
+                                "T96.3: dag_ordering (non-persist): {}",
+                                ordering_stats.to_log_line()
+                            );
+                            
+                            ordered_txs
+                        } else {
+                            // DAG ordering not enabled or not in ordering mode — use txs as-is
+                            collected_txs
+                        }
+                    };
+                    
+                    // Without dag-consensus feature, just use collected txs directly
+                    #[cfg(not(feature = "dag-consensus"))]
+                    let txs = collected_txs;
 
                     let next_height = guard.height + 1;
 
@@ -1809,13 +1850,27 @@ impl CoreRunnerHandle {
                             // Get pending tx hashes from the shared mempool via DAG runner
                             let pending_hashes = dag_handle.sample_pending_tx_hashes(max_txs_to_sample).await;
                             
+                            // T96.3: Debug log pending tx count
+                            log::debug!(
+                                "T96.3: pre-feed: sampled {} pending tx hashes from mempool",
+                                pending_hashes.len()
+                            );
+                            
                             if !pending_hashes.is_empty() {
                                 // Submit pending txs to the hybrid DAG
                                 match hybrid_handle.submit_pending_txs(&pending_hashes, None) {
                                     Ok(count) => {
+                                        // T96.3: Log successful submission at info level for observability
                                         log::debug!(
                                             "dag-hybrid: fed {} pending tx hashes to DAG for ordering",
                                             count
+                                        );
+                                        
+                                        // T96.3: Check queue length after submission
+                                        let queue_len = hybrid_handle.peek_ordered_queue_len();
+                                        log::debug!(
+                                            "T96.3: post-feed: ordered_queue_len={}",
+                                            queue_len
                                         );
                                     }
                                     Err(e) => {
@@ -1826,7 +1881,13 @@ impl CoreRunnerHandle {
                                     }
                                 }
                             }
+                        } else {
+                            // T96.3: DagRunnerHandle not attached
+                            log::debug!("T96.3: dag_handle is None, cannot sample pending txs");
                         }
+                    } else {
+                        // T96.3: HybridDagHandle not attached
+                        log::debug!("T96.3: hybrid_handle is None, cannot submit to DAG");
                     }
                 }
                 
@@ -1836,6 +1897,21 @@ impl CoreRunnerHandle {
                 // T76.7: Now uses multi-batch aggregation with configurable time budget.
                 #[cfg(feature = "dag-consensus")]
                 let mut hybrid_batch_used = false;
+                
+                // T96.3: Diagnostic logging for DAG ordering flow (sampled every ~100 blocks)
+                #[cfg(feature = "dag-consensus")]
+                {
+                    let cfg_mode_str = match hybrid_mode_cfg {
+                        HybridModeConfig::DagPrimary => "DagPrimary",
+                        HybridModeConfig::HybridEnabled => "HybridEnabled",
+                        HybridModeConfig::Standard => "Standard",
+                    };
+                    log::debug!(
+                        "T96.3: tick start: hybrid_mode={} dag_ordering_enabled={}",
+                        cfg_mode_str,
+                        dag_ordering_enabled_from_env()
+                    );
+                }
                 #[cfg(feature = "dag-consensus")]
                 let mut hybrid_aggregated_txs: Vec<SignedTx> = Vec::new();
                 #[cfg(feature = "dag-consensus")]
@@ -2276,6 +2352,12 @@ impl CoreRunnerHandle {
                         // - Metrics (eezo_dag_ordered_txs_total) are updated
                         let dag_ordering_enabled = dag_ordering_enabled_from_env();
                         let is_dag_primary = matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary);
+                        
+                        // T96.3: Diagnostic logging for ordering decision
+                        log::debug!(
+                            "T96.3: fallback path: dag_ordering_enabled={} is_dag_primary={} collected_txs={}",
+                            dag_ordering_enabled, is_dag_primary, collected_txs.len()
+                        );
                         
                         if dag_ordering_enabled && is_dag_primary && !collected_txs.is_empty() {
                             let (ordered_txs, ordering_stats) = order_txs_for_dag_block(
