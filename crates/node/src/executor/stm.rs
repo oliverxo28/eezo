@@ -376,13 +376,27 @@ impl ArenaConflictBitmap {
     
     /// Reset the bitmap for a new wave.
     /// This is cheaper than allocating a new structure.
+    ///
+    /// Note: `overflow_occurred` is intentionally NOT reset here. It's tracked 
+    /// per-block (not per-wave) so we only emit the metric once per block even
+    /// if multiple waves have overflow. This prevents metric inflation and gives
+    /// a true count of "blocks with bitmap overflow".
     #[inline]
     pub fn reset(&mut self) {
         self.claimed_senders_bits.fill(false);
         self.touched_accounts_bits.fill(false);
         self.claimed_senders_overflow.clear();
         self.touched_accounts_overflow.clear();
-        // Note: we don't reset overflow_occurred - it's tracked per block
+    }
+    
+    /// Record that overflow occurred and emit metric (once per block).
+    #[inline]
+    fn record_overflow(&mut self) {
+        if !self.overflow_occurred {
+            self.overflow_occurred = true;
+            #[cfg(feature = "metrics")]
+            crate::metrics::stm_bitmap_fallback_inc();
+        }
     }
     
     /// Check if an arena index has been claimed as a sender.
@@ -414,12 +428,7 @@ impl ArenaConflictBitmap {
         if i < ARENA_BITMAP_CAPACITY {
             self.claimed_senders_bits.set(i, true);
         } else {
-            if !self.overflow_occurred {
-                self.overflow_occurred = true;
-                // Record metric for overflow
-                #[cfg(feature = "metrics")]
-                crate::metrics::stm_bitmap_fallback_inc();
-            }
+            self.record_overflow();
             self.claimed_senders_overflow.insert(idx);
         }
     }
@@ -431,12 +440,7 @@ impl ArenaConflictBitmap {
         if i < ARENA_BITMAP_CAPACITY {
             self.touched_accounts_bits.set(i, true);
         } else {
-            if !self.overflow_occurred {
-                self.overflow_occurred = true;
-                // Record metric for overflow
-                #[cfg(feature = "metrics")]
-                crate::metrics::stm_bitmap_fallback_inc();
-            }
+            self.record_overflow();
             self.touched_accounts_overflow.insert(idx);
         }
     }
