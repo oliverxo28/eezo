@@ -3821,9 +3821,10 @@ mod tests {
             &mut fastpath_committed,
         );
 
-        // Only first tx should commit (nonce=0 matches account nonce)
-        // Second tx has nonce=1 but account nonce was 0, then updated to 1 after first tx
-        // However, the same-sender check prevents multiple txs from same sender in one wave
+        // Only first tx should commit in wave 1:
+        // - First tx (nonce=0) matches account nonce and executes successfully
+        // - Second and third txs share the same sender as first tx, so they're
+        //   skipped due to the same-sender check (one sender per wave)
         assert_eq!(fastpath_committed.len(), 1, "Only first tx should fast path in wave 1");
         assert!(fastpath_committed.contains(&0));
 
