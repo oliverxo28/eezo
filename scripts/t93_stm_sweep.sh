@@ -54,10 +54,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Check for required tools
+# Check for required tools with helpful error messages
+MISSING_TOOLS=()
 for cmd in jq curl awk bc cargo; do
-    command -v "$cmd" >/dev/null || { echo "[t93_sweep] error: $cmd is required"; exit 1; }
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        MISSING_TOOLS+=("$cmd")
+    fi
 done
+
+if [[ ${#MISSING_TOOLS[@]} -gt 0 ]]; then
+    echo "[t93_sweep] ERROR: Missing required tools: ${MISSING_TOOLS[*]}" >&2
+    echo "" >&2
+    echo "Installation hints:" >&2
+    echo "  Ubuntu/Debian: sudo apt-get install bc jq curl gawk" >&2
+    echo "  macOS:         brew install bc jq curl gawk" >&2
+    echo "  Cargo:         https://rustup.rs/" >&2
+    exit 1
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config Matrix
@@ -115,19 +128,37 @@ get_metric() {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: Wait for node to be ready
+# Uses /ready endpoint which returns 200 only when node is fully operational.
+# Falls back to /health first to ensure the HTTP server is up, then checks /ready.
 # ─────────────────────────────────────────────────────────────────────────────
 wait_for_ready() {
     local url="$1"
     local max_wait="${2:-30}"
     local waited=0
     
-    while [[ $waited -lt $max_wait ]]; do
+    # First wait for HTTP server to be up via /health (always 200 when server is running)
+    while [[ $waited -lt 10 ]]; do
         if curl -sf "${url}/health" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+        ((waited++))
+    done
+    
+    if [[ $waited -ge 10 ]]; then
+        echo "[t93_sweep] ERROR: Node HTTP server did not start within 10s" >&2
+        return 1
+    fi
+    
+    # Now wait for /ready to return 200 (node fully operational)
+    while [[ $waited -lt $max_wait ]]; do
+        if curl -sf "${url}/ready" >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
         ((waited++))
     done
+    echo "[t93_sweep] ERROR: Node /ready did not return 200 within ${max_wait}s" >&2
     return 1
 }
 
@@ -319,6 +350,7 @@ for LANES in "${LANES_SET[@]}"; do
                     STM_PER_TX=$(echo "scale=8; $DELTA_STM / $DELTA_TX_INT" | bc -l)
                     HASH_PER_TX=$(echo "scale=10; $DELTA_HASH / $DELTA_TX_INT" | bc -l)
                 else
+                    echo "[t93_sweep] WARNING: Δtx=0 for this config, skipping TPS calculation" >&2
                     STM_PER_TX="N/A"
                     HASH_PER_TX="N/A"
                 fi
@@ -331,15 +363,17 @@ for LANES in "${LANES_SET[@]}"; do
                 fi
                 
                 # Compute approximate TPS
-                if [[ "$WALL_ELAPSED" -gt 0 ]]; then
+                if [[ "$WALL_ELAPSED" -gt 0 ]] && [[ "$DELTA_TX_INT" -gt 0 ]]; then
                     TPS=$(echo "scale=2; $DELTA_TX_INT / $WALL_ELAPSED" | bc -l)
                 else
                     TPS="N/A"
                 fi
                 
                 # Format results
-                DELTA_STM_FMT=$(printf "%.4f" "$DELTA_STM")
-                DELTA_HASH_FMT=$(printf "%.6f" "$DELTA_HASH")
+                # bc -l may return values like ".12345" without leading zero
+                # printf handles this correctly, but we add a safeguard
+                DELTA_STM_FMT=$(printf "%.4f" "$DELTA_STM" 2>/dev/null || echo "$DELTA_STM")
+                DELTA_HASH_FMT=$(printf "%.6f" "$DELTA_HASH" 2>/dev/null || echo "$DELTA_HASH")
                 
                 if [[ "$STM_PER_TX" != "N/A" ]]; then
                     STM_PER_TX_FMT=$(printf "%.6f" "$STM_PER_TX")
