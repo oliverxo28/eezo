@@ -576,4 +576,68 @@ mod tests {
         assert_eq!(ordered.len(), 2);
         assert_eq!(stats.stale_count, 2);
     }
+
+    /// T96.3: Test that DAG ordering stats are correctly populated for metrics.
+    /// This test validates the exact fields that are used by record_dag_ordering_metrics.
+    #[test]
+    fn test_ordering_stats_for_metrics() {
+        let mut accounts = Accounts::default();
+        let sender_a = Address([0xAA; 20]);
+        let sender_b = Address([0xBB; 20]);
+        accounts.put(sender_a, Account { balance: 100000, nonce: 0 });
+        accounts.put(sender_b, Account { balance: 100000, nonce: 0 });
+
+        // Create a batch with simple transfers from two senders
+        let txs = vec![
+            make_tx([0xAA; 20], 0, 100), // simple transfer
+            make_tx([0xAA; 20], 1, 100), // simple transfer
+            make_tx([0xBB; 20], 0, 200), // simple transfer
+            make_tx([0xBB; 20], 1, 200), // simple transfer
+        ];
+
+        let (ordered, stats) = order_txs_for_dag_block(&txs, &accounts, 100);
+
+        // Verify all txs are ordered
+        assert_eq!(ordered.len(), 4);
+        assert_eq!(stats.ordered_count, 4);
+        
+        // Verify stats that would be used by metrics
+        // - ordered_count > 0 (used by dag_ordered_txs_inc)
+        // - fastpath_candidates > 0 (used by dag_fastpath_candidates_inc)
+        // - avg_nonce_span is valid (used by dag_nonce_span_observe)
+        assert!(stats.ordered_count > 0, "ordered_count should be > 0 for metrics");
+        assert!(stats.fastpath_candidates > 0, "fastpath_candidates should be > 0 for simple transfers");
+        assert_eq!(stats.fastpath_candidates, 4, "all 4 txs are simple transfers");
+        assert_eq!(stats.unique_senders, 2, "should have 2 unique senders");
+        
+        // Verify input_count for debugging
+        assert_eq!(stats.input_count, 4);
+        
+        // No stale or gap counts for contiguous nonces
+        assert_eq!(stats.stale_count, 0);
+        // Note: gap_count may be non-zero due to round-robin ordering
+    }
+
+    /// T96.3: Test that to_log_line produces a parseable log message.
+    /// This ensures the log output format is stable and useful for observability.
+    #[test]
+    fn test_stats_log_line_format() {
+        let stats = DagOrderingStats {
+            input_count: 10,
+            ordered_count: 8,
+            gap_count: 1,
+            stale_count: 1,
+            avg_nonce_span: 0.5,
+            fastpath_candidates: 7,
+            unique_senders: 3,
+        };
+
+        let log_line = stats.to_log_line();
+        
+        // Verify the log line contains key metrics
+        assert!(log_line.contains("tx=8"), "should contain ordered count");
+        assert!(log_line.contains("avg_nonce_span=0.50"), "should contain nonce span");
+        assert!(log_line.contains("fastpath_candidates=7"), "should contain fastpath count");
+        assert!(log_line.contains("T96.0"), "should contain task reference");
+    }
 }
