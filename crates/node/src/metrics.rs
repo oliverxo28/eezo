@@ -4229,6 +4229,77 @@ pub fn register_t91_cuda_hash_metrics() {
     // No metrics to register when the feature is off.
 }
 
+// =============================================================================
+// T92.0 — Hash vs Executor Profiling Metrics
+// =============================================================================
+//
+// These metrics track CPU time spent in:
+// - BLAKE3 consensus-related hashing (tx hashes, block body hashes)
+// - STM executor runs (block execution)
+//
+// This enables profiling under load to identify bottlenecks.
+
+use prometheus::Counter;
+
+/// T92.0: Counter for total CPU time (seconds) spent in consensus-related BLAKE3 hashing.
+#[cfg(feature = "metrics")]
+pub static EEZO_HASH_CPU_TIME_SECONDS: Lazy<Counter> = Lazy::new(|| {
+    prometheus::register_counter!(
+        "eezo_hash_cpu_time_seconds",
+        "Total CPU time (seconds) spent in consensus-related BLAKE3 hashing"
+    )
+    .unwrap()
+});
+
+/// T92.0: Counter for total CPU time (seconds) spent in STM executor runs.
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_TIME_SECONDS: Lazy<Counter> = Lazy::new(|| {
+    prometheus::register_counter!(
+        "eezo_exec_stm_time_seconds",
+        "Total CPU time (seconds) spent in STM executor runs executed by consensus"
+    )
+    .unwrap()
+});
+
+/// T92.0: Helper to increment the hash CPU time counter.
+#[inline]
+pub fn hash_cpu_time_inc(seconds: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_HASH_CPU_TIME_SECONDS.inc_by(seconds);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = seconds;
+    }
+}
+
+/// T92.0: Helper to increment the STM executor time counter.
+#[inline]
+pub fn exec_stm_time_inc(seconds: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_TIME_SECONDS.inc_by(seconds);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = seconds;
+    }
+}
+
+/// T92.0: Eagerly register profiling metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t92_perf_metrics() {
+    let _ = &*EEZO_HASH_CPU_TIME_SECONDS;
+    let _ = &*EEZO_EXEC_STM_TIME_SECONDS;
+}
+
+/// T92.0: No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t92_perf_metrics() {
+    // No metrics to register when the feature is off.
+}
+
 // -----------------------------------------------------------------------------
 // T82.0 — Unit tests for ProfilingMode
 // -----------------------------------------------------------------------------
