@@ -1860,9 +1860,9 @@ impl CoreRunnerHandle {
                                 // Submit pending txs to the hybrid DAG
                                 match hybrid_handle.submit_pending_txs(&pending_hashes, None) {
                                     Ok(count) => {
-                                        // T96.3: Log successful submission at info level for observability
+                                        // T96.3: Log successful submission for observability
                                         log::debug!(
-                                            "dag-hybrid: fed {} pending tx hashes to DAG for ordering",
+                                            "T96.3: dag-hybrid: fed {} pending tx hashes to DAG for ordering",
                                             count
                                         );
                                         
@@ -1875,7 +1875,7 @@ impl CoreRunnerHandle {
                                     }
                                     Err(e) => {
                                         log::warn!(
-                                            "dag-hybrid: failed to submit pending txs: {}",
+                                            "T96.3: dag-hybrid: failed to submit pending txs: {}",
                                             e
                                         );
                                     }
