@@ -478,6 +478,24 @@ fn dag_ordering_enabled_from_env() -> bool {
     }
 }
 
+/// T96.1: Helper to record DAG ordering metrics after applying ordering.
+///
+/// This function updates all metrics related to DAG ordering in a single place,
+/// ensuring consistency between the two ordering hooks (hybrid batch path and
+/// mempool fallback path).
+///
+/// Called from:
+/// - Hook #1: After ordering hybrid-aggregated txs
+/// - Hook #2: After ordering mempool-collected txs in DagPrimary mode
+#[cfg(feature = "dag-consensus")]
+#[inline]
+fn record_dag_ordering_metrics(stats: &DagOrderingStats, ordered_count: usize) {
+    crate::metrics::dag_ordered_txs_inc(ordered_count as u64);
+    crate::metrics::dag_block_tx_per_block_observe(ordered_count);
+    crate::metrics::dag_nonce_span_observe(stats.avg_nonce_span);
+    crate::metrics::dag_fastpath_candidates_inc(stats.fastpath_candidates as u64);
+}
+
 impl HybridModeConfig {
     /// Parse hybrid mode configuration from environment.
     fn from_env() -> Self {
@@ -2117,6 +2135,15 @@ impl CoreRunnerHandle {
                                 crate::metrics::dag_hybrid_decode_error_inc_by(stats.decode_err as u64);
                             }
                             
+                            // T96.1: DAG Ordering Hook #1 — Hybrid batch consumption path.
+                            //
+                            // This is the primary ordering path when DAG batches are successfully
+                            // consumed from the ordered queue. Applies sender grouping + nonce sorting
+                            // to the already-aggregated transactions.
+                            //
+                            // Note: There is a second ordering hook (#2) in the `else` branch below
+                            // for when hybrid_batch_used=false. See T96.1 for full wiring details.
+                            //
                             // T96.0: Apply DAG ordering to reorder txs for optimal block packing
                             // This groups same-sender txs contiguously and sorts by nonce
                             let dag_ordering_enabled = dag_ordering_enabled_from_env();
@@ -2127,11 +2154,8 @@ impl CoreRunnerHandle {
                                     block_max_tx,
                                 );
                                 
-                                // T96.0: Update metrics
-                                crate::metrics::dag_ordered_txs_inc(ordered_txs.len() as u64);
-                                crate::metrics::dag_block_tx_per_block_observe(ordered_txs.len());
-                                crate::metrics::dag_nonce_span_observe(ordering_stats.avg_nonce_span);
-                                crate::metrics::dag_fastpath_candidates_inc(ordering_stats.fastpath_candidates as u64);
+                                // T96.1: Update metrics using centralized helper
+                                record_dag_ordering_metrics(&ordering_stats, ordered_txs.len());
                                 
                                 // Sampled logging (every ~100 blocks based on log level)
                                 log::info!("{}", ordering_stats.to_log_line());
@@ -2223,14 +2247,57 @@ impl CoreRunnerHandle {
                             }
                         }
                     } else {
+                        // T96.1: DAG Ordering Hook #2 — Mempool/DAG fallback path.
+                        //
+                        // This path is taken when:
+                        // - hybrid_batch_used=false (no ordered DAG batches were consumed), OR
+                        // - DagPrimary mode but DAG queue was empty this tick
+                        //
+                        // In DagPrimary mode with EEZO_DAG_ORDERING_ENABLED=1, we MUST still
+                        // apply DAG ordering to any txs collected from mempool. This ensures:
+                        // 1. Sender grouping + nonce sorting for STM conflict reduction
+                        // 2. The eezo_dag_ordered_txs_total metric is incremented
+                        // 3. Consistent deterministic ordering regardless of tx source
+                        //
                         // T68.1: If DAG source is selected and returned txs, use those;
                         // otherwise fall back to mempool.
-                        Self::collect_block_txs_with_dag_fallback(
+                        let collected_txs = Self::collect_block_txs_with_dag_fallback(
                             block_tx_source,
                             dag_txs,
                             &mut guard,
                             block_max_tx,
-                        )
+                        );
+                        
+                        // T96.1: Apply DAG ordering to mempool txs when enabled in DagPrimary mode.
+                        // This is the key fix: even when no DAG batches were available, we still
+                        // run the ordering logic on mempool txs to ensure:
+                        // - Sender grouping for STM efficiency
+                        // - Nonce contiguity for reduced conflicts
+                        // - Metrics (eezo_dag_ordered_txs_total) are updated
+                        let dag_ordering_enabled = dag_ordering_enabled_from_env();
+                        let is_dag_primary = matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary);
+                        
+                        if dag_ordering_enabled && is_dag_primary && !collected_txs.is_empty() {
+                            let (ordered_txs, ordering_stats) = order_txs_for_dag_block(
+                                &collected_txs,
+                                &guard.accounts,
+                                block_max_tx,
+                            );
+                            
+                            // T96.1: Update metrics using centralized helper
+                            record_dag_ordering_metrics(&ordering_stats, ordered_txs.len());
+                            
+                            // Log ordering stats for observability
+                            log::info!(
+                                "T96.1: dag_ordering (mempool-path): {}",
+                                ordering_stats.to_log_line()
+                            );
+                            
+                            ordered_txs
+                        } else {
+                            // DAG ordering not enabled or not DagPrimary — use txs as-is
+                            collected_txs
+                        }
                     };
                     
                     // Non-dag-consensus variant: just use dag_txs or mempool fallback
