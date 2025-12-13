@@ -120,6 +120,25 @@ get_metric() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Helper: Convert a value to integer (handles both "123" and "123.0" formats)
+# ─────────────────────────────────────────────────────────────────────────────
+to_int() {
+    local val="$1"
+    local result
+    if [[ "$val" == *"."* ]]; then
+        result=${val%.*}
+    else
+        result="$val"
+    fi
+    # Default to 0 if empty or non-numeric
+    if [[ -z "$result" ]] || ! [[ "$result" =~ ^-?[0-9]+$ ]]; then
+        echo "0"
+    else
+        echo "$result"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helper: Wait for node to be ready
 # ─────────────────────────────────────────────────────────────────────────────
 wait_for_ready() {
@@ -178,12 +197,14 @@ trap 'cleanup_node "$NODE_PID"' EXIT
 # ─────────────────────────────────────────────────────────────────────────────
 # Build the node binary
 # ─────────────────────────────────────────────────────────────────────────────
+NODE_FEATURES="pq44-runtime,metrics,checkpoints,stm-exec,dag-consensus,cuda-hash"
+
 echo "[t93_fat_block] Building eezo-node (release)..."
 cargo build -p eezo-node --bin eezo-node \
-    --features "pq44-runtime,metrics,checkpoints,stm-exec,dag-consensus,cuda-hash" \
+    --features "$NODE_FEATURES" \
     --release --quiet 2>/dev/null || \
 cargo build -p eezo-node --bin eezo-node \
-    --features "pq44-runtime,metrics,checkpoints,stm-exec,dag-consensus,cuda-hash" \
+    --features "$NODE_FEATURES" \
     --release
 
 # Build helper binaries
@@ -304,19 +325,9 @@ DELTA_HASH=$(echo "$HASH_AFTER - $HASH_BEFORE" | bc -l)
 DELTA_TX=$(echo "$TX_AFTER - $TX_BEFORE" | bc)
 DELTA_BLOCKS=$(echo "$BLOCKS_AFTER - $BLOCKS_BEFORE" | bc)
 
-# Handle integer conversion
-if [[ "$DELTA_TX" == *"."* ]]; then
-    DELTA_TX_INT=${DELTA_TX%.*}
-else
-    DELTA_TX_INT="$DELTA_TX"
-fi
-if [[ "$DELTA_BLOCKS" == *"."* ]]; then
-    DELTA_BLOCKS_INT=${DELTA_BLOCKS%.*}
-else
-    DELTA_BLOCKS_INT="$DELTA_BLOCKS"
-fi
-[[ -z "$DELTA_TX_INT" ]] && DELTA_TX_INT=0
-[[ -z "$DELTA_BLOCKS_INT" ]] && DELTA_BLOCKS_INT=0
+# Handle integer conversion using helper function
+DELTA_TX_INT=$(to_int "$DELTA_TX")
+DELTA_BLOCKS_INT=$(to_int "$DELTA_BLOCKS")
 
 # Compute derived metrics
 if [[ "$DELTA_TX_INT" -gt 0 ]]; then

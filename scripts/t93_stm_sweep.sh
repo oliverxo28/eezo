@@ -376,13 +376,13 @@ for LANES in "${LANES_SET[@]}"; do
                 DELTA_HASH_FMT=$(printf "%.6f" "$DELTA_HASH" 2>/dev/null || echo "$DELTA_HASH")
                 
                 if [[ "$STM_PER_TX" != "N/A" ]]; then
-                    STM_PER_TX_FMT=$(printf "%.6f" "$STM_PER_TX")
+                    STM_PER_TX_FMT=$(printf "%.6f" "$STM_PER_TX" 2>/dev/null || echo "$STM_PER_TX")
                 else
                     STM_PER_TX_FMT="N/A"
                 fi
                 
                 if [[ "$HASH_PER_TX" != "N/A" ]]; then
-                    HASH_PER_TX_FMT=$(printf "%.8f" "$HASH_PER_TX")
+                    HASH_PER_TX_FMT=$(printf "%.8f" "$HASH_PER_TX" 2>/dev/null || echo "$HASH_PER_TX")
                 else
                     HASH_PER_TX_FMT="N/A"
                 fi
