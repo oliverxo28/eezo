@@ -1605,7 +1605,7 @@ impl StmExecutor {
     }
 
     // =============================================================================
-    // T93.2: Simple Transfer Fast Path
+    // T93.2 + T93.3: Simple Transfer Fast Path
     // =============================================================================
     //
     // The fast path is an optimization for simple value transfers that bypasses
@@ -1623,22 +1623,35 @@ impl StmExecutor {
     // - If no tx writes to an account that another tx reads/writes, there are no
     //   read-after-write or write-after-write conflicts
     //
-    // Txs that cannot be safely executed via fast path are marked for the general
-    // STM path (fallback).
+    // T93.3 Metrics Semantics:
+    // - Txs that commit via fast path are tracked in `fastpath_committed` set
+    // - Txs that fail fast path scheduling (same sender/touched account) stay as
+    //   NeedsRetry and may be executed via general STM path in subsequent waves
+    // - The final fastpath/fallback counts are computed at block end based on
+    //   which txs ultimately committed via each path
+    // - Txs with temporary failures (nonce mismatch, insufficient balance) stay
+    //   as NeedsRetry without counting as fallback (they may succeed in fast path
+    //   after earlier txs commit)
 
-    /// T93.2: Execute simple transfers via the fast path.
+    /// T93.2 + T93.3: Execute simple transfers via the fast path.
     ///
     /// This function attempts to execute simple transfers without conflict detection
     /// overhead. It partitions transactions by sender and ensures only one tx per
     /// sender is executed per wave.
     ///
-    /// Returns (fast_path_count, fallback_count) - counts of txs handled by each path.
+    /// ## T93.3 Metrics Note
+    ///
+    /// This function tracks which txs successfully commit via fast path in the
+    /// `fastpath_committed` set. Txs that cannot be scheduled in this wave's fast
+    /// path stay as NeedsRetry and will be attempted again in subsequent waves
+    /// (either via fast path or general STM).
     ///
     /// # Arguments
     /// * `analyzed_txs` - Pre-analyzed transactions with kind and arena indices
     /// * `arena_contexts` - Arena execution contexts for each tx
     /// * `arena` - The account arena for this block
     /// * `idx_to_arena` - Map from tx_idx to arena_contexts index
+    /// * `fastpath_committed` - Set of tx_idx that committed via fast path (updated in place)
     ///
     /// # Safety
     ///
@@ -1650,16 +1663,14 @@ impl StmExecutor {
         arena_contexts: &mut [ArenaTxContext],
         arena: &mut AccountArena,
         idx_to_arena: &HashMap<usize, usize>,
-    ) -> (u64, u64) {
+        fastpath_committed: &mut HashSet<usize>,
+    ) {
         let fastpath_start = std::time::Instant::now();
         
         // Track senders and receivers touched in this wave
         // Key: arena_idx, Value: tx_idx that claims this account
         let mut claimed_senders: HashMap<u32, usize> = HashMap::new();
         let mut touched_accounts: HashMap<u32, usize> = HashMap::new();
-        
-        let mut fast_path_count: u64 = 0;
-        let mut fallback_count: u64 = 0;
         
         // Process transactions in original order for determinism
         let mut pending: Vec<&AnalyzedTx> = analyzed_txs
@@ -1680,15 +1691,15 @@ impl StmExecutor {
             let ctx = &mut arena_contexts[arena_idx];
             
             // Only handle simple transfers via fast path
+            // Non-simple txs stay as NeedsRetry for general STM path
             if !atx.kind.is_simple() {
-                fallback_count += 1;
                 continue;
             }
             
-            // Check if we can safely execute this tx
+            // Check if we can safely execute this tx in this wave
             // Rule 1: No other tx in this wave can have the same sender
+            // (Skip this tx for this wave - it stays NeedsRetry for general path)
             if claimed_senders.contains_key(&ctx.sender_idx) {
-                fallback_count += 1;
                 continue;
             }
             
@@ -1696,7 +1707,6 @@ impl StmExecutor {
             // (This prevents read-after-write conflicts)
             if touched_accounts.contains_key(&ctx.sender_idx) || 
                touched_accounts.contains_key(&ctx.receiver_idx) {
-                fallback_count += 1;
                 continue;
             }
             
@@ -1704,16 +1714,15 @@ impl StmExecutor {
             let sender_acc = arena.account(ctx.sender_idx);
             let core = &atx.tx.core;
             
-            // Validate nonce
+            // Validate nonce - if mismatch, leave as NeedsRetry
+            // (may succeed in a later wave after earlier txs update the nonce)
             if sender_acc.nonce != core.nonce {
-                // Nonce mismatch - mark for retry (may succeed after earlier txs)
                 continue;
             }
             
-            // Validate balance
+            // Validate balance - if insufficient, leave as NeedsRetry
             let need = core.amount.saturating_add(core.fee);
             if sender_acc.balance < need {
-                // Insufficient balance - mark for retry
                 continue;
             }
             
@@ -1733,12 +1742,13 @@ impl StmExecutor {
             // Mark as committed
             ctx.status = TxStatus::Committed;
             
-            // Claim sender and touch both accounts
+            // Record that this tx committed via fast path (for metrics)
+            fastpath_committed.insert(atx.tx_idx);
+            
+            // Claim sender and touch both accounts for this wave
             claimed_senders.insert(ctx.sender_idx, atx.tx_idx);
             touched_accounts.insert(ctx.sender_idx, atx.tx_idx);
             touched_accounts.insert(ctx.receiver_idx, atx.tx_idx);
-            
-            fast_path_count += 1;
         }
         
         // Emit timing metric
@@ -1747,11 +1757,9 @@ impl StmExecutor {
             let elapsed = fastpath_start.elapsed().as_secs_f64();
             crate::metrics::stm_simple_time_add(elapsed);
         }
-        
-        (fast_path_count, fallback_count)
     }
 
-    /// T87.4: Execute all transactions using arena-indexed STM kernel.
+    /// T87.4 + T93.3: Execute all transactions using arena-indexed STM kernel.
     ///
     /// This version uses:
     /// - `AccountArena`: All touched accounts stored contiguously in a Vec
@@ -1760,6 +1768,14 @@ impl StmExecutor {
     ///
     /// The arena is built once at block start by pre-loading all touched accounts.
     /// During execution, all state access is done via Vec indexing (cache-friendly).
+    ///
+    /// ## T93.3 Metrics Semantics
+    ///
+    /// At block start, we count candidate txs (classified as SimpleTransfer).
+    /// We track which txs commit via fast path in `fastpath_committed`.
+    /// At block end, we compute:
+    /// - fastpath_total = |fastpath_committed|
+    /// - fallback_total = |finally_committed ∩ simple_candidates \ fastpath_committed|
     ///
     /// Returns (committed_txs, waves, conflicts, retries, aborted)
     fn execute_stm_with_arena(
@@ -1778,6 +1794,20 @@ impl StmExecutor {
 
         // Pre-analyze all transactions
         let analyzed_txs = analyze_batch(txs);
+        
+        // T93.3: Count simple candidates at block start (once per tx)
+        let simple_candidates: HashSet<usize> = analyzed_txs
+            .iter()
+            .filter(|atx| atx.kind.is_simple())
+            .map(|atx| atx.tx_idx)
+            .collect();
+        let candidate_count = simple_candidates.len() as u64;
+        
+        // Emit candidate metric once at block start
+        #[cfg(feature = "metrics")]
+        {
+            crate::metrics::stm_simple_candidate_inc(candidate_count);
+        }
         
         // Build arena with all touched accounts
         let base_accounts = accounts.clone();
@@ -1809,9 +1839,8 @@ impl StmExecutor {
         let mut retries_this_block: u64 = 0;
         let mut aborted_this_block: u64 = 0;
 
-        // T93.2: Fast path metrics tracking
-        let mut fastpath_total: u64 = 0;
-        let mut fallback_total: u64 = 0;
+        // T93.3: Track which txs committed via fast path (per-tx, not per-wave)
+        let mut fastpath_committed: HashSet<usize> = HashSet::new();
 
         // Track which txs have been finally committed
         let mut finally_committed: HashSet<usize> = HashSet::new();
@@ -1832,16 +1861,15 @@ impl StmExecutor {
                 break;
             }
 
-            // T93.2: Try simple fast path first if enabled
+            // T93.2 + T93.3: Try simple fast path first if enabled
             if self.config.simple_fastpath_enabled {
-                let (fp_count, fb_count) = Self::execute_simple_fastpath_wave(
+                Self::execute_simple_fastpath_wave(
                     &analyzed_txs,
                     &mut arena_contexts,
                     &mut arena,
                     &idx_to_arena,
+                    &mut fastpath_committed,
                 );
-                fastpath_total += fp_count;
-                fallback_total += fb_count;
                 
                 // Collect committed txs from fast path
                 for ctx in arena_contexts.iter() {
@@ -1856,7 +1884,7 @@ impl StmExecutor {
                     .filter(|c| c.status == TxStatus::NeedsRetry)
                     .count();
                 if still_pending == 0 {
-                    log::debug!("STM(arena/fastpath): all {} txs committed via fast path", fp_count);
+                    log::debug!("STM(arena/fastpath): all {} txs committed via fast path", fastpath_committed.len());
                     break;
                 }
             }
@@ -1973,19 +2001,36 @@ impl StmExecutor {
         // Apply arena changes to actual state
         arena.apply_to_state(accounts, supply);
 
-        // Build committed_txs
-        let mut committed_indices: Vec<usize> = finally_committed.into_iter().collect();
-        committed_indices.sort();
+        // Build committed_txs from finally_committed
+        let committed_indices: Vec<usize> = {
+            let mut indices: Vec<usize> = finally_committed.iter().copied().collect();
+            indices.sort();
+            indices
+        };
         let committed_txs: Vec<SignedTx> = committed_indices
-            .into_iter()
-            .map(|idx| txs[idx].clone())
+            .iter()
+            .map(|&idx| txs[idx].clone())
             .collect();
+
+        // T93.3: Compute final fastpath/fallback metrics at block end
+        // fastpath_total = number of txs that committed via fast path
+        // fallback_total = number of simple candidates that committed via general STM path
+        let fastpath_total = fastpath_committed.len() as u64;
+        let fallback_total = if self.config.simple_fastpath_enabled {
+            // Count simple candidates that committed but NOT via fast path
+            finally_committed
+                .iter()
+                .filter(|tx_idx| simple_candidates.contains(tx_idx) && !fastpath_committed.contains(tx_idx))
+                .count() as u64
+        } else {
+            0
+        };
 
         // Emit wave-building metrics
         #[cfg(feature = "metrics")]
         {
             crate::metrics::exec_stm_waves_built_inc(waves_this_block);
-            // T93.2: Emit fast path metrics
+            // T93.3: Emit fast path metrics (per-tx, not per-wave)
             if self.config.simple_fastpath_enabled {
                 crate::metrics::stm_simple_fastpath_inc(fastpath_total);
                 crate::metrics::stm_simple_fallback_inc(fallback_total);
@@ -1993,13 +2038,14 @@ impl StmExecutor {
         }
 
         log::debug!(
-            "STM(arena): completed {} waves, {} committed, {} failed/aborted, {} conflicts, {} retries, arena_size={}, fastpath={}, fallback={}",
+            "STM(arena): completed {} waves, {} committed, {} failed/aborted, {} conflicts, {} retries, arena_size={}, candidates={}, fastpath={}, fallback={}",
             waves_this_block,
             committed_txs.len(),
             n - committed_txs.len(),
             conflicts_this_block,
             retries_this_block,
             arena.len(),
+            candidate_count,
             fastpath_total,
             fallback_total
         );
@@ -3528,5 +3574,474 @@ mod tests {
     fn test_analyzed_tx_kind_is_simple() {
         assert!(AnalyzedTxKind::SimpleTransfer.is_simple());
         assert!(!AnalyzedTxKind::General.is_simple());
+    }
+
+    // ========================================================================
+    // T93.3: Simple Fast Path Metrics & Coverage Tests
+    // ========================================================================
+
+    /// T93.3: Test that simple candidates are counted correctly at block start.
+    #[test]
+    fn test_simple_candidates_counted_at_block_start() {
+        use eezo_ledger::TxCore;
+
+        // Create a batch of transactions with valid senders
+        let txs: Vec<SignedTx> = (0..5).map(|i| {
+            SignedTx {
+                core: TxCore {
+                    to: Address([0xcc; 20]),
+                    amount: 100,
+                    fee: 1,
+                    nonce: i as u64,
+                },
+                pubkey: vec![(0x11 + i) as u8; 20], // Different sender for each
+                sig: vec![],
+            }
+        }).collect();
+
+        // Analyze the batch
+        let analyzed = analyze_batch(&txs);
+        
+        // All should be simple transfers
+        assert_eq!(analyzed.len(), 5);
+        for atx in &analyzed {
+            assert!(atx.kind.is_simple(), "All txs should be SimpleTransfer");
+        }
+    }
+
+    /// T93.3: Test that fast path committed set tracks per-tx outcomes.
+    #[test]
+    fn test_fastpath_committed_tracks_per_tx() {
+        use eezo_ledger::{TxCore, AccountArena};
+
+        // Setup: Create 3 txs from different senders to different receivers
+        let sender1 = Address([0x11; 20]);
+        let sender2 = Address([0x22; 20]);
+        let sender3 = Address([0x33; 20]);
+        let receiver1 = Address([0xAA; 20]);
+        let receiver2 = Address([0xBB; 20]);
+        let receiver3 = Address([0xCC; 20]);
+
+        let txs: Vec<SignedTx> = vec![
+            SignedTx {
+                core: TxCore { to: receiver1, amount: 100, fee: 1, nonce: 0 },
+                pubkey: sender1.0.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: receiver2, amount: 200, fee: 2, nonce: 0 },
+                pubkey: sender2.0.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: receiver3, amount: 300, fee: 3, nonce: 0 },
+                pubkey: sender3.0.to_vec(),
+                sig: vec![],
+            },
+        ];
+
+        // Analyze
+        let analyzed_txs = analyze_batch(&txs);
+        assert_eq!(analyzed_txs.len(), 3);
+
+        // Build arena and contexts
+        let mut accounts = Accounts::default();
+        accounts.put(sender1, Account { balance: 1000, nonce: 0 });
+        accounts.put(sender2, Account { balance: 2000, nonce: 0 });
+        accounts.put(sender3, Account { balance: 3000, nonce: 0 });
+
+        let mut arena = AccountArena::with_capacity(6);
+        let mut arena_contexts: Vec<ArenaTxContext> = analyzed_txs
+            .iter()
+            .map(|atx| ArenaTxContext::from_analyzed(atx, &mut arena, &accounts))
+            .collect();
+        
+        let idx_to_arena: HashMap<usize, usize> = arena_contexts
+            .iter()
+            .enumerate()
+            .map(|(i, ctx)| (ctx.tx_idx, i))
+            .collect();
+
+        // Track fast path commits
+        let mut fastpath_committed: HashSet<usize> = HashSet::new();
+
+        // Execute fast path wave
+        StmExecutor::execute_simple_fastpath_wave(
+            &analyzed_txs,
+            &mut arena_contexts,
+            &mut arena,
+            &idx_to_arena,
+            &mut fastpath_committed,
+        );
+
+        // All 3 should have committed via fast path (no conflicts)
+        assert_eq!(fastpath_committed.len(), 3, "All 3 non-conflicting txs should use fast path");
+        assert!(fastpath_committed.contains(&0));
+        assert!(fastpath_committed.contains(&1));
+        assert!(fastpath_committed.contains(&2));
+
+        // All contexts should be committed
+        for ctx in &arena_contexts {
+            assert_eq!(ctx.status, TxStatus::Committed);
+        }
+    }
+
+    /// T93.3: Test that conflicting txs (same receiver) force some to fallback.
+    #[test]
+    fn test_conflicting_txs_force_fallback() {
+        use eezo_ledger::{TxCore, AccountArena};
+
+        // Setup: 3 txs from different senders to the SAME receiver
+        // This should cause conflicts since they all touch the same receiver account
+        let sender1 = Address([0x11; 20]);
+        let sender2 = Address([0x22; 20]);
+        let sender3 = Address([0x33; 20]);
+        let shared_receiver = Address([0xFF; 20]);
+
+        let txs: Vec<SignedTx> = vec![
+            SignedTx {
+                core: TxCore { to: shared_receiver, amount: 100, fee: 1, nonce: 0 },
+                pubkey: sender1.0.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: shared_receiver, amount: 200, fee: 2, nonce: 0 },
+                pubkey: sender2.0.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: shared_receiver, amount: 300, fee: 3, nonce: 0 },
+                pubkey: sender3.0.to_vec(),
+                sig: vec![],
+            },
+        ];
+
+        // Analyze
+        let analyzed_txs = analyze_batch(&txs);
+        assert_eq!(analyzed_txs.len(), 3);
+
+        // Build arena and contexts
+        let mut accounts = Accounts::default();
+        accounts.put(sender1, Account { balance: 1000, nonce: 0 });
+        accounts.put(sender2, Account { balance: 2000, nonce: 0 });
+        accounts.put(sender3, Account { balance: 3000, nonce: 0 });
+
+        let mut arena = AccountArena::with_capacity(4);
+        let mut arena_contexts: Vec<ArenaTxContext> = analyzed_txs
+            .iter()
+            .map(|atx| ArenaTxContext::from_analyzed(atx, &mut arena, &accounts))
+            .collect();
+        
+        let idx_to_arena: HashMap<usize, usize> = arena_contexts
+            .iter()
+            .enumerate()
+            .map(|(i, ctx)| (ctx.tx_idx, i))
+            .collect();
+
+        // Track fast path commits
+        let mut fastpath_committed: HashSet<usize> = HashSet::new();
+
+        // Execute fast path wave
+        StmExecutor::execute_simple_fastpath_wave(
+            &analyzed_txs,
+            &mut arena_contexts,
+            &mut arena,
+            &idx_to_arena,
+            &mut fastpath_committed,
+        );
+
+        // Only the first tx should commit via fast path (others conflict on shared receiver)
+        assert_eq!(fastpath_committed.len(), 1, "Only first tx should use fast path");
+        assert!(fastpath_committed.contains(&0), "First tx should be fast path");
+        
+        // First should be committed, others still pending
+        assert_eq!(arena_contexts[0].status, TxStatus::Committed);
+        assert_eq!(arena_contexts[1].status, TxStatus::NeedsRetry);
+        assert_eq!(arena_contexts[2].status, TxStatus::NeedsRetry);
+    }
+
+    /// T93.3: Test same-sender txs (nonce chain) - only one should fast path per wave.
+    #[test]
+    fn test_same_sender_nonce_chain() {
+        use eezo_ledger::{TxCore, AccountArena};
+
+        // Setup: 3 txs from the SAME sender with sequential nonces
+        let sender = Address([0x42; 20]);
+        let receiver1 = Address([0xAA; 20]);
+        let receiver2 = Address([0xBB; 20]);
+        let receiver3 = Address([0xCC; 20]);
+
+        let txs: Vec<SignedTx> = vec![
+            SignedTx {
+                core: TxCore { to: receiver1, amount: 100, fee: 1, nonce: 0 },
+                pubkey: sender.0.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: receiver2, amount: 200, fee: 2, nonce: 1 },
+                pubkey: sender.0.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: receiver3, amount: 300, fee: 3, nonce: 2 },
+                pubkey: sender.0.to_vec(),
+                sig: vec![],
+            },
+        ];
+
+        // Analyze
+        let analyzed_txs = analyze_batch(&txs);
+        assert_eq!(analyzed_txs.len(), 3);
+
+        // Build arena and contexts
+        let mut accounts = Accounts::default();
+        accounts.put(sender, Account { balance: 10000, nonce: 0 });
+
+        let mut arena = AccountArena::with_capacity(4);
+        let mut arena_contexts: Vec<ArenaTxContext> = analyzed_txs
+            .iter()
+            .map(|atx| ArenaTxContext::from_analyzed(atx, &mut arena, &accounts))
+            .collect();
+        
+        let idx_to_arena: HashMap<usize, usize> = arena_contexts
+            .iter()
+            .enumerate()
+            .map(|(i, ctx)| (ctx.tx_idx, i))
+            .collect();
+
+        // Track fast path commits
+        let mut fastpath_committed: HashSet<usize> = HashSet::new();
+
+        // Execute first wave - only tx with nonce=0 should succeed
+        StmExecutor::execute_simple_fastpath_wave(
+            &analyzed_txs,
+            &mut arena_contexts,
+            &mut arena,
+            &idx_to_arena,
+            &mut fastpath_committed,
+        );
+
+        // Only first tx should commit (nonce=0 matches account nonce)
+        // Second tx has nonce=1 but account nonce was 0, then updated to 1 after first tx
+        // However, the same-sender check prevents multiple txs from same sender in one wave
+        assert_eq!(fastpath_committed.len(), 1, "Only first tx should fast path in wave 1");
+        assert!(fastpath_committed.contains(&0));
+
+        // Execute second wave - now nonce=1 should succeed
+        StmExecutor::execute_simple_fastpath_wave(
+            &analyzed_txs,
+            &mut arena_contexts,
+            &mut arena,
+            &idx_to_arena,
+            &mut fastpath_committed,
+        );
+
+        assert_eq!(fastpath_committed.len(), 2, "Second tx should fast path in wave 2");
+        assert!(fastpath_committed.contains(&1));
+
+        // Execute third wave
+        StmExecutor::execute_simple_fastpath_wave(
+            &analyzed_txs,
+            &mut arena_contexts,
+            &mut arena,
+            &idx_to_arena,
+            &mut fastpath_committed,
+        );
+
+        assert_eq!(fastpath_committed.len(), 3, "Third tx should fast path in wave 3");
+        assert!(fastpath_committed.contains(&2));
+    }
+
+    /// T93.3: Test metrics invariant: fastpath + fallback should equal candidates for committed txs.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn test_metrics_invariant_fastpath_plus_fallback_equals_candidates() {
+        use eezo_ledger::TxCore;
+
+        // Create a test node
+        let chain_id = [0u8; 20];
+        let cfg = eezo_ledger::consensus::SingleNodeCfg {
+            chain_id,
+            block_byte_budget: 1 << 20,
+            header_cache_cap: 100,
+            ..Default::default()
+        };
+        let (pk, sk) = pqcrypto_mldsa::mldsa44::keypair();
+        let mut node = eezo_ledger::consensus::SingleNode::new(cfg, sk, pk);
+
+        // Fund multiple senders
+        let sender1_bytes: [u8; 20] = [0x11; 20];
+        let sender2_bytes: [u8; 20] = [0x22; 20];
+        let sender3_bytes: [u8; 20] = [0x33; 20];
+        node.dev_faucet_credit(Address(sender1_bytes), 100_000);
+        node.dev_faucet_credit(Address(sender2_bytes), 100_000);
+        node.dev_faucet_credit(Address(sender3_bytes), 100_000);
+
+        // Create txs: first two to same receiver (conflict), third to different receiver
+        let shared_receiver = Address([0xFF; 20]);
+        let other_receiver = Address([0xAA; 20]);
+        let txs = vec![
+            SignedTx {
+                core: TxCore { to: shared_receiver, amount: 100, fee: 1, nonce: 0 },
+                pubkey: sender1_bytes.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: shared_receiver, amount: 200, fee: 2, nonce: 0 },
+                pubkey: sender2_bytes.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: other_receiver, amount: 300, fee: 3, nonce: 0 },
+                pubkey: sender3_bytes.to_vec(),
+                sig: vec![],
+            },
+        ];
+
+        // Capture initial metric values
+        let candidate_before = crate::metrics::EEZO_STM_SIMPLE_CANDIDATE_TOTAL.get();
+        let fastpath_before = crate::metrics::EEZO_STM_SIMPLE_FASTPATH_TOTAL.get();
+        let fallback_before = crate::metrics::EEZO_STM_SIMPLE_FALLBACK_TOTAL.get();
+
+        // Execute with STM executor (arena mode with fast path enabled)
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("EEZO_STM_KERNEL_MODE", "arena");
+        std::env::set_var("EEZO_STM_SIMPLE_FASTPATH_ENABLED", "1");
+        
+        let executor = StmExecutor::from_env(1);
+        let input = crate::executor::ExecInput::new(txs, 1);
+        let outcome = executor.execute_block(&mut node, input);
+
+        // Clean up env vars
+        std::env::remove_var("EEZO_STM_KERNEL_MODE");
+        std::env::remove_var("EEZO_STM_SIMPLE_FASTPATH_ENABLED");
+
+        // Verify execution succeeded
+        assert!(outcome.result.is_ok());
+        let block = outcome.result.unwrap();
+        assert_eq!(block.txs.len(), 3, "All 3 txs should be committed");
+
+        // Check metric invariants
+        let candidate_after = crate::metrics::EEZO_STM_SIMPLE_CANDIDATE_TOTAL.get();
+        let fastpath_after = crate::metrics::EEZO_STM_SIMPLE_FASTPATH_TOTAL.get();
+        let fallback_after = crate::metrics::EEZO_STM_SIMPLE_FALLBACK_TOTAL.get();
+
+        let delta_candidate = candidate_after - candidate_before;
+        let delta_fastpath = fastpath_after - fastpath_before;
+        let delta_fallback = fallback_after - fallback_before;
+
+        // All 3 txs should be candidates (all are SimpleTransfer)
+        assert_eq!(delta_candidate, 3, "All 3 txs should be counted as candidates");
+
+        // Invariant: fastpath + fallback = committed candidates
+        assert_eq!(
+            delta_fastpath + delta_fallback, 3,
+            "fastpath ({}) + fallback ({}) should equal committed candidates (3)",
+            delta_fastpath, delta_fallback
+        );
+
+        // With shared receiver, first tx uses fast path, second conflicts, third is independent
+        // So we expect: fastpath >= 1, fallback >= 0, total = 3
+        assert!(delta_fastpath >= 1, "At least 1 tx should use fast path");
+    }
+
+    /// T93.3: Test that fast path on/off yields same final ledger state.
+    #[test]
+    fn test_fastpath_on_off_same_final_state() {
+        use eezo_ledger::TxCore;
+
+        let chain_id = [0u8; 20];
+        let cfg = eezo_ledger::consensus::SingleNodeCfg {
+            chain_id,
+            block_byte_budget: 1 << 20,
+            header_cache_cap: 100,
+            ..Default::default()
+        };
+        let (pk, sk) = pqcrypto_mldsa::mldsa44::keypair();
+
+        // Senders and receivers
+        let sender1_bytes: [u8; 20] = [0x11; 20];
+        let sender2_bytes: [u8; 20] = [0x22; 20];
+        let receiver1 = Address([0xAA; 20]);
+        let receiver2 = Address([0xBB; 20]);
+
+        let txs = vec![
+            SignedTx {
+                core: TxCore { to: receiver1, amount: 100, fee: 1, nonce: 0 },
+                pubkey: sender1_bytes.to_vec(),
+                sig: vec![],
+            },
+            SignedTx {
+                core: TxCore { to: receiver2, amount: 200, fee: 2, nonce: 0 },
+                pubkey: sender2_bytes.to_vec(),
+                sig: vec![],
+            },
+        ];
+
+        // Run with fast path OFF
+        let mut node_off = eezo_ledger::consensus::SingleNode::new(cfg.clone(), sk.clone(), pk.clone());
+        node_off.dev_faucet_credit(Address(sender1_bytes), 10_000);
+        node_off.dev_faucet_credit(Address(sender2_bytes), 10_000);
+
+        let config_off = StmConfig {
+            threads: 1,
+            max_retries: 5,
+            wave_timeout_ms: 1000,
+            exec_lanes: 16,
+            wave_cap: 0,
+            wave_aggressive: false,
+            kernel_mode: StmKernelMode::Arena,
+            simple_fastpath_enabled: false,
+        };
+        let executor_off = StmExecutor::with_config(config_off);
+        let outcome_off = executor_off.execute_block(&mut node_off, crate::executor::ExecInput::new(txs.clone(), 1));
+        assert!(outcome_off.result.is_ok());
+        let block_off = outcome_off.result.unwrap();
+
+        // Run with fast path ON
+        let mut node_on = eezo_ledger::consensus::SingleNode::new(cfg.clone(), sk.clone(), pk.clone());
+        node_on.dev_faucet_credit(Address(sender1_bytes), 10_000);
+        node_on.dev_faucet_credit(Address(sender2_bytes), 10_000);
+
+        let config_on = StmConfig {
+            threads: 1,
+            max_retries: 5,
+            wave_timeout_ms: 1000,
+            exec_lanes: 16,
+            wave_cap: 0,
+            wave_aggressive: false,
+            kernel_mode: StmKernelMode::Arena,
+            simple_fastpath_enabled: true,
+        };
+        let executor_on = StmExecutor::with_config(config_on);
+        let outcome_on = executor_on.execute_block(&mut node_on, crate::executor::ExecInput::new(txs.clone(), 1));
+        assert!(outcome_on.result.is_ok());
+        let block_on = outcome_on.result.unwrap();
+
+        // Same number of txs committed
+        assert_eq!(block_off.txs.len(), block_on.txs.len(), "Same txs should be committed");
+
+        // Same tx order
+        for (tx_off, tx_on) in block_off.txs.iter().zip(block_on.txs.iter()) {
+            assert_eq!(tx_off.core.amount, tx_on.core.amount, "Same tx amounts");
+            assert_eq!(tx_off.core.fee, tx_on.core.fee, "Same tx fees");
+        }
+
+        // Same final balances
+        let sender1_bal_off = node_off.accounts.get(&Address(sender1_bytes)).balance;
+        let sender1_bal_on = node_on.accounts.get(&Address(sender1_bytes)).balance;
+        assert_eq!(sender1_bal_off, sender1_bal_on, "Sender1 balance should match");
+
+        let sender2_bal_off = node_off.accounts.get(&Address(sender2_bytes)).balance;
+        let sender2_bal_on = node_on.accounts.get(&Address(sender2_bytes)).balance;
+        assert_eq!(sender2_bal_off, sender2_bal_on, "Sender2 balance should match");
+
+        let recv1_bal_off = node_off.accounts.get(&receiver1).balance;
+        let recv1_bal_on = node_on.accounts.get(&receiver1).balance;
+        assert_eq!(recv1_bal_off, recv1_bal_on, "Receiver1 balance should match");
+
+        let recv2_bal_off = node_off.accounts.get(&receiver2).balance;
+        let recv2_bal_on = node_on.accounts.get(&receiver2).balance;
+        assert_eq!(recv2_bal_off, recv2_bal_on, "Receiver2 balance should match");
     }
 }
