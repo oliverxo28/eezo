@@ -122,6 +122,10 @@ mod tx_decode_pool;
 #[cfg(feature = "dag-consensus")]
 mod adaptive_agg;
 
+// T96.0: DAG ordering module for real DAG-based block ordering
+#[cfg(feature = "dag-consensus")]
+mod dag_ordering;
+
 // T79.0: dag-primary health probe module
 #[cfg(feature = "metrics")]
 mod dag_primary_health;
@@ -160,6 +164,9 @@ use crate::metrics::{
     register_t91_cuda_hash_metrics,
     // T92.0: Hash vs Executor Profiling metrics
     register_t92_perf_metrics,
+    // T96.0: DAG ordering metrics
+    register_t96_dag_ordering_metrics,
+    dag_ordering_enabled_set,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -3246,6 +3253,8 @@ async fn main() -> anyhow::Result<()> {
         register_t91_cuda_hash_metrics();
         // T92.0: Hash vs Executor Profiling metrics
         register_t92_perf_metrics();
+        // T96.0: DAG ordering metrics
+        register_t96_dag_ordering_metrics();
         // T91.2: Initialize CUDA hash enabled gauge and log status
         // The gauge starts at 0 (CUDA not yet initialized). When the first block
         // is committed and run_t91_2_cuda_hash_shadow is called, CudaBlake3Engine::new()
@@ -3280,6 +3289,13 @@ async fn main() -> anyhow::Result<()> {
         log::info!(
             "T76.11: consensus mode gauge set to {} (mode={:?}, dag_ordering_enabled={})",
             mode_value, mode, dag_ordering
+        );
+        
+        // T96.0: Set DAG ordering enabled gauge and log startup status
+        dag_ordering_enabled_set(dag_ordering);
+        log::info!(
+            "T96.0: DAG ordering mode initialized (dag_ordering_enabled={}, mode={:?})",
+            dag_ordering, mode
         );
     }
     // T37: spawn a dedicated /metrics HTTP server on EEZO_METRICS_BIND (or default)

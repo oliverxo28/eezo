@@ -31,6 +31,10 @@ use crate::dag_consensus_runner::ShadowBlockSummary;
 #[cfg(feature = "dag-consensus")]
 use crate::dag_consensus_runner::HybridDagHandle;
 
+// T96.0: Import DAG ordering module
+#[cfg(feature = "dag-consensus")]
+use crate::dag_ordering::{order_txs_for_dag_block, DagOrderingStats};
+
 // T76.5: HybridBatchStats — statistics for structured logging per batch
 #[cfg(feature = "dag-consensus")]
 #[derive(Debug, Clone, Default)]
@@ -2113,13 +2117,43 @@ impl CoreRunnerHandle {
                                 crate::metrics::dag_hybrid_decode_error_inc_by(stats.decode_err as u64);
                             }
                             
-                            hybrid_aggregated_txs
+                            // T96.0: Apply DAG ordering to reorder txs for optimal block packing
+                            // This groups same-sender txs contiguously and sorts by nonce
+                            let dag_ordering_enabled = dag_ordering_enabled_from_env();
+                            if dag_ordering_enabled {
+                                let (ordered_txs, ordering_stats) = order_txs_for_dag_block(
+                                    &hybrid_aggregated_txs,
+                                    &guard.accounts,
+                                    block_max_tx,
+                                );
+                                
+                                // T96.0: Update metrics
+                                crate::metrics::dag_ordered_txs_inc(ordered_txs.len() as u64);
+                                crate::metrics::dag_block_tx_per_block_observe(ordered_txs.len());
+                                crate::metrics::dag_nonce_span_observe(ordering_stats.avg_nonce_span);
+                                crate::metrics::dag_fastpath_candidates_inc(ordering_stats.fastpath_candidates as u64);
+                                
+                                // Sampled logging (every ~100 blocks based on log level)
+                                log::info!("{}", ordering_stats.to_log_line());
+                                
+                                ordered_txs
+                            } else {
+                                // T96.0: DAG ordering disabled, use txs as-is
+                                hybrid_aggregated_txs
+                            }
                         } else {
                             // Batches were consumed but no valid txs - fallback logic
                             hybrid_stats_opt = hybrid_aggregated_stats.clone();
                             
                             // T78.3: In DagPrimary mode, never fall back to mempool
                             let is_dag_primary = matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary);
+                            
+                            // T96.0: Track fallback when DAG ordering is enabled
+                            let dag_ordering_enabled = dag_ordering_enabled_from_env();
+                            if dag_ordering_enabled && !is_dag_primary {
+                                crate::metrics::dag_ordering_fallback_inc();
+                                log::warn!("T96.0: dag_ordering_fallback: no valid txs after batch aggregation");
+                            }
                             
                             if let Some(ref stats) = hybrid_stats_opt {
                                 // T76.6: Determine the reason for empty candidates and log appropriately
