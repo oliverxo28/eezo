@@ -2148,11 +2148,17 @@ impl CoreRunnerHandle {
                             // T78.3: In DagPrimary mode, never fall back to mempool
                             let is_dag_primary = matches!(hybrid_mode_cfg, HybridModeConfig::DagPrimary);
                             
-                            // T96.0: Track fallback when DAG ordering is enabled
+                            // T96.0: Track fallback when DAG ordering is enabled but NOT in DagPrimary mode.
+                            // In DagPrimary mode, there's no mempool fallback (empty blocks are produced instead),
+                            // so the fallback metric is only meaningful in hybrid mode where fallback to mempool
+                            // actually occurs. DagPrimary "failures" are tracked separately via empty block metrics.
                             let dag_ordering_enabled = dag_ordering_enabled_from_env();
                             if dag_ordering_enabled && !is_dag_primary {
                                 crate::metrics::dag_ordering_fallback_inc();
                                 log::warn!("T96.0: dag_ordering_fallback: no valid txs after batch aggregation");
+                            } else if dag_ordering_enabled && is_dag_primary {
+                                // In DagPrimary mode, log at info level (expected behavior when DAG has no valid txs)
+                                log::info!("T96.0: dag-primary empty block (no valid txs from DAG ordering)");
                             }
                             
                             if let Some(ref stats) = hybrid_stats_opt {

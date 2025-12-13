@@ -108,15 +108,22 @@ impl AnalyzedOrderingTx {
     pub fn analyze(tx: &SignedTx, idx: usize) -> Option<Self> {
         let sender = sender_from_pubkey_first20(tx)?;
         
-        // Simple heuristic: if fee > 0 and amount > 0, it's likely a simple transfer
-        // More sophisticated analysis could check for contract interaction markers
+        // Classify transaction for ordering optimization:
+        // - Simple transfers (fee > 0, amount > 0) benefit from contiguous ordering
+        // - Zero-amount transactions (fee > 0, amount == 0) might be contract calls
+        // - Zero-fee transactions are unusual and treated conservatively as Complex
+        //
+        // Note: This is a cheap heuristic for ordering purposes only. The actual
+        // STM fast path classifier in executor/stm.rs performs more detailed analysis.
         let kind = if tx.core.fee > 0 && tx.core.amount > 0 {
             TxOrderingKind::SimpleTransfer
         } else if tx.core.fee > 0 && tx.core.amount == 0 {
             // Zero amount with fee might be a contract call (conservative)
             TxOrderingKind::Complex
         } else {
-            TxOrderingKind::SimpleTransfer
+            // Zero-fee transactions are unusual - treat conservatively
+            // This includes fee=0 cases which may be invalid or special
+            TxOrderingKind::Complex
         };
 
         Some(AnalyzedOrderingTx {
@@ -126,6 +133,13 @@ impl AnalyzedOrderingTx {
             to: tx.core.to,
             kind,
         })
+    }
+    
+    /// Quick check if a transaction looks like a simple transfer.
+    /// Used for counting fast path candidates without full analysis.
+    #[inline]
+    pub fn is_simple_transfer(tx: &SignedTx) -> bool {
+        tx.core.fee > 0 && tx.core.amount > 0
     }
 }
 
@@ -345,12 +359,10 @@ pub fn group_by_sender(txs: &[SignedTx]) -> Vec<SignedTx> {
 
 /// Count simple transfer candidates in a batch.
 /// Used for metrics reporting.
+/// Uses the same classification logic as AnalyzedOrderingTx::is_simple_transfer.
 pub fn count_fastpath_candidates(txs: &[SignedTx]) -> usize {
     txs.iter()
-        .filter(|tx| {
-            // Simple heuristic matching AnalyzedOrderingTx::analyze
-            tx.core.fee > 0 && tx.core.amount > 0
-        })
+        .filter(|tx| AnalyzedOrderingTx::is_simple_transfer(tx))
         .count()
 }
 
