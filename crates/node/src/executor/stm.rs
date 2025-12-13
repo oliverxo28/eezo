@@ -513,14 +513,25 @@ impl AnalyzedTxKind {
 /// computed once at block start. Does not change wire format.
 ///
 /// T93.2: Added `kind` field for fast path routing and optional arena indices.
+///
+/// T97.0: Removed `Arc<SignedTx>` to eliminate Arc cloning in hot path.
+/// Instead, we store the receiver address and core transaction fields directly.
+/// The STM executor uses `tx_idx` to look up the full transaction from the
+/// canonical block tx list when needed (only at final block assembly).
 #[derive(Clone, Debug)]
 pub struct AnalyzedTx {
-    /// The original signed transaction
-    pub tx: Arc<SignedTx>,
-    /// Index in the block's tx list
+    /// Index in the block's tx list (acts as a lightweight "handle")
     pub tx_idx: usize,
     /// Pre-computed sender address (derived from pubkey)
     pub sender: Address,
+    /// Receiver address (cached from tx.core.to)
+    pub receiver: Address,
+    /// Transaction amount (cached from tx.core.amount)
+    pub amount: u128,
+    /// Transaction fee (cached from tx.core.fee)
+    pub fee: u128,
+    /// Transaction nonce (cached from tx.core.nonce)
+    pub nonce: u64,
     /// Pre-computed conflict metadata
     pub meta: ConflictMetadata,
     /// T93.2: Transaction kind for fast path routing
@@ -552,6 +563,9 @@ fn address_fingerprint(addr: &Address) -> u64 {
 /// only supports simple value transfers (no contracts), so all valid txs are Simple.
 /// When contract support is added, this function will need to detect contract calls
 /// and classify them as General.
+///
+/// T97.0: No longer creates Arc<SignedTx>. Instead, caches the core fields directly
+/// in AnalyzedTx to avoid Arc cloning overhead in the hot path.
 pub fn analyze_tx(tx: &SignedTx, tx_idx: usize) -> Option<AnalyzedTx> {
     let sender = sender_from_pubkey_first20(tx)?;
     let from_key = address_fingerprint(&sender);
@@ -563,9 +577,12 @@ pub fn analyze_tx(tx: &SignedTx, tx_idx: usize) -> Option<AnalyzedTx> {
     let kind = AnalyzedTxKind::SimpleTransfer;
     
     Some(AnalyzedTx {
-        tx: Arc::new(tx.clone()),
         tx_idx,
         sender,
+        receiver: tx.core.to,
+        amount: tx.core.amount,
+        fee: tx.core.fee,
+        nonce: tx.core.nonce,
         meta: ConflictMetadata::Simple { from_key, to_key },
         kind,
         sender_arena_idx: None,    // Set during arena construction
@@ -590,18 +607,24 @@ pub fn analyze_batch(txs: &[SignedTx]) -> Vec<AnalyzedTx> {
 /// Returns None if SharedTx has no valid sender.
 ///
 /// T93.2: Added transaction kind detection and arena index placeholders.
+///
+/// T97.0: No longer creates Arc<SignedTx>. Caches core fields directly.
 pub fn analyze_shared_tx(shared_tx: &std::sync::Arc<crate::tx_decode_pool::SharedTx>, tx_idx: usize) -> Option<AnalyzedTx> {
     let sender = shared_tx.sender()?;
+    let core = shared_tx.core();
     let from_key = address_fingerprint(&sender);
-    let to_key = address_fingerprint(&shared_tx.core().to);
+    let to_key = address_fingerprint(&core.to);
     
     // T93.2: All current txs are simple transfers
     let kind = AnalyzedTxKind::SimpleTransfer;
     
     Some(AnalyzedTx {
-        tx: std::sync::Arc::new(shared_tx.signed_tx().clone()),
         tx_idx,
         sender,
+        receiver: core.to,
+        amount: core.amount,
+        fee: core.fee,
+        nonce: core.nonce,
         meta: ConflictMetadata::Simple { from_key, to_key },
         kind,
         sender_arena_idx: None,
@@ -839,7 +862,7 @@ impl ArenaTxContext {
     /// the arena before execution begins.
     fn from_analyzed(analyzed: &AnalyzedTx, arena: &mut AccountArena, base: &Accounts) -> Self {
         let sender_idx = arena.ensure_account(&analyzed.sender, base);
-        let receiver_idx = arena.ensure_account(&analyzed.tx.core.to, base);
+        let receiver_idx = arena.ensure_account(&analyzed.receiver, base);
         
         Self {
             tx_idx: analyzed.tx_idx,
@@ -1102,6 +1125,8 @@ impl StmExecutor {
     ///
     /// This version reads from overlay first, falls back to base snapshot.
     /// Uses pre-computed sender from AnalyzedTx to avoid re-derivation.
+    ///
+    /// T97.0: Uses cached fields from AnalyzedTx (no Arc access).
     fn execute_tx_with_overlay(
         analyzed: &AnalyzedTx,
         attempt: u16,
@@ -1112,7 +1137,7 @@ impl StmExecutor {
         ctx.attempt = attempt;
         
         let sender = analyzed.sender;
-        let receiver = analyzed.tx.core.to;
+        let receiver = analyzed.receiver;
         
         // Record read set using StateKey (for compatibility with conflict detection)
         ctx.read_set.insert(StateKey::Account(sender));
@@ -1122,27 +1147,30 @@ impl StmExecutor {
         let sender_acc = overlay.get_account(&sender, base_accounts);
         let receiver_acc = overlay.get_account(&receiver, base_accounts);
         
-        // Validate nonce and balance
-        let core = &analyzed.tx.core;
-        if sender_acc.nonce != core.nonce {
+        // Validate nonce and balance using cached fields
+        if sender_acc.nonce != analyzed.nonce {
             // Temporary failure - may succeed after earlier txs commit
             ctx.status = TxStatus::NeedsRetry;
             return ctx;
         }
         
-        let need = core.amount.saturating_add(core.fee);
+        let need = analyzed.amount.saturating_add(analyzed.fee);
         if sender_acc.balance < need {
             ctx.status = TxStatus::NeedsRetry;
             return ctx;
         }
         
         // Compute new states
+        // T97.0: Track account clones for metrics
+        #[cfg(feature = "metrics")]
+        crate::metrics::stm_account_clones_inc(2);
+        
         let mut new_sender = sender_acc.clone();
         new_sender.balance = new_sender.balance.saturating_sub(need);
         new_sender.nonce = new_sender.nonce.saturating_add(1);
         
         let mut new_receiver = receiver_acc.clone();
-        new_receiver.balance = new_receiver.balance.saturating_add(core.amount);
+        new_receiver.balance = new_receiver.balance.saturating_add(analyzed.amount);
         
         // Record write set
         ctx.write_set.insert(StateKey::Account(sender));
@@ -1154,7 +1182,7 @@ impl StmExecutor {
             receiver,
             sender_account: new_sender,
             receiver_account: new_receiver,
-            fee: core.fee,
+            fee: analyzed.fee,
         });
         
         ctx.status = TxStatus::Committed;
@@ -1901,16 +1929,16 @@ impl StmExecutor {
             
             // Read accounts from arena (O(1) Vec access)
             let sender_acc = arena.account(ctx.sender_idx);
-            let core = &atx.tx.core;
             
+            // T97.0: Use cached fields from AnalyzedTx (no Arc access)
             // Validate nonce - if mismatch, leave as NeedsRetry
             // (may succeed in a later wave after earlier txs update the nonce)
-            if sender_acc.nonce != core.nonce {
+            if sender_acc.nonce != atx.nonce {
                 continue;
             }
             
             // Validate balance - if insufficient, leave as NeedsRetry
-            let need = core.amount.saturating_add(core.fee);
+            let need = atx.amount.saturating_add(atx.fee);
             if sender_acc.balance < need {
                 continue;
             }
@@ -1924,9 +1952,9 @@ impl StmExecutor {
             }
             {
                 let receiver = arena.account_mut(ctx.receiver_idx);
-                receiver.balance = receiver.balance.saturating_add(core.amount);
+                receiver.balance = receiver.balance.saturating_add(atx.amount);
             }
-            arena.record_fee(core.fee);
+            arena.record_fee(atx.fee);
             
             // Mark as committed
             ctx.status = TxStatus::Committed;
@@ -2135,18 +2163,22 @@ impl StmExecutor {
             let arena_snapshot = arena.snapshot();
 
             // Execute transactions speculatively in parallel
+            // T97.0: Use analyzed_map for O(1) lookup instead of linear search
             let wave_results: Vec<(usize, ArenaTxContext)> = pending
                 .par_iter()
                 .filter_map(|&(tx_idx, attempt)| {
-                    idx_to_arena.get(&tx_idx).map(|&arena_idx| {
+                    idx_to_arena.get(&tx_idx).and_then(|&arena_idx| {
                         let ctx = &arena_contexts[arena_idx];
-                        let result = Self::execute_tx_with_arena(
-                            ctx,
-                            &analyzed_txs.iter().find(|a| a.tx_idx == tx_idx).unwrap().tx,
-                            attempt,
-                            &arena_snapshot,
-                        );
-                        (arena_idx, result)
+                        // T97.0: Get AnalyzedTx from map (no Arc access)
+                        analyzed_map.get(&tx_idx).map(|analyzed| {
+                            let result = Self::execute_tx_with_arena(
+                                ctx,
+                                analyzed,
+                                attempt,
+                                &arena_snapshot,
+                            );
+                            (arena_idx, result)
+                        })
                     })
                 })
                 .collect();
@@ -2264,9 +2296,12 @@ impl StmExecutor {
     }
 
     /// T87.4: Execute a single transaction speculatively using arena indices.
+    ///
+    /// T97.0: Takes `&AnalyzedTx` instead of `&Arc<SignedTx>` to avoid Arc cloning.
+    /// Uses cached fields from AnalyzedTx for nonce/amount/fee.
     fn execute_tx_with_arena(
         ctx: &ArenaTxContext,
-        tx: &Arc<SignedTx>,
+        analyzed: &AnalyzedTx,
         attempt: u16,
         arena: &AccountArena,
     ) -> ArenaTxContext {
@@ -2283,34 +2318,37 @@ impl StmExecutor {
         let sender_acc = arena.account(ctx.sender_idx);
         let receiver_acc = arena.account(ctx.receiver_idx);
         
-        // Validate nonce and balance
-        let core = &tx.core;
-        if sender_acc.nonce != core.nonce {
+        // Validate nonce and balance using cached fields from AnalyzedTx
+        if sender_acc.nonce != analyzed.nonce {
             // Temporary failure - may succeed after earlier txs commit
             new_ctx.status = TxStatus::NeedsRetry;
             return new_ctx;
         }
         
-        let need = core.amount.saturating_add(core.fee);
+        let need = analyzed.amount.saturating_add(analyzed.fee);
         if sender_acc.balance < need {
             new_ctx.status = TxStatus::NeedsRetry;
             return new_ctx;
         }
         
         // Compute new states
+        // T97.0: Track account clones for metrics
+        #[cfg(feature = "metrics")]
+        crate::metrics::stm_account_clones_inc(2);
+        
         let mut new_sender = sender_acc.clone();
         new_sender.balance = new_sender.balance.saturating_sub(need);
         new_sender.nonce = new_sender.nonce.saturating_add(1);
         
         let mut new_receiver = receiver_acc.clone();
-        new_receiver.balance = new_receiver.balance.saturating_add(core.amount);
+        new_receiver.balance = new_receiver.balance.saturating_add(analyzed.amount);
         
         new_ctx.spec_result = Some(ArenaSpeculativeResult {
             sender_idx: ctx.sender_idx,
             receiver_idx: ctx.receiver_idx,
             sender_account: new_sender,
             receiver_account: new_receiver,
-            fee: core.fee,
+            fee: analyzed.fee,
         });
         
         new_ctx.status = TxStatus::Committed;
@@ -3634,9 +3672,9 @@ mod tests {
         assert_eq!(analyzed.tx_idx, 5);
         assert_eq!(analyzed.sender, Address(sender_bytes));
         
-        // Core fields should match
-        assert_eq!(analyzed.tx.core.nonce, 42);
-        assert_eq!(analyzed.tx.core.amount, 1000);
+        // T97.0: Core fields are now cached directly in AnalyzedTx
+        assert_eq!(analyzed.nonce, 42);
+        assert_eq!(analyzed.amount, 1000);
     }
 
     #[test]
@@ -3698,7 +3736,7 @@ mod tests {
         // Check indices are correct
         for (i, atx) in analyzed.iter().enumerate() {
             assert_eq!(atx.tx_idx, i);
-            assert_eq!(atx.tx.core.nonce, i as u64);
+            assert_eq!(atx.nonce, i as u64);
         }
     }
 

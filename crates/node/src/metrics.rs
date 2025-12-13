@@ -4154,7 +4154,62 @@ pub fn stm_bitmap_fallback_inc() {
     }
 }
 
-/// Eagerly register T93.2/T93.3/T95.0 simple fastpath metrics so they appear on /metrics at boot.
+// -----------------------------------------------------------------------------
+// T97.0 — Arc-Free Tx Handles Metrics
+// -----------------------------------------------------------------------------
+//
+// Track Arc clones in the STM execution path. After T97.0 refactor, this should
+// remain zero or near-zero during normal operation.
+
+/// T97.0: Counter for Arc<SignedTx> clones in STM execution path.
+/// Should be zero after T97.0 refactor is complete.
+#[cfg(feature = "metrics")]
+pub static EEZO_STM_TX_ARC_CLONES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    prometheus::register_int_counter!(
+        "eezo_stm_tx_arc_clones_total",
+        "Total Arc<SignedTx> clones in STM execution path (T97.0)"
+    )
+    .unwrap()
+});
+
+/// T97.0: Helper to increment Arc clone counter.
+#[inline]
+pub fn stm_tx_arc_clones_inc(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STM_TX_ARC_CLONES_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// T97.0: Counter for Account clones in STM execution path.
+/// Tracks deep clones during speculative execution.
+#[cfg(feature = "metrics")]
+pub static EEZO_STM_ACCOUNT_CLONES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    prometheus::register_int_counter!(
+        "eezo_stm_account_clones_total",
+        "Total Account clones in STM execution path (T97.0)"
+    )
+    .unwrap()
+});
+
+/// T97.0: Helper to increment account clone counter.
+#[inline]
+pub fn stm_account_clones_inc(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STM_ACCOUNT_CLONES_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Eagerly register T93.2/T93.3/T95.0/T97.0 simple fastpath metrics so they appear on /metrics at boot.
 #[cfg(feature = "metrics")]
 pub fn register_t93_simple_fastpath_metrics() {
     let _ = &*EEZO_EXEC_STM_SIMPLE_FASTPATH_ENABLED;
@@ -4164,6 +4219,9 @@ pub fn register_t93_simple_fastpath_metrics() {
     let _ = &*EEZO_STM_SIMPLE_TIME_SECONDS;
     // T95.0: Bitmap fallback metric
     let _ = &*EEZO_STM_BITMAP_FALLBACK_TOTAL;
+    // T97.0: Arc clone metrics
+    let _ = &*EEZO_STM_TX_ARC_CLONES_TOTAL;
+    let _ = &*EEZO_STM_ACCOUNT_CLONES_TOTAL;
 }
 
 /// No-op version when metrics feature is disabled.
