@@ -753,9 +753,19 @@ impl CoreRunnerHandle {
 			#[cfg(feature = "metrics")]
 			register_t36_bridge_metrics();
             
-            // T94.0: Register block packing metrics
+            // T94.0: Register and set block packing metrics
             #[cfg(feature = "metrics")]
-            crate::metrics::register_t94_block_packing_metrics();
+            {
+                crate::metrics::register_t94_block_packing_metrics();
+                crate::metrics::t94_perf_mode_set(perf_mode_enabled);
+                crate::metrics::t94_block_packing_mode_set(block_packing_policy.is_aggressive());
+                log::info!(
+                    "T94.0: metrics set - perf_mode={}, packing={:?}, early_tick_enabled={} (non-persistence)",
+                    if perf_mode_enabled { 1 } else { 0 },
+                    block_packing_policy,
+                    early_tick_enabled
+                );
+            }
             
             // T91.2: CUDA BLAKE3 engine for shadow hashing (lazy initialized on first use)
             #[cfg(feature = "cuda-hash")]
@@ -798,6 +808,8 @@ impl CoreRunnerHandle {
 
             // T94.0: Track last block time for early tick logic
             let mut last_block_time = std::time::Instant::now();
+            // T94.0: Counter for periodic info logging of early ticks
+            let mut early_tick_log_counter: u64 = 0;
 
             loop {
                 // Use Relaxed ordering as per teacher's patch suggestion
@@ -821,10 +833,14 @@ impl CoreRunnerHandle {
                         let elapsed_since_last = last_block_time.elapsed();
                         let min_interval = Duration::from_millis(10);
                         if elapsed_since_last >= min_interval {
-                            log::debug!(
-                                "T94.0: early tick triggered (mempool_len={} >= threshold={}, elapsed={:?})",
-                                mempool_len, early_tick_thresh, elapsed_since_last
-                            );
+                            early_tick_log_counter += 1;
+                            // Log at info level every 10th early tick to avoid spam
+                            if early_tick_log_counter % 10 == 1 {
+                                log::info!(
+                                    "T94.0: early tick #{} (mempool_len={}, threshold={}, elapsed={:?})",
+                                    early_tick_log_counter, mempool_len, early_tick_thresh, elapsed_since_last
+                                );
+                            }
                             #[cfg(feature = "metrics")]
                             crate::metrics::t94_early_tick_inc();
                             // Don't wait for ticker, proceed directly to block building
@@ -1658,9 +1674,19 @@ impl CoreRunnerHandle {
                 crate::metrics::register_t77_dag_ordering_latency_metrics();
             }
             
-            // T94.0: Register block packing metrics
+            // T94.0: Register and set block packing metrics
             #[cfg(feature = "metrics")]
-            crate::metrics::register_t94_block_packing_metrics();
+            {
+                crate::metrics::register_t94_block_packing_metrics();
+                crate::metrics::t94_perf_mode_set(perf_mode_enabled);
+                crate::metrics::t94_block_packing_mode_set(block_packing_policy.is_aggressive());
+                log::info!(
+                    "T94.0: metrics set - perf_mode={}, packing={:?}, early_tick_enabled={}",
+                    if perf_mode_enabled { 1 } else { 0 },
+                    block_packing_policy,
+                    early_tick_enabled
+                );
+            }
             
             // T91.2: CUDA BLAKE3 engine for shadow hashing (lazy initialized on first use)
             #[cfg(feature = "cuda-hash")]
@@ -1689,6 +1715,8 @@ impl CoreRunnerHandle {
 
             // T94.0: Track last block time for early tick logic
             let mut last_block_time = std::time::Instant::now();
+            // T94.0: Counter for periodic info logging of early ticks
+            let mut early_tick_log_counter: u64 = 0;
 
             loop {
                 // Use Relaxed ordering
@@ -1710,10 +1738,14 @@ impl CoreRunnerHandle {
                         let elapsed_since_last = last_block_time.elapsed();
                         let min_interval = Duration::from_millis(10);
                         if elapsed_since_last >= min_interval {
-                            log::debug!(
-                                "T94.0: early tick triggered (mempool_len={} >= threshold={}, elapsed={:?})",
-                                mempool_len, early_tick_thresh, elapsed_since_last
-                            );
+                            early_tick_log_counter += 1;
+                            // Log at info level every 10th early tick to avoid spam
+                            if early_tick_log_counter % 10 == 1 {
+                                log::info!(
+                                    "T94.0: early tick #{} (mempool_len={}, threshold={}, elapsed={:?})",
+                                    early_tick_log_counter, mempool_len, early_tick_thresh, elapsed_since_last
+                                );
+                            }
                             #[cfg(feature = "metrics")]
                             crate::metrics::t94_early_tick_inc();
                             // Don't wait for ticker, proceed directly to block building

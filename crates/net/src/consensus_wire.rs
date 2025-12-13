@@ -4,7 +4,7 @@
 //! Note: This is pre-DAG consensus wire format. EEZO production uses pure DAG
 //! consensus as of T81. The code is retained for backward compatibility.
 #![cfg(feature = "pq44-runtime")]
-use eezo_ledger::consensus_msg::{ConsensusMsg, SignedConsensusMsg};
+use eezo_ledger::{ConsensusMsgCore, SignedConsensusMsg};
 use serde::{Deserialize, Serialize};
 
 #[repr(u8)]
@@ -15,10 +15,10 @@ pub enum WireKind {
 }
 
 #[inline]
-fn kind_of_msg(m: &ConsensusMsg) -> WireKind {
+fn kind_of_msg(m: &ConsensusMsgCore) -> WireKind {
     match m {
-        ConsensusMsg::Proposal(_) => WireKind::Proposal,
-        ConsensusMsg::Vote(_) => WireKind::Vote,
+        ConsensusMsgCore::Proposal(_) => WireKind::Proposal,
+        ConsensusMsgCore::PreVote(_) | ConsensusMsgCore::PreCommit(_) => WireKind::Vote,
     }
 }
 
@@ -29,7 +29,7 @@ pub struct GossipEnvelope {
 }
 
 pub fn encode_envelope(msg: &SignedConsensusMsg) -> GossipEnvelope {
-    let kind = kind_of_msg(&msg.msg);
+    let kind = kind_of_msg(&msg.core);
     let payload = bincode::serialize(msg).expect("encode signed consensus msg");
     GossipEnvelope {
         kind: kind as u8,
@@ -40,7 +40,7 @@ pub fn encode_envelope(msg: &SignedConsensusMsg) -> GossipEnvelope {
 pub fn decode_envelope(env: &GossipEnvelope) -> Result<SignedConsensusMsg, String> {
     let msg: SignedConsensusMsg =
         bincode::deserialize(&env.payload).map_err(|_| "payload decode failed".to_string())?;
-    let expected = kind_of_msg(&msg.msg);
+    let expected = kind_of_msg(&msg.core);
     if env.kind != expected as u8 {
         return Err("envelope kind mismatch".into());
     }

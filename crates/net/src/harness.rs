@@ -4,7 +4,7 @@
 
 use crate::consensus_wire::*;
 use crate::sim::NetworkSimulator;
-use eezo_ledger::consensus_msg::SignedConsensusMsg;
+use eezo_ledger::SignedConsensusMsg;
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::Duration;
