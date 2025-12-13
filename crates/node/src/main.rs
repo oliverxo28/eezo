@@ -4147,8 +4147,13 @@ async fn main() -> anyhow::Result<()> {
             let consensus_mode = env_consensus_mode();
             let ordering_enabled = env_dag_ordering_enabled();
             
-            if matches!(consensus_mode, ConsensusMode::DagHybrid) && ordering_enabled {
-                log::info!("dag-hybrid: creating HybridDagHandle for ordered batch consumption");
+            // T96.2: Create HybridDagHandle for both DagHybrid and DagPrimary modes
+            // when ordering is enabled. This is required for DAG ordering to work.
+            if matches!(consensus_mode, ConsensusMode::DagHybrid | ConsensusMode::DagPrimary) && ordering_enabled {
+                log::info!(
+                    "T96.2: creating HybridDagHandle for ordered batch consumption (mode={:?})",
+                    consensus_mode
+                );
                 
                 // Create the hybrid DAG handle
                 let hybrid_dag = Arc::new(crate::dag_consensus_runner::HybridDagHandle::new());
@@ -4156,14 +4161,15 @@ async fn main() -> anyhow::Result<()> {
                 // Attach it to the core runner so it can consume ordered batches
                 if let Some(core) = core_runner.clone() {
                     core.set_hybrid_dag(Some(hybrid_dag.clone())).await;
-                    log::info!("dag-hybrid: HybridDagHandle attached to CoreRunner");
+                    log::info!("T96.2: HybridDagHandle attached to CoreRunner");
                 }
                 
                 Some(hybrid_dag)
-            } else if matches!(consensus_mode, ConsensusMode::DagHybrid) {
+            } else if matches!(consensus_mode, ConsensusMode::DagHybrid | ConsensusMode::DagPrimary) {
                 log::info!(
-                    "dag-hybrid: mode enabled but EEZO_DAG_ORDERING_ENABLED=false; \
-                     using mempool as tx source"
+                    "T96.2: mode={:?} but EEZO_DAG_ORDERING_ENABLED=false; \
+                     using mempool as tx source without DAG ordering",
+                    consensus_mode
                 );
                 None
             } else {
