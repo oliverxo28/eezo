@@ -41,17 +41,17 @@ This means every transaction analysis creates a new Arc, and every access potent
 
 ### Solution
 1. Store transactions in a single canonical `Vec<SignedTx>` owned by the block execution context
-2. Use a lightweight `TxHandle` (just a `usize` index) instead of Arc
-3. The STM executor looks up transaction data via index when needed
+2. Use `tx_idx` (a `usize` index) instead of Arc - the index acts as a handle
+3. Cache the essential transaction fields directly in `AnalyzedTx`
 
 ```rust
-/// Lightweight transaction handle - just an index into the canonical tx list.
-pub type TxHandle = usize;
-
 pub struct AnalyzedTx {
-    pub tx_handle: TxHandle,  // Index into txs slice
-    pub tx_idx: usize,
-    pub sender: Address,
+    pub tx_idx: usize,              // Index into txs slice (acts as handle)
+    pub sender: Address,            // Cached sender address
+    pub receiver: Address,          // Cached receiver address
+    pub amount: u128,               // Cached amount
+    pub fee: u128,                  // Cached fee
+    pub nonce: u64,                 // Cached nonce
     pub meta: ConflictMetadata,
     pub kind: AnalyzedTxKind,
     pub sender_arena_idx: Option<u32>,
@@ -82,17 +82,49 @@ The current implementation is already quite optimized for the fastpath case.
 
 ## Metrics
 
-### New Metric: eezo_stm_tx_arc_clones_total
-Counter tracking Arc clones in the STM execution path. After this refactor, should be zero or near-zero during normal operation.
+### New Metrics
 
-## Performance Targets
+1. **eezo_stm_tx_arc_clones_total** - Counter tracking Arc clones in the STM execution path. After this refactor, should be zero during normal operation since we no longer create Arc<SignedTx> in AnalyzedTx.
 
-| Metric | Before | Target | 
-|--------|--------|--------|
-| STM per tx (fat-block) | ~0.88 ms/tx | ≤0.7 ms/tx |
-| Fat-block TPS (5000 tx) | ~192 TPS | ≥250 TPS |
-| Devnet burst TPS | ~330-360 TPS | ≥380 TPS |
-| Arc clones per block | O(n) | O(1) or zero |
+2. **eezo_stm_account_clones_total** - Counter tracking Account struct clones during speculative execution. These clones remain essential for correctness (rollback semantics).
+
+## Performance Expectations
+
+| Metric | Before | After T97.0 |
+|--------|--------|-------------|
+| Arc<SignedTx> clones per block | O(n) | 0 |
+| Account clones per wave | 2 per tx | 2 per tx (unchanged, required) |
+| HashMap lookups per tx | O(n) linear search | O(1) via analyzed_map |
+
+Expected improvements:
+- STM per tx: ~0.88 ms/tx → target ≤0.7 ms/tx
+- Fat-block TPS: ~192 TPS → target ≥250 TPS  
+- Devnet burst TPS: ~330-360 TPS → target ≥380 TPS
+
+## Implementation Summary
+
+### Changes Made
+
+1. **AnalyzedTx struct refactored**:
+   - Removed `tx: Arc<SignedTx>` field
+   - Added `receiver: Address`, `amount: u128`, `fee: u128`, `nonce: u64`
+   - `tx_idx` serves as a lightweight handle to the canonical tx list
+
+2. **analyze_tx() and analyze_shared_tx() optimized**:
+   - No longer creates Arc clones
+   - Caches essential fields directly from transaction core
+
+3. **execute_tx_with_overlay() updated**:
+   - Uses cached fields from AnalyzedTx
+   - Tracks account clones via metrics
+
+4. **execute_simple_fastpath_wave() updated**:
+   - Uses cached fields from AnalyzedTx
+   - No Arc access in hot path
+
+5. **execute_tx_with_arena() updated**:
+   - Takes `&AnalyzedTx` instead of `&Arc<SignedTx>`
+   - Uses cached fields for validation and execution
 
 ## Testing
 

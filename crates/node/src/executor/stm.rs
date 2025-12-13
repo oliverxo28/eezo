@@ -2163,14 +2163,14 @@ impl StmExecutor {
             let arena_snapshot = arena.snapshot();
 
             // Execute transactions speculatively in parallel
-            // T97.0: Use analyzed_map for O(1) lookup instead of linear search
+            // T97.0: Single lookup into analyzed_map, then get arena_idx
             let wave_results: Vec<(usize, ArenaTxContext)> = pending
                 .par_iter()
                 .filter_map(|&(tx_idx, attempt)| {
-                    idx_to_arena.get(&tx_idx).and_then(|&arena_idx| {
-                        let ctx = &arena_contexts[arena_idx];
-                        // T97.0: Get AnalyzedTx from map (no Arc access)
-                        analyzed_map.get(&tx_idx).map(|analyzed| {
+                    // T97.0: Get AnalyzedTx from map first (single HashMap lookup)
+                    analyzed_map.get(&tx_idx).and_then(|analyzed| {
+                        idx_to_arena.get(&tx_idx).map(|&arena_idx| {
+                            let ctx = &arena_contexts[arena_idx];
                             let result = Self::execute_tx_with_arena(
                                 ctx,
                                 analyzed,
