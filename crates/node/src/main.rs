@@ -158,6 +158,8 @@ use crate::metrics::{
     register_t90_gpu_hash_metrics,
     // T91.2: CUDA BLAKE3 shadow path metrics
     register_t91_cuda_hash_metrics,
+    // T92.0: Hash vs Executor Profiling metrics
+    register_t92_perf_metrics,
 };
 
 // ─── Helper: build subrouter for bridge endpoints (safe when features off) ─────
@@ -3242,6 +3244,8 @@ async fn main() -> anyhow::Result<()> {
 
         // T91.2: CUDA BLAKE3 shadow path metrics
         register_t91_cuda_hash_metrics();
+        // T92.0: Hash vs Executor Profiling metrics
+        register_t92_perf_metrics();
         // T91.2: Initialize CUDA hash enabled gauge and log status
         // The gauge starts at 0 (CUDA not yet initialized). When the first block
         // is committed and run_t91_2_cuda_hash_shadow is called, CudaBlake3Engine::new()

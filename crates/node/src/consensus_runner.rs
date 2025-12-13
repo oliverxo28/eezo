@@ -782,6 +782,8 @@ impl CoreRunnerHandle {
                     {
                         let exec_elapsed = exec_start.elapsed().as_secs_f64();
                         crate::metrics::observe_block_exec_seconds(exec_elapsed);
+                        // T92.0: Accumulate total STM executor CPU time
+                        crate::metrics::exec_stm_time_inc(exec_elapsed);
                     }
 
                     // 5. Process outcome
@@ -2001,6 +2003,8 @@ impl CoreRunnerHandle {
                     {
                         let exec_elapsed = exec_start.elapsed().as_secs_f64();
                         crate::metrics::observe_block_exec_seconds(exec_elapsed);
+                        // T92.0: Accumulate total STM executor CPU time
+                        crate::metrics::exec_stm_time_inc(exec_elapsed);
                     }
 
                     // 5. Process outcome

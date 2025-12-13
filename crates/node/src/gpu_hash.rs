@@ -293,11 +293,18 @@ impl GpuHashBackend {
 /// Any mismatch is logged as an error and counted in metrics.
 /// Consensus always uses CPU hashes.
 pub fn hash_batch_with_gpu_check(inputs: &[Vec<u8>]) -> Vec<[u8; 32]> {
+    // T92.0: Time the CPU hashing portion
+    let hash_start = Instant::now();
+    
     // 1. Compute CPU hashes (ground truth)
     let cpu_hashes: Vec<[u8; 32]> = inputs
         .iter()
         .map(|msg| *blake3::hash(msg).as_bytes())
         .collect();
+    
+    // T92.0: Record CPU hash time
+    let hash_elapsed = hash_start.elapsed().as_secs_f64();
+    crate::metrics::hash_cpu_time_inc(hash_elapsed);
 
     // 2. Check if GPU is enabled
     if !is_gpu_hash_enabled() {
@@ -663,8 +670,15 @@ impl NodeHashEngine {
     /// Note: In all modes, the returned digest is always the CPU digest.
     /// GPU can only match or mismatch; it never changes the result.
     pub fn hash_block_body(&self, bytes: &[u8]) -> [u8; 32] {
+        // T92.0: Time the CPU hashing portion
+        let hash_start = std::time::Instant::now();
+        
         // 1) Always compute CPU digest as ground truth
         let cpu_digest = *blake3::hash(bytes).as_bytes();
+        
+        // T92.0: Record CPU hash time
+        let hash_elapsed = hash_start.elapsed().as_secs_f64();
+        crate::metrics::hash_cpu_time_inc(hash_elapsed);
 
         match (&self.backend, self.gpu) {
             // T71.1: CpuOnly mode or no GPU handle - pure CPU path
