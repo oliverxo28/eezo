@@ -305,24 +305,26 @@ impl WaveFingerprint {
 // T95.0: ArenaConflictBitmap — Lightweight conflict pre-screen
 // =============================================================================
 
-/// Default bitmap capacity in bits (handles arena indices 0..1023).
-/// Chosen to cover typical block sizes (up to ~500 unique accounts) with room to spare.
+/// Default bitmap capacity in bits (handles arena indices 0..65535).
+/// T95.0.3: Increased from 1024 to 65536 to prevent overflow to HashMap
+/// for typical spam workloads (5000+ txs with many unique accounts).
 /// Exceeding this capacity triggers fallback to HashMap.
-const ARENA_BITMAP_CAPACITY: usize = 1024;
+const ARENA_BITMAP_CAPACITY: usize = 65536;
 
 /// Number of u64 words needed to store ARENA_BITMAP_CAPACITY bits.
-/// 1024 bits / 64 bits per u64 = 16 words = 128 bytes (fits on stack).
+/// 65536 bits / 64 bits per u64 = 1024 words.
+/// Stack size: 2 arrays × 1024 words × 8 bytes = 16 KB total (safe for thread stack).
 const ARENA_BITMAP_WORDS: usize = ARENA_BITMAP_CAPACITY / 64;
 
 /// T95.0: Compact bitmap for fast "has arena index been touched?" checks.
 ///
 /// This structure provides O(1) bit operations for conflict detection in the
 /// STM fast path, avoiding HashMap overhead for the common case where arena
-/// indices are small (<1024).
+/// indices are small (<65536).
 ///
 /// ## Design
 ///
-/// - Uses a stack-allocated fixed-size array `[u64; 16]` (1024 bits = 128 bytes)
+/// - Uses a stack-allocated fixed-size array `[u64; 1024]` (65536 bits = 8 KB per array)
 /// - Zero heap allocation in the hot path
 /// - Falls back to `HashSet<u32>` when indices exceed bitmap capacity
 /// - Separate tracking for claimed senders (one per wave) and touched accounts
@@ -343,12 +345,12 @@ const ARENA_BITMAP_WORDS: usize = ARENA_BITMAP_CAPACITY / 64;
 pub struct ArenaConflictBitmap {
     /// Bitmap tracking claimed sender indices (one sender per wave).
     /// Bit i is set if arena index i has been claimed as a sender.
-    /// Stack-allocated: 16 × 8 bytes = 128 bytes.
+    /// Stack-allocated: 1024 × 8 bytes = 8 KB.
     claimed_senders_bits: [u64; ARENA_BITMAP_WORDS],
     
     /// Bitmap tracking touched account indices (senders + receivers).
     /// Bit i is set if arena index i has been touched.
-    /// Stack-allocated: 16 × 8 bytes = 128 bytes.
+    /// Stack-allocated: 1024 × 8 bytes = 8 KB.
     touched_accounts_bits: [u64; ARENA_BITMAP_WORDS],
     
     /// Fallback HashSet for sender indices >= ARENA_BITMAP_CAPACITY.
@@ -4297,12 +4299,12 @@ mod tests {
         
         // Test indices at the boundary of the bitmap capacity
         bitmap.claim_sender(0);
-        bitmap.claim_sender(1023); // Last index in bitmap (ARENA_BITMAP_CAPACITY - 1)
+        bitmap.claim_sender(65535); // Last index in bitmap (ARENA_BITMAP_CAPACITY - 1)
         
         assert!(bitmap.is_sender_claimed(0));
-        assert!(bitmap.is_sender_claimed(1023));
+        assert!(bitmap.is_sender_claimed(65535));
         assert!(!bitmap.is_sender_claimed(1));
-        assert!(!bitmap.is_sender_claimed(1022));
+        assert!(!bitmap.is_sender_claimed(65534));
         
         // No overflow yet
         assert!(!bitmap.had_overflow());
@@ -4312,19 +4314,19 @@ mod tests {
     fn test_arena_conflict_bitmap_overflow_to_hashset() {
         let mut bitmap = ArenaConflictBitmap::new();
         
-        // Use an index beyond bitmap capacity (>= 1024)
-        bitmap.claim_sender(2000);
+        // Use an index beyond bitmap capacity (>= 65536)
+        bitmap.claim_sender(70000);
         
         // Should trigger overflow
         assert!(bitmap.had_overflow());
         
         // But the index should still be tracked
-        assert!(bitmap.is_sender_claimed(2000));
+        assert!(bitmap.is_sender_claimed(70000));
         assert!(!bitmap.is_sender_claimed(1000)); // Within bitmap range, not set
         
         // Test touch_account overflow
-        bitmap.touch_account(5000);
-        assert!(bitmap.is_account_touched(5000));
+        bitmap.touch_account(80000);
+        assert!(bitmap.is_account_touched(80000));
     }
 
     #[test]
@@ -4336,19 +4338,19 @@ mod tests {
         bitmap.touch_account(20);
         bitmap.touch_account(30);
         
-        // Set some in overflow range
-        bitmap.claim_sender(2000);
-        bitmap.touch_account(3000);
+        // Set some in overflow range (>= 65536)
+        bitmap.claim_sender(70000);
+        bitmap.touch_account(80000);
         
         // All should be correctly tracked
         assert!(bitmap.is_sender_claimed(10));
-        assert!(bitmap.is_sender_claimed(2000));
+        assert!(bitmap.is_sender_claimed(70000));
         assert!(!bitmap.is_sender_claimed(100));
-        assert!(!bitmap.is_sender_claimed(1500)); // In bitmap range, not set
+        assert!(!bitmap.is_sender_claimed(50000)); // In bitmap range, not set
         
         assert!(bitmap.is_account_touched(20));
         assert!(bitmap.is_account_touched(30));
-        assert!(bitmap.is_account_touched(3000));
+        assert!(bitmap.is_account_touched(80000));
         assert!(!bitmap.is_account_touched(50));
     }
 
@@ -4356,17 +4358,17 @@ mod tests {
     fn test_arena_conflict_bitmap_reset_clears_overflow() {
         let mut bitmap = ArenaConflictBitmap::new();
         
-        // Set overflow values
-        bitmap.claim_sender(5000);
-        bitmap.touch_account(6000);
+        // Set overflow values (>= 65536)
+        bitmap.claim_sender(70000);
+        bitmap.touch_account(80000);
         assert!(bitmap.had_overflow());
         
         // Reset
         bitmap.reset();
         
         // Overflow values should be cleared
-        assert!(!bitmap.is_sender_claimed(5000));
-        assert!(!bitmap.is_account_touched(6000));
+        assert!(!bitmap.is_sender_claimed(70000));
+        assert!(!bitmap.is_account_touched(80000));
         
         // Note: overflow_occurred is NOT reset per wave (tracked per block)
         // This is intentional for metrics tracking
@@ -4411,7 +4413,8 @@ mod tests {
         use std::collections::HashMap;
         
         // Test with a variety of indices including boundary and overflow cases
-        let test_indices: Vec<u32> = vec![0, 1, 10, 100, 500, 1000, 1023, 1024, 2000, 5000];
+        // Updated for 64K bitmap capacity: boundary at 65535, overflow at 65536+
+        let test_indices: Vec<u32> = vec![0, 1, 10, 100, 500, 1000, 10000, 65535, 65536, 70000, 80000];
         
         let mut bitmap = ArenaConflictBitmap::new();
         let mut hashmap_senders: HashMap<u32, ()> = HashMap::new();
@@ -4440,7 +4443,7 @@ mod tests {
         }
         
         // Also verify some indices NOT in the set
-        let missing_indices: Vec<u32> = vec![5, 50, 999, 1500, 3000];
+        let missing_indices: Vec<u32> = vec![5, 50, 999, 50000, 75000];
         for &idx in &missing_indices {
             assert_eq!(
                 bitmap.is_sender_claimed(idx),
