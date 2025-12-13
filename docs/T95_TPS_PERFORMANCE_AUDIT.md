@@ -17,7 +17,7 @@ This audit analyzes the current EEZO devnet node performance, identifying the bo
 3. [DAG Shadow vs Real DAG Analysis](#3-dag-shadow-vs-real-dag-analysis)
 4. [Block Packing & Early Tick Analysis](#4-block-packing--early-tick-analysis)
 5. [Realistic TPS Ceiling Projections](#5-realistic-tps-ceiling-projections)
-6. [Prioritized Roadmap (T95-T99)](#6-prioritized-roadmap-t95-t99)
+6. [Prioritized Roadmap (T95-T98)](#6-prioritized-roadmap-t95-t98)
 
 ---
 
@@ -369,7 +369,7 @@ However, practical limits include:
 
 ---
 
-## 6. Prioritized Roadmap (T95-T99)
+## 6. Prioritized Roadmap (T95-T98)
 
 ### T95.0: STM Conflict Pre-Screen Bitmap (Low Effort, Medium Impact)
 
