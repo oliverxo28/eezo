@@ -210,11 +210,15 @@ This section describes the T93.0 milestone: a tuning harness for sweeping STM-re
 The T93.0 harness automates configuration sweeps to find optimal STM executor settings. It:
 
 1. Iterates through combinations of STM-related environment variables
-2. Starts a fresh node instance for each configuration
+2. **Starts a fresh node instance for each configuration (no manual node start required)**
 3. Runs a standardized spam workload
 4. Captures Prometheus metrics before/after
 5. Computes per-tx timing and throughput metrics
 6. Prints a summary table for comparison
+7. **Stops the node cleanly before moving to the next configuration**
+
+> **Important**: You do **not** start `eezo-node` manually. The `t93_stm_sweep.sh` script
+> starts and stops the node for each configuration automatically.
 
 ## Scripts
 
@@ -254,17 +258,30 @@ EEZO_EXEC_HYBRID=1
 EEZO_EXEC_WAVE_COMPACT=1
 ```
 
-**Example Run:**
+**Example Run (self-contained, no manual node start):**
 
 ```bash
-# Run sweep with default 2000 tx per config
-./scripts/t93_stm_sweep.sh
+# Run sweep with default 2000 tx per config (uses shorter block time for faster results)
+EEZO_BLOCK_TARGET_TIME_MS=1000 \
+scripts/t93_stm_sweep.sh 2000 \
+  http://127.0.0.1:8080 \
+  http://127.0.0.1:9898/metrics \
+  | tee /tmp/t93_sweep_1000ms.txt
 
 # Run sweep with 5000 tx for more accurate measurements
 ./scripts/t93_stm_sweep.sh 5000
 
 # Custom endpoints
 ./scripts/t93_stm_sweep.sh 2000 http://localhost:8080 http://localhost:9898/metrics
+```
+
+**Sample Output:**
+
+After running, you should see summary lines like:
+
+```
+lanes=8 threads=16 wavecap=0 buckets=32 tx=2000 blocks=285 stm_time=3.2100s hash_time=0.005400s stm_per_tx=0.001605s hash_per_tx=0.00000270s tx_per_block=7.01 tps=178.50
+lanes=16 threads=16 wavecap=256 buckets=64 tx=2000 blocks=320 stm_time=2.9800s hash_time=0.004800s stm_per_tx=0.001490s hash_per_tx=0.00000240s tx_per_block=6.25 tps=195.40
 ```
 
 ### scripts/t93_fund_and_spam.sh
@@ -380,3 +397,244 @@ Before running the sweep:
 
 - `scripts/t93_stm_sweep.sh`: Main sweep script
 - `scripts/t93_fund_and_spam.sh`: Helper for funding and spamming
+
+---
+
+# T93.1 — Fat-Block STM Profiling
+
+This section describes T93.1: fat-block profiling to minimize per-block overhead and capture detailed STM performance profiles.
+
+## Motivation
+
+Based on T92/T93.0 observations:
+
+| Metric | Value | Observation |
+|--------|-------|-------------|
+| STM per tx | ~1.7 ms | **Dominates execution time** |
+| Hash per tx | ~3-4 µs | Essentially free (not a bottleneck) |
+| Live TPS | ~350 | Room for improvement |
+
+**Conclusion**: STM execution dominates; GPU/CPU hashing is not the bottleneck.
+
+To improve TPS from ~350 toward 700-1000, we need to understand *where* the 1.7 ms/tx goes within the STM inner loop. Fat-block profiling helps by:
+
+1. Maximizing transactions per block (reducing per-block fixed costs)
+2. Creating sustained load for meaningful profiler captures
+3. Providing clear before/after metrics for optimization work
+
+## scripts/t93_fat_block_profile.sh
+
+Runs a single node with aggressive fat-block configuration for profiling.
+
+**Usage:**
+
+```bash
+scripts/t93_fat_block_profile.sh [TX_COUNT] [KEEP_ALIVE_SECONDS]
+```
+
+**Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| TX_COUNT | 5000 | Number of transactions to submit |
+| KEEP_ALIVE_SECONDS | 60 | How long to keep node running after spam |
+
+**Fat-Block Configuration:**
+
+```bash
+EEZO_BLOCK_MAX_TX=2000          # Pack up to 2000 txs per block
+EEZO_BLOCK_TARGET_TIME_MS=250   # Target 250ms block time
+EEZO_MEMPOOL_MAX_TX=50000       # Large mempool capacity
+```
+
+**STM Configuration (optimized):**
+
+```bash
+EEZO_EXEC_LANES=16              # 16 parallel lanes
+EEZO_EXECUTOR_THREADS=(nproc)   # All CPU threads
+EEZO_EXEC_WAVE_CAP=256          # Best wave size from T93.0
+EEZO_EXEC_BUCKETS=64            # 64 STM buckets
+EEZO_EXEC_HYBRID=1              # Hybrid execution
+EEZO_EXEC_WAVE_COMPACT=1        # Wave compaction
+```
+
+**Example Run:**
+
+```bash
+# Run with 5000 tx, keep node alive for 120 seconds for profiling
+./scripts/t93_fat_block_profile.sh 5000 120
+```
+
+**Sample Output:**
+
+```
+═══════════════════════════════════════════════════════════════════════════════════
+  Fat-Block Profiling Results
+═══════════════════════════════════════════════════════════════════════════════════
+
+Delta Metrics:
+  Δeezo_exec_stm_time_seconds:  8.5000 s
+  Δeezo_hash_cpu_time_seconds:  0.016000 s
+  Δeezo_txs_included_total:     5000
+  Δblock_applied_total:         10
+
+Derived Metrics:
+  STM per tx:     0.001700 s (1.7000 ms)
+  Hash per tx:    0.00000320 s (3.2000 µs)
+  Tx per block:   500.00
+  Approximate TPS: 350.00
+  Wall time:      14s
+```
+
+## Attaching a Profiler
+
+While the fat-block node is running (during the `KEEP_ALIVE_SECONDS` window), attach a profiler from another terminal.
+
+### Using perf (Linux)
+
+```bash
+# Find the eezo-node PID
+NODE_PID=$(pgrep -f eezo-node)
+
+# Record 20 seconds of CPU profile
+sudo perf record -F 99 -p $NODE_PID -g -- sleep 20
+
+# Generate a script for flamegraph
+sudo perf script > perf.script
+
+# Generate flamegraph (requires flamegraph tools)
+cat perf.script | stackcollapse-perf.pl | flamegraph.pl > flamegraph.svg
+```
+
+### Using cargo-flamegraph
+
+```bash
+# Install if needed
+cargo install flamegraph
+
+# Run with flamegraph (replaces the profile script)
+RUSTFLAGS='-g' cargo flamegraph -p eezo-node --bin eezo-node \
+  --features "pq44-runtime,metrics,checkpoints,stm-exec,dag-consensus,cuda-hash" \
+  -- --genesis genesis.min.json --datadir /tmp/eezo-flamegraph
+```
+
+Then in another terminal, run spam:
+
+```bash
+./scripts/t93_fund_and_spam.sh 5000 http://127.0.0.1:8080
+```
+
+### Using perf while profiling spam
+
+Best approach: run the profile script first, then attach perf while sending more spam:
+
+```bash
+# Terminal 1: Start fat-block profile
+./scripts/t93_fat_block_profile.sh 5000 120
+
+# Terminal 2: Attach perf and send more spam
+NODE_PID=$(pgrep -f eezo-node)
+(
+  sleep 2  # Let profiler attach
+  ./scripts/t93_fund_and_spam.sh 5000 http://127.0.0.1:8080
+) &
+sudo perf record -F 99 -p $NODE_PID -g -- sleep 30
+```
+
+## STM Hot Spots Analysis
+
+Based on the codebase structure, the 1.7 ms/tx likely comes from these areas in `crates/node/src/executor/stm.rs`:
+
+### Primary Hot Spots
+
+1. **Account Lookup / Overlay (`BlockOverlay::get_account`)** — Line ~418
+   - HashMap lookup for each read
+   - Falls back to base state if not in overlay
+   - Called twice per tx (sender + receiver)
+
+2. **AnalyzedTx Processing (`analyze_tx` / `analyze_batch`)** — Lines ~336-358
+   - Sender derivation from pubkey (first 20 bytes)
+   - Conflict metadata computation (address fingerprints)
+   - Called once per tx at block start
+
+3. **Conflict Detection (`detect_conflicts_with_prescreen`)** — Lines ~1860-1981
+   - WaveFingerprint bloom filter checks
+   - HashSet lookups for exact key matching
+   - StateKey HashMap operations for write tracking
+
+4. **Speculative Execution (`execute_tx_with_overlay`)** — Lines ~852-909
+   - Nonce validation
+   - Balance arithmetic (saturating_add/sub)
+   - Account cloning for new states
+
+5. **State Application (overlay to base)** — Lines ~443-452
+   - HashMap iteration over modified accounts
+   - Supply burn accumulation
+
+### Existing Optimizations
+
+**Arena-Indexed Account Layout (`StmKernelMode::Arena`)** — Lines ~630-670
+
+The arena kernel exists and can be enabled with:
+
+```bash
+EEZO_STM_KERNEL_MODE=arena
+```
+
+How it works:
+- All touched accounts stored contiguously in a `Vec<Account>`
+- Access via `u32` indices instead of HashMap lookups
+- Same semantics, better cache locality
+
+Why it may not fully solve 1.7 ms/tx:
+- Still requires initial address→index resolution
+- Conflict detection still uses HashSet/HashMap
+- Not yet a "fast path" for simple transfers
+
+**WaveFingerprint Pre-screening** — Lines ~208-302
+
+Uses bloom filters for fast conflict pre-screening:
+- O(1) bloom check before precise conflict detection
+- Reduces false positives with exact key fallback
+
+## Suggested Future Task: T93.2 — Simple Transfer Fast Path
+
+### Problem
+
+Current STM processes all transfers through the same path:
+1. Parse transaction
+2. Derive sender from pubkey
+3. Build conflict metadata
+4. Execute with full overlay machinery
+5. Detect conflicts
+
+For simple balance transfers (the common case), this is overkill.
+
+### Proposed Design
+
+Add a "fast path" for simple transfers that:
+
+1. **Detect simple transfers early**: 
+   - Nonce is next expected for sender
+   - Sufficient balance
+   - No contract call
+
+2. **Bypass conflict detection for non-conflicting transfers**:
+   - Use sender address as partition key
+   - Group by sender → guaranteed no conflicts within group
+   - Apply in parallel without STM overhead
+
+3. **Use arena-indexed accounts by default**:
+   - Pre-load all touched accounts at block start
+   - Index-based access throughout execution
+
+### Expected Impact
+
+| Metric | Current | Target |
+|--------|---------|--------|
+| STM per tx | 1.7 ms | 0.5-0.8 ms |
+| TPS | ~350 | 700-1000 |
+
+## Files Added
+
+- `scripts/t93_fat_block_profile.sh`: Fat-block profiling script
