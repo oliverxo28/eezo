@@ -478,6 +478,24 @@ fn dag_ordering_enabled_from_env() -> bool {
     }
 }
 
+/// T96.1: Helper to record DAG ordering metrics after applying ordering.
+///
+/// This function updates all metrics related to DAG ordering in a single place,
+/// ensuring consistency between the two ordering hooks (hybrid batch path and
+/// mempool fallback path).
+///
+/// Called from:
+/// - Hook #1: After ordering hybrid-aggregated txs
+/// - Hook #2: After ordering mempool-collected txs in DagPrimary mode
+#[cfg(feature = "dag-consensus")]
+#[inline]
+fn record_dag_ordering_metrics(stats: &DagOrderingStats, ordered_count: usize) {
+    crate::metrics::dag_ordered_txs_inc(ordered_count as u64);
+    crate::metrics::dag_block_tx_per_block_observe(ordered_count);
+    crate::metrics::dag_nonce_span_observe(stats.avg_nonce_span);
+    crate::metrics::dag_fastpath_candidates_inc(stats.fastpath_candidates as u64);
+}
+
 impl HybridModeConfig {
     /// Parse hybrid mode configuration from environment.
     fn from_env() -> Self {
@@ -2136,11 +2154,8 @@ impl CoreRunnerHandle {
                                     block_max_tx,
                                 );
                                 
-                                // T96.0: Update metrics
-                                crate::metrics::dag_ordered_txs_inc(ordered_txs.len() as u64);
-                                crate::metrics::dag_block_tx_per_block_observe(ordered_txs.len());
-                                crate::metrics::dag_nonce_span_observe(ordering_stats.avg_nonce_span);
-                                crate::metrics::dag_fastpath_candidates_inc(ordering_stats.fastpath_candidates as u64);
+                                // T96.1: Update metrics using centralized helper
+                                record_dag_ordering_metrics(&ordering_stats, ordered_txs.len());
                                 
                                 // Sampled logging (every ~100 blocks based on log level)
                                 log::info!("{}", ordering_stats.to_log_line());
@@ -2269,11 +2284,8 @@ impl CoreRunnerHandle {
                                 block_max_tx,
                             );
                             
-                            // T96.1: Update metrics for mempool-path DAG ordering
-                            crate::metrics::dag_ordered_txs_inc(ordered_txs.len() as u64);
-                            crate::metrics::dag_block_tx_per_block_observe(ordered_txs.len());
-                            crate::metrics::dag_nonce_span_observe(ordering_stats.avg_nonce_span);
-                            crate::metrics::dag_fastpath_candidates_inc(ordering_stats.fastpath_candidates as u64);
+                            // T96.1: Update metrics using centralized helper
+                            record_dag_ordering_metrics(&ordering_stats, ordered_txs.len());
                             
                             // Log ordering stats for observability
                             log::info!(
