@@ -3972,6 +3972,117 @@ pub fn register_t87_arena_kernel_metrics() {
 }
 
 // -----------------------------------------------------------------------------
+// T93.2 — Simple Transfer Fast Path Metrics
+// -----------------------------------------------------------------------------
+
+/// Gauge: Simple fast path enabled (0=disabled, 1=enabled).
+#[cfg(feature = "metrics")]
+pub static EEZO_EXEC_STM_SIMPLE_FASTPATH_ENABLED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "eezo_exec_stm_simple_fastpath_enabled",
+        "Simple transfer fast path: 0=disabled, 1=enabled (T93.2)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total transactions executed via the simple fast path.
+#[cfg(feature = "metrics")]
+pub static EEZO_STM_SIMPLE_FASTPATH_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_stm_simple_fastpath_total",
+        "Total transactions successfully executed via the simple fast path (T93.2)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total simple transactions that fell back to the general path.
+#[cfg(feature = "metrics")]
+pub static EEZO_STM_SIMPLE_FALLBACK_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "eezo_stm_simple_fallback_total",
+        "Total simple transactions routed to the general path (due to conflicts) (T93.2)"
+    )
+    .unwrap()
+});
+
+/// Counter: Total CPU time spent in the simple fast path execution (seconds).
+#[cfg(feature = "metrics")]
+pub static EEZO_STM_SIMPLE_TIME_SECONDS: Lazy<Counter> = Lazy::new(|| {
+    prometheus::register_counter!(
+        "eezo_stm_simple_time_seconds",
+        "Total CPU time spent in the simple fast path execution (T93.2)"
+    )
+    .unwrap()
+});
+
+/// Helper: Set simple fastpath enabled gauge (T93.2).
+#[inline]
+pub fn exec_stm_simple_fastpath_enabled_set(enabled: bool) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_EXEC_STM_SIMPLE_FASTPATH_ENABLED.set(if enabled { 1 } else { 0 });
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = enabled;
+    }
+}
+
+/// Helper: Increment simple fastpath counter (T93.2).
+#[inline]
+pub fn stm_simple_fastpath_inc(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STM_SIMPLE_FASTPATH_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Increment simple fallback counter (T93.2).
+#[inline]
+pub fn stm_simple_fallback_inc(count: u64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STM_SIMPLE_FALLBACK_TOTAL.inc_by(count);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = count;
+    }
+}
+
+/// Helper: Add to simple time seconds counter (T93.2).
+#[inline]
+pub fn stm_simple_time_add(seconds: f64) {
+    #[cfg(feature = "metrics")]
+    {
+        EEZO_STM_SIMPLE_TIME_SECONDS.inc_by(seconds);
+    }
+    #[cfg(not(feature = "metrics"))]
+    {
+        let _ = seconds;
+    }
+}
+
+/// Eagerly register T93.2 simple fastpath metrics so they appear on /metrics at boot.
+#[cfg(feature = "metrics")]
+pub fn register_t93_simple_fastpath_metrics() {
+    let _ = &*EEZO_EXEC_STM_SIMPLE_FASTPATH_ENABLED;
+    let _ = &*EEZO_STM_SIMPLE_FASTPATH_TOTAL;
+    let _ = &*EEZO_STM_SIMPLE_FALLBACK_TOTAL;
+    let _ = &*EEZO_STM_SIMPLE_TIME_SECONDS;
+}
+
+/// No-op version when metrics feature is disabled.
+#[cfg(not(feature = "metrics"))]
+pub fn register_t93_simple_fastpath_metrics() {
+    // No metrics to register when the feature is off.
+}
+
+// -----------------------------------------------------------------------------
 // T82.0 — CPU Profiling Hooks
 // -----------------------------------------------------------------------------
 //

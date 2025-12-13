@@ -42,7 +42,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use rayon::prelude::*;
 
 use eezo_ledger::consensus::SingleNode;
-use eezo_ledger::{Address, Account, Accounts, Supply, SignedTx, Block, AccountArena};
+use eezo_ledger::{Address, Account, Accounts, Supply, SignedTx, Block, AccountArena, TxCore};
 use eezo_ledger::block::{BlockHeader, txs_root};
 use eezo_ledger::tx::{apply_tx, validate_tx_stateful, TxStateError};
 use eezo_ledger::sender_from_pubkey_first20;
@@ -301,10 +301,49 @@ impl WaveFingerprint {
     }
 }
 
+// =============================================================================
+// T93.2: AnalyzedTxKind — Simple Transfer vs General Transaction
+// =============================================================================
+
+/// Identifies whether a transaction is a simple transfer or a general transaction.
+///
+/// T93.2: Simple transfers can use the fast path execution which bypasses
+/// expensive HashMap lookups and full conflict detection. General transactions
+/// use the standard STM execution path.
+///
+/// ## Simple Transfer Definition
+///
+/// A "simple transfer" is a transaction that:
+/// - Has exactly one sender and one receiver
+/// - Contains no contract call, script data, or extra side effects
+/// - Uses standard amount + fee fields only
+/// - Is still subject to all validity checks (chain ID, ML-DSA signature, nonce, balance)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AnalyzedTxKind {
+    /// Simple value transfer: one sender, one receiver, no contract logic.
+    /// Can use the fast path execution when enabled.
+    #[default]
+    SimpleTransfer,
+    
+    /// General transaction that may have complex effects.
+    /// Always uses the standard STM execution path.
+    General,
+}
+
+impl AnalyzedTxKind {
+    /// Check if this is a simple transfer.
+    #[inline]
+    pub fn is_simple(&self) -> bool {
+        matches!(self, AnalyzedTxKind::SimpleTransfer)
+    }
+}
+
 /// Analyzed transaction with pre-computed conflict metadata.
 ///
 /// T82.1: Internal representation that caches conflict-relevant data
 /// computed once at block start. Does not change wire format.
+///
+/// T93.2: Added `kind` field for fast path routing and optional arena indices.
 #[derive(Clone, Debug)]
 pub struct AnalyzedTx {
     /// The original signed transaction
@@ -315,6 +354,12 @@ pub struct AnalyzedTx {
     pub sender: Address,
     /// Pre-computed conflict metadata
     pub meta: ConflictMetadata,
+    /// T93.2: Transaction kind for fast path routing
+    pub kind: AnalyzedTxKind,
+    /// T93.2: Pre-resolved sender arena index (set during arena construction)
+    pub sender_arena_idx: Option<u32>,
+    /// T93.2: Pre-resolved receiver arena index (set during arena construction)
+    pub receiver_arena_idx: Option<u32>,
 }
 
 /// Compute a 64-bit fingerprint from an Address for conflict detection.
@@ -333,16 +378,29 @@ fn address_fingerprint(addr: &Address) -> u64 {
 /// Analyze a signed transaction to build AnalyzedTx with conflict metadata.
 ///
 /// Returns None if sender cannot be derived from pubkey (requires 20+ byte pubkey).
+///
+/// T93.2: All basic transfers are classified as SimpleTransfer. Currently, EEZO
+/// only supports simple value transfers (no contracts), so all valid txs are Simple.
+/// When contract support is added, this function will need to detect contract calls
+/// and classify them as General.
 pub fn analyze_tx(tx: &SignedTx, tx_idx: usize) -> Option<AnalyzedTx> {
     let sender = sender_from_pubkey_first20(tx)?;
     let from_key = address_fingerprint(&sender);
     let to_key = address_fingerprint(&tx.core.to);
+    
+    // T93.2: Detect transaction kind
+    // Currently all txs in EEZO are simple transfers (value + fee only).
+    // When contracts are added, check for contract call indicators here.
+    let kind = AnalyzedTxKind::SimpleTransfer;
     
     Some(AnalyzedTx {
         tx: Arc::new(tx.clone()),
         tx_idx,
         sender,
         meta: ConflictMetadata::Simple { from_key, to_key },
+        kind,
+        sender_arena_idx: None,    // Set during arena construction
+        receiver_arena_idx: None,  // Set during arena construction
     })
 }
 
@@ -361,16 +419,24 @@ pub fn analyze_batch(txs: &[SignedTx]) -> Vec<AnalyzedTx> {
 ///
 /// Uses pre-computed sender from SharedTx, avoiding redundant derivation.
 /// Returns None if SharedTx has no valid sender.
+///
+/// T93.2: Added transaction kind detection and arena index placeholders.
 pub fn analyze_shared_tx(shared_tx: &std::sync::Arc<crate::tx_decode_pool::SharedTx>, tx_idx: usize) -> Option<AnalyzedTx> {
     let sender = shared_tx.sender()?;
     let from_key = address_fingerprint(&sender);
     let to_key = address_fingerprint(&shared_tx.core().to);
+    
+    // T93.2: All current txs are simple transfers
+    let kind = AnalyzedTxKind::SimpleTransfer;
     
     Some(AnalyzedTx {
         tx: std::sync::Arc::new(shared_tx.signed_tx().clone()),
         tx_idx,
         sender,
         meta: ConflictMetadata::Simple { from_key, to_key },
+        kind,
+        sender_arena_idx: None,
+        receiver_arena_idx: None,
     })
 }
 
@@ -690,6 +756,10 @@ pub struct StmConfig {
     /// T87.4: STM kernel mode (legacy or arena).
     /// Configured via EEZO_STM_KERNEL_MODE env var (default: legacy).
     pub kernel_mode: StmKernelMode,
+    /// T93.2: Enable simple transfer fast path.
+    /// Configured via EEZO_STM_SIMPLE_FASTPATH_ENABLED env var (default: false).
+    /// When enabled, simple transfers bypass expensive conflict detection.
+    pub simple_fastpath_enabled: bool,
 }
 
 impl Default for StmConfig {
@@ -702,6 +772,7 @@ impl Default for StmConfig {
             wave_cap: 0, // 0 means unlimited
             wave_aggressive: false, // T87.1: opt-in
             kernel_mode: StmKernelMode::Legacy, // T87.4: default to legacy
+            simple_fastpath_enabled: false, // T93.2: opt-in for safety
         }
     }
 }
@@ -723,6 +794,7 @@ impl StmConfig {
     /// - `EEZO_EXEC_WAVE_CAP`: Optional cap on txs per wave (default: 0 = unlimited)
     /// - `EEZO_STM_WAVE_AGGRESSIVE`: Enable aggressive wave grouping (default: 0)
     /// - `EEZO_STM_KERNEL_MODE`: Kernel mode selection (default: legacy, optional: arena)
+    /// - `EEZO_STM_SIMPLE_FASTPATH_ENABLED`: Enable simple transfer fast path (default: 0)
     pub fn from_env(threads: usize) -> Self {
         let max_retries = std::env::var("EEZO_STM_MAX_RETRIES")
             .ok()
@@ -767,6 +839,14 @@ impl StmConfig {
         // T87.4: Parse kernel_mode from environment (default legacy)
         let kernel_mode = StmKernelMode::from_env();
 
+        // T93.2: Parse simple_fastpath_enabled from environment (default false)
+        let simple_fastpath_enabled = std::env::var("EEZO_STM_SIMPLE_FASTPATH_ENABLED")
+            .map(|v| {
+                let s = v.trim().to_ascii_lowercase();
+                matches!(s.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false);
+
         Self {
             threads,
             max_retries,
@@ -775,6 +855,7 @@ impl StmConfig {
             wave_cap,
             wave_aggressive,
             kernel_mode,
+            simple_fastpath_enabled,
         }
     }
 }
@@ -811,14 +892,15 @@ impl StmExecutor {
     /// T76.7: Also logs and sets gauges for exec_lanes and wave_cap.
     /// T87.1: Also logs and sets gauge for wave_aggressive.
     /// T87.4: Also logs and sets gauge for kernel_mode.
+    /// T93.2: Also logs and sets gauge for simple_fastpath_enabled.
     pub fn from_env(threads: usize) -> Self {
         let config = StmConfig::from_env(threads);
         
-        // T76.7 + T87.1 + T87.4: Log the configured values
+        // T76.7 + T87.1 + T87.4 + T93.2: Log the configured values
         let kernel_mode_str = if config.kernel_mode.is_arena() { "arena" } else { "legacy" };
         log::info!(
-            "stm-executor: initialized with threads={} exec_lanes={} wave_cap={} (0=unlimited) wave_aggressive={} kernel_mode={}",
-            config.threads, config.exec_lanes, config.wave_cap, config.wave_aggressive, kernel_mode_str
+            "stm-executor: initialized with threads={} exec_lanes={} wave_cap={} (0=unlimited) wave_aggressive={} kernel_mode={} simple_fastpath={}",
+            config.threads, config.exec_lanes, config.wave_cap, config.wave_aggressive, kernel_mode_str, config.simple_fastpath_enabled
         );
         
         // T76.7: Set gauge metrics
@@ -830,6 +912,8 @@ impl StmExecutor {
             crate::metrics::exec_stm_wave_aggressive_set(config.wave_aggressive);
             // T87.4: Set kernel mode gauge
             crate::metrics::exec_stm_kernel_mode_set(config.kernel_mode.is_arena());
+            // T93.2: Set simple fastpath gauge
+            crate::metrics::exec_stm_simple_fastpath_enabled_set(config.simple_fastpath_enabled);
         }
         
         Self { config }
@@ -1520,6 +1604,153 @@ impl StmExecutor {
         (contexts, committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block)
     }
 
+    // =============================================================================
+    // T93.2: Simple Transfer Fast Path
+    // =============================================================================
+    //
+    // The fast path is an optimization for simple value transfers that bypasses
+    // expensive conflict detection. It works by:
+    //
+    // 1. Pre-partitioning transactions by sender address
+    // 2. Ensuring only one tx per sender in a wave (no intra-sender conflicts)
+    // 3. Tracking receiver touches to detect inter-tx conflicts
+    // 4. Executing non-conflicting transfers directly on the arena
+    //
+    // This is safe because:
+    // - Simple transfers only touch sender + receiver accounts
+    // - If we ensure no two txs in a wave share a sender, there are no write-write
+    //   conflicts on the sender account
+    // - If no tx writes to an account that another tx reads/writes, there are no
+    //   read-after-write or write-after-write conflicts
+    //
+    // Txs that cannot be safely executed via fast path are marked for the general
+    // STM path (fallback).
+
+    /// T93.2: Execute simple transfers via the fast path.
+    ///
+    /// This function attempts to execute simple transfers without conflict detection
+    /// overhead. It partitions transactions by sender and ensures only one tx per
+    /// sender is executed per wave.
+    ///
+    /// Returns (fast_path_count, fallback_count) - counts of txs handled by each path.
+    ///
+    /// # Arguments
+    /// * `analyzed_txs` - Pre-analyzed transactions with kind and arena indices
+    /// * `arena_contexts` - Arena execution contexts for each tx
+    /// * `arena` - The account arena for this block
+    /// * `idx_to_arena` - Map from tx_idx to arena_contexts index
+    ///
+    /// # Safety
+    ///
+    /// This function must only be called when `simple_fastpath_enabled` is true.
+    /// It modifies the arena directly for successfully executed txs.
+    #[allow(dead_code)]
+    fn execute_simple_fastpath_wave(
+        analyzed_txs: &[AnalyzedTx],
+        arena_contexts: &mut [ArenaTxContext],
+        arena: &mut AccountArena,
+        idx_to_arena: &HashMap<usize, usize>,
+    ) -> (u64, u64) {
+        let fastpath_start = std::time::Instant::now();
+        
+        // Track senders and receivers touched in this wave
+        // Key: arena_idx, Value: tx_idx that claims this account
+        let mut claimed_senders: HashMap<u32, usize> = HashMap::new();
+        let mut touched_accounts: HashMap<u32, usize> = HashMap::new();
+        
+        let mut fast_path_count: u64 = 0;
+        let mut fallback_count: u64 = 0;
+        
+        // Process transactions in original order for determinism
+        let mut pending: Vec<&AnalyzedTx> = analyzed_txs
+            .iter()
+            .filter(|atx| {
+                idx_to_arena.get(&atx.tx_idx)
+                    .map(|&idx| arena_contexts[idx].status == TxStatus::NeedsRetry)
+                    .unwrap_or(false)
+            })
+            .collect();
+        pending.sort_by_key(|atx| atx.tx_idx);
+        
+        for atx in pending {
+            let arena_idx = match idx_to_arena.get(&atx.tx_idx) {
+                Some(&idx) => idx,
+                None => continue,
+            };
+            let ctx = &mut arena_contexts[arena_idx];
+            
+            // Only handle simple transfers via fast path
+            if !atx.kind.is_simple() {
+                fallback_count += 1;
+                continue;
+            }
+            
+            // Check if we can safely execute this tx
+            // Rule 1: No other tx in this wave can have the same sender
+            if claimed_senders.contains_key(&ctx.sender_idx) {
+                fallback_count += 1;
+                continue;
+            }
+            
+            // Rule 2: No other tx in this wave can touch our sender or receiver
+            // (This prevents read-after-write conflicts)
+            if touched_accounts.contains_key(&ctx.sender_idx) || 
+               touched_accounts.contains_key(&ctx.receiver_idx) {
+                fallback_count += 1;
+                continue;
+            }
+            
+            // Read accounts from arena (O(1) Vec access)
+            let sender_acc = arena.account(ctx.sender_idx);
+            let core = &atx.tx.core;
+            
+            // Validate nonce
+            if sender_acc.nonce != core.nonce {
+                // Nonce mismatch - mark for retry (may succeed after earlier txs)
+                continue;
+            }
+            
+            // Validate balance
+            let need = core.amount.saturating_add(core.fee);
+            if sender_acc.balance < need {
+                // Insufficient balance - mark for retry
+                continue;
+            }
+            
+            // Execute the transfer directly on the arena
+            // (No speculative result needed - we commit immediately)
+            {
+                let sender = arena.account_mut(ctx.sender_idx);
+                sender.balance = sender.balance.saturating_sub(need);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            {
+                let receiver = arena.account_mut(ctx.receiver_idx);
+                receiver.balance = receiver.balance.saturating_add(core.amount);
+            }
+            arena.record_fee(core.fee);
+            
+            // Mark as committed
+            ctx.status = TxStatus::Committed;
+            
+            // Claim sender and touch both accounts
+            claimed_senders.insert(ctx.sender_idx, atx.tx_idx);
+            touched_accounts.insert(ctx.sender_idx, atx.tx_idx);
+            touched_accounts.insert(ctx.receiver_idx, atx.tx_idx);
+            
+            fast_path_count += 1;
+        }
+        
+        // Emit timing metric
+        #[cfg(feature = "metrics")]
+        {
+            let elapsed = fastpath_start.elapsed().as_secs_f64();
+            crate::metrics::stm_simple_time_add(elapsed);
+        }
+        
+        (fast_path_count, fallback_count)
+    }
+
     /// T87.4: Execute all transactions using arena-indexed STM kernel.
     ///
     /// This version uses:
@@ -1578,6 +1809,10 @@ impl StmExecutor {
         let mut retries_this_block: u64 = 0;
         let mut aborted_this_block: u64 = 0;
 
+        // T93.2: Fast path metrics tracking
+        let mut fastpath_total: u64 = 0;
+        let mut fallback_total: u64 = 0;
+
         // Track which txs have been finally committed
         let mut finally_committed: HashSet<usize> = HashSet::new();
 
@@ -1595,6 +1830,35 @@ impl StmExecutor {
 
             if pending.is_empty() {
                 break;
+            }
+
+            // T93.2: Try simple fast path first if enabled
+            if self.config.simple_fastpath_enabled {
+                let (fp_count, fb_count) = Self::execute_simple_fastpath_wave(
+                    &analyzed_txs,
+                    &mut arena_contexts,
+                    &mut arena,
+                    &idx_to_arena,
+                );
+                fastpath_total += fp_count;
+                fallback_total += fb_count;
+                
+                // Collect committed txs from fast path
+                for ctx in arena_contexts.iter() {
+                    if ctx.status == TxStatus::Committed {
+                        finally_committed.insert(ctx.tx_idx);
+                    }
+                }
+                
+                // Check if all txs are done after fast path
+                let still_pending = arena_contexts
+                    .iter()
+                    .filter(|c| c.status == TxStatus::NeedsRetry)
+                    .count();
+                if still_pending == 0 {
+                    log::debug!("STM(arena/fastpath): all {} txs committed via fast path", fp_count);
+                    break;
+                }
             }
 
             // Check for max retries before execution
@@ -1721,16 +1985,23 @@ impl StmExecutor {
         #[cfg(feature = "metrics")]
         {
             crate::metrics::exec_stm_waves_built_inc(waves_this_block);
+            // T93.2: Emit fast path metrics
+            if self.config.simple_fastpath_enabled {
+                crate::metrics::stm_simple_fastpath_inc(fastpath_total);
+                crate::metrics::stm_simple_fallback_inc(fallback_total);
+            }
         }
 
         log::debug!(
-            "STM(arena): completed {} waves, {} committed, {} failed/aborted, {} conflicts, {} retries, arena_size={}",
+            "STM(arena): completed {} waves, {} committed, {} failed/aborted, {} conflicts, {} retries, arena_size={}, fastpath={}, fallback={}",
             waves_this_block,
             committed_txs.len(),
             n - committed_txs.len(),
             conflicts_this_block,
             retries_this_block,
-            arena.len()
+            arena.len(),
+            fastpath_total,
+            fallback_total
         );
 
         (committed_txs, waves_this_block, conflicts_this_block, retries_this_block, aborted_this_block)
@@ -2153,6 +2424,8 @@ mod tests {
         assert!(!config.wave_aggressive);
         // T87.4: Check kernel_mode
         assert_eq!(config.kernel_mode, StmKernelMode::Legacy);
+        // T93.2: Check simple_fastpath_enabled
+        assert!(!config.simple_fastpath_enabled);
     }
 
     #[test]
@@ -2165,6 +2438,7 @@ mod tests {
             wave_cap: 100,
             wave_aggressive: true, // T87.1
             kernel_mode: StmKernelMode::Arena, // T87.4
+            simple_fastpath_enabled: true, // T93.2
         };
         let exec = StmExecutor::with_config(config);
         assert_eq!(exec.threads(), 8);
@@ -2177,6 +2451,8 @@ mod tests {
         assert!(exec.config().wave_aggressive);
         // T87.4: Check kernel_mode
         assert_eq!(exec.config().kernel_mode, StmKernelMode::Arena);
+        // T93.2: Check simple_fastpath_enabled
+        assert!(exec.config().simple_fastpath_enabled);
     }
 
     // T76.7: Test exec_lanes and wave_cap configuration from environment
@@ -2189,6 +2465,7 @@ mod tests {
         std::env::remove_var("EEZO_EXEC_WAVE_CAP");
         std::env::remove_var("EEZO_STM_WAVE_AGGRESSIVE"); // T87.1
         std::env::remove_var("EEZO_STM_KERNEL_MODE"); // T87.4
+        std::env::remove_var("EEZO_STM_SIMPLE_FASTPATH_ENABLED"); // T93.2
         
         let config = StmConfig::from_env(4);
         
@@ -2197,6 +2474,7 @@ mod tests {
         assert_eq!(config.wave_cap, 0); // default, unlimited
         assert!(!config.wave_aggressive); // T87.1: default off
         assert_eq!(config.kernel_mode, StmKernelMode::Legacy); // T87.4: default legacy
+        assert!(!config.simple_fastpath_enabled); // T93.2: default off
     }
 
     #[test]
@@ -3193,5 +3471,62 @@ mod tests {
 
         // analyze_shared_tx should return None
         assert!(analyze_shared_tx(&shared_tx, 0).is_none());
+    }
+
+    // ========================================================================
+    // T93.2: Simple Fast Path Tests
+    // ========================================================================
+
+    #[test]
+    fn test_stm_config_from_env_simple_fastpath() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        
+        // Test enabling simple_fastpath
+        std::env::set_var("EEZO_STM_SIMPLE_FASTPATH_ENABLED", "1");
+        let config = StmConfig::from_env(4);
+        assert!(config.simple_fastpath_enabled);
+        
+        // Clean up
+        std::env::remove_var("EEZO_STM_SIMPLE_FASTPATH_ENABLED");
+        
+        // Test disabled
+        std::env::set_var("EEZO_STM_SIMPLE_FASTPATH_ENABLED", "0");
+        let config = StmConfig::from_env(4);
+        assert!(!config.simple_fastpath_enabled);
+        
+        // Clean up
+        std::env::remove_var("EEZO_STM_SIMPLE_FASTPATH_ENABLED");
+    }
+
+    #[test]
+    fn test_analyzed_tx_kind_defaults_to_simple() {
+        // Create a test transaction
+        let tx = SignedTx {
+            core: TxCore {
+                to: Address([0xca; 20]),
+                amount: 1000,
+                fee: 1,
+                nonce: 0,
+            },
+            pubkey: vec![0x42; 20], // Valid 20-byte pubkey
+            sig: vec![],
+        };
+
+        let analyzed = analyze_tx(&tx, 0);
+        assert!(analyzed.is_some());
+        
+        let atx = analyzed.unwrap();
+        // T93.2: All basic transfers are classified as SimpleTransfer
+        assert_eq!(atx.kind, AnalyzedTxKind::SimpleTransfer);
+        assert!(atx.kind.is_simple());
+        // Arena indices should be None until arena construction
+        assert!(atx.sender_arena_idx.is_none());
+        assert!(atx.receiver_arena_idx.is_none());
+    }
+
+    #[test]
+    fn test_analyzed_tx_kind_is_simple() {
+        assert!(AnalyzedTxKind::SimpleTransfer.is_simple());
+        assert!(!AnalyzedTxKind::General.is_simple());
     }
 }
