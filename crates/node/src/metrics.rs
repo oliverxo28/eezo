@@ -2,7 +2,7 @@
 use once_cell::sync::Lazy;
 use prometheus::{
     register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
-    register_int_gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_int_gauge, Counter, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
 };
 
 // --- Remove AtomicU64 imports if they are now unused ---
@@ -4238,8 +4238,6 @@ pub fn register_t91_cuda_hash_metrics() {
 // - STM executor runs (block execution)
 //
 // This enables profiling under load to identify bottlenecks.
-
-use prometheus::Counter;
 
 /// T92.0: Counter for total CPU time (seconds) spent in consensus-related BLAKE3 hashing.
 #[cfg(feature = "metrics")]
