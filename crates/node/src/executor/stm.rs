@@ -1820,6 +1820,7 @@ impl StmExecutor {
     ///   to avoid per-wave Vec allocation and sort.
     /// - `conflict_bitmap` is passed in and reset() at the start, avoiding re-allocation
     ///   of the 16KB bitmap arrays per wave.
+    /// - `analyzed_map` provides O(1) lookup of AnalyzedTx by tx_idx.
     ///
     /// ## T93.3 Metrics Note
     ///
@@ -1830,7 +1831,7 @@ impl StmExecutor {
     ///
     /// # Arguments
     /// * `simple_candidate_indices` - Pre-sorted list of tx indices for simple transfer candidates
-    /// * `analyzed_txs` - Pre-analyzed transactions with kind and arena indices
+    /// * `analyzed_map` - Map from tx_idx to AnalyzedTx for O(1) lookup
     /// * `arena_contexts` - Arena execution contexts for each tx
     /// * `arena` - The account arena for this block
     /// * `idx_to_arena` - Map from tx_idx to arena_contexts index
@@ -1844,7 +1845,7 @@ impl StmExecutor {
     #[allow(dead_code)]
     fn execute_simple_fastpath_wave(
         simple_candidate_indices: &[usize],
-        analyzed_txs: &[AnalyzedTx],
+        analyzed_map: &HashMap<usize, &AnalyzedTx>,
         arena_contexts: &mut [ArenaTxContext],
         arena: &mut AccountArena,
         idx_to_arena: &HashMap<usize, usize>,
@@ -1870,9 +1871,9 @@ impl StmExecutor {
                 continue;
             }
             
-            // Get the analyzed tx for this index
-            let atx = match analyzed_txs.iter().find(|a| a.tx_idx == tx_idx) {
-                Some(a) => a,
+            // Get the analyzed tx for this index (O(1) HashMap lookup)
+            let atx = match analyzed_map.get(&tx_idx) {
+                Some(a) => *a,
                 None => continue,
             };
             
@@ -2000,6 +2001,12 @@ impl StmExecutor {
             indices
         };
         
+        // T95.1: Build map from tx_idx to AnalyzedTx for O(1) lookup
+        let analyzed_map: HashMap<usize, &AnalyzedTx> = analyzed_txs
+            .iter()
+            .map(|a| (a.tx_idx, a))
+            .collect();
+        
         // Emit candidate metric once at block start
         #[cfg(feature = "metrics")]
         {
@@ -2066,7 +2073,7 @@ impl StmExecutor {
             if self.config.simple_fastpath_enabled {
                 Self::execute_simple_fastpath_wave(
                     &simple_candidate_indices,
-                    &analyzed_txs,
+                    &analyzed_map,
                     &mut arena_contexts,
                     &mut arena,
                     &idx_to_arena,
@@ -3875,13 +3882,19 @@ mod tests {
             .map(|atx| atx.tx_idx)
             .collect();
         
+        // T95.1: Build analyzed_map for O(1) lookup
+        let analyzed_map: HashMap<usize, &AnalyzedTx> = analyzed_txs
+            .iter()
+            .map(|a| (a.tx_idx, a))
+            .collect();
+        
         // T95.1: Create conflict bitmap (reused across waves in production)
         let mut conflict_bitmap = ArenaConflictBitmap::new();
 
         // Execute fast path wave
         StmExecutor::execute_simple_fastpath_wave(
             &simple_candidate_indices,
-            &analyzed_txs,
+            &analyzed_map,
             &mut arena_contexts,
             &mut arena,
             &idx_to_arena,
@@ -3963,13 +3976,19 @@ mod tests {
             .map(|atx| atx.tx_idx)
             .collect();
         
+        // T95.1: Build analyzed_map for O(1) lookup
+        let analyzed_map: HashMap<usize, &AnalyzedTx> = analyzed_txs
+            .iter()
+            .map(|a| (a.tx_idx, a))
+            .collect();
+        
         // T95.1: Create conflict bitmap (reused across waves in production)
         let mut conflict_bitmap = ArenaConflictBitmap::new();
 
         // Execute fast path wave
         StmExecutor::execute_simple_fastpath_wave(
             &simple_candidate_indices,
-            &analyzed_txs,
+            &analyzed_map,
             &mut arena_contexts,
             &mut arena,
             &idx_to_arena,
@@ -4046,13 +4065,19 @@ mod tests {
             .map(|atx| atx.tx_idx)
             .collect();
         
+        // T95.1: Build analyzed_map for O(1) lookup
+        let analyzed_map: HashMap<usize, &AnalyzedTx> = analyzed_txs
+            .iter()
+            .map(|a| (a.tx_idx, a))
+            .collect();
+        
         // T95.1: Create conflict bitmap (reused across waves)
         let mut conflict_bitmap = ArenaConflictBitmap::new();
 
         // Execute first wave - only tx with nonce=0 should succeed
         StmExecutor::execute_simple_fastpath_wave(
             &simple_candidate_indices,
-            &analyzed_txs,
+            &analyzed_map,
             &mut arena_contexts,
             &mut arena,
             &idx_to_arena,
@@ -4070,7 +4095,7 @@ mod tests {
         // Execute second wave - now nonce=1 should succeed
         StmExecutor::execute_simple_fastpath_wave(
             &simple_candidate_indices,
-            &analyzed_txs,
+            &analyzed_map,
             &mut arena_contexts,
             &mut arena,
             &idx_to_arena,
@@ -4084,7 +4109,7 @@ mod tests {
         // Execute third wave
         StmExecutor::execute_simple_fastpath_wave(
             &simple_candidate_indices,
-            &analyzed_txs,
+            &analyzed_map,
             &mut arena_contexts,
             &mut arena,
             &idx_to_arena,
