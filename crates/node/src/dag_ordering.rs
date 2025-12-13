@@ -1,4 +1,4 @@
-//! dag_ordering.rs — T96.0: Real DAG-based block ordering for DagPrimary mode.
+//! dag_ordering.rs — T96.0/T96.1: Real DAG-based block ordering for DagPrimary mode.
 //!
 //! This module provides the DAG-based transaction ordering logic that:
 //! - Respects tx nonces and balances (no invalid ordering)
@@ -15,6 +15,25 @@
 //! 2. **Simple transfer batching**: Simple transfers (no complex state access)
 //!    are grouped to increase the STM fast path hit rate.
 //! 3. **Sender stability**: Within a block, same-sender txs appear contiguously.
+//!
+//! ## T96.1 Integration Points
+//!
+//! In `consensus_runner.rs`, DAG ordering is applied at two locations:
+//!
+//! 1. **Hook #1 — Hybrid batch consumption path**: When `hybrid_batch_used=true` and
+//!    DAG batches were successfully consumed from the ordered queue. This is the
+//!    primary path when the DAG consensus is actively producing ordered batches.
+//!    (See `consensus_runner.rs`, around line 2124 in the `if hybrid_batch_used` branch.)
+//!
+//! 2. **Hook #2 — Mempool/DAG fallback path**: When `hybrid_batch_used=false` (no DAG
+//!    batches available) BUT we're in DagPrimary mode with `EEZO_DAG_ORDERING_ENABLED=1`.
+//!    This ensures transactions collected from the mempool are still ordered properly.
+//!    (See `consensus_runner.rs`, the `else` branch around line 2225.)
+//!
+//! Both paths update the same metrics:
+//! - `eezo_dag_ordered_txs_total`: Count of txs passed through ordering
+//! - `eezo_dag_fastpath_candidates_total`: Simple transfer candidates for STM fast path
+//! - `eezo_dag_nonce_span_hist`: Average nonce span per block
 //!
 //! ## Error Handling
 //!
