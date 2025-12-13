@@ -313,7 +313,8 @@ const ARENA_BITMAP_CAPACITY: usize = 65536;
 
 /// Number of u64 words needed to store ARENA_BITMAP_CAPACITY bits.
 /// 65536 bits / 64 bits per u64 = 1024 words.
-/// Stack size: 2 arrays × 1024 words × 8 bytes = 16 KB total (safe for thread stack).
+/// Bitmap array size: 1024 words × 8 bytes = 8 KB per array (16 KB for both).
+/// Note: Total struct size also includes HashSet overflow fields.
 const ARENA_BITMAP_WORDS: usize = ARENA_BITMAP_CAPACITY / 64;
 
 /// T95.0: Compact bitmap for fast "has arena index been touched?" checks.
@@ -324,9 +325,9 @@ const ARENA_BITMAP_WORDS: usize = ARENA_BITMAP_CAPACITY / 64;
 ///
 /// ## Design
 ///
-/// - Uses a stack-allocated fixed-size array `[u64; 1024]` (65536 bits = 8 KB per array)
-/// - Zero heap allocation in the hot path
-/// - Falls back to `HashSet<u32>` when indices exceed bitmap capacity
+/// - Uses two stack-allocated fixed-size arrays `[u64; 1024]` (65536 bits = 8 KB each, 16 KB total)
+/// - Zero heap allocation in the hot path for bitmap operations
+/// - Falls back to `HashSet<u32>` when indices exceed bitmap capacity (rare)
 /// - Separate tracking for claimed senders (one per wave) and touched accounts
 /// - Cheap reset per wave (memset for arrays + clear HashSet)
 ///
