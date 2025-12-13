@@ -577,6 +577,10 @@ fn is_perf_mode_enabled() -> bool {
     }
 }
 
+/// T94.0: Default early tick threshold when EEZO_BLOCK_MAX_TX is unlimited.
+/// This is a sensible default for typical devnet spam workloads.
+const DEFAULT_EARLY_TICK_THRESHOLD: usize = 250;
+
 /// T94.0: Get the minimum mempool backlog threshold for early tick.
 ///
 /// When the mempool has at least this many transactions, and EEZO_PERF_MODE=1
@@ -588,11 +592,26 @@ fn is_perf_mode_enabled() -> bool {
 /// - Set to 0 to disable early tick (always wait for full interval)
 fn early_tick_threshold(block_max_tx: usize) -> usize {
     match std::env::var("EEZO_EARLY_TICK_THRESHOLD") {
-        Ok(v) => v.parse().unwrap_or(block_max_tx / 2),
+        Ok(v) => {
+            match v.parse::<usize>() {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    log::warn!(
+                        "T94.0: failed to parse EEZO_EARLY_TICK_THRESHOLD='{}': {}, using default",
+                        v, e
+                    );
+                    if block_max_tx == usize::MAX {
+                        DEFAULT_EARLY_TICK_THRESHOLD
+                    } else {
+                        block_max_tx / 2
+                    }
+                }
+            }
+        }
         Err(_) => {
             // Default: half of block_max_tx
             if block_max_tx == usize::MAX {
-                250 // sensible default if BLOCK_MAX_TX is not set
+                DEFAULT_EARLY_TICK_THRESHOLD
             } else {
                 block_max_tx / 2
             }
@@ -4309,7 +4328,7 @@ mod executor_mode_tests {
 
     #[test]
     fn test_early_tick_threshold() {
-        use super::early_tick_threshold;
+        use super::{early_tick_threshold, DEFAULT_EARLY_TICK_THRESHOLD};
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         
         // Test with explicit threshold
@@ -4321,12 +4340,17 @@ mod executor_mode_tests {
         assert_eq!(early_tick_threshold(500), 250);
         assert_eq!(early_tick_threshold(1000), 500);
         
-        // Test with unlimited block_max_tx
-        assert_eq!(early_tick_threshold(usize::MAX), 250);
+        // Test with unlimited block_max_tx (uses DEFAULT_EARLY_TICK_THRESHOLD)
+        assert_eq!(early_tick_threshold(usize::MAX), DEFAULT_EARLY_TICK_THRESHOLD);
         
         // Test with zero threshold (disables early tick)
         std::env::set_var("EEZO_EARLY_TICK_THRESHOLD", "0");
         assert_eq!(early_tick_threshold(500), 0);
+        
+        // Test with invalid value (should use default and log warning)
+        std::env::set_var("EEZO_EARLY_TICK_THRESHOLD", "not_a_number");
+        assert_eq!(early_tick_threshold(500), 250); // falls back to block_max_tx / 2
+        assert_eq!(early_tick_threshold(usize::MAX), DEFAULT_EARLY_TICK_THRESHOLD);
         
         std::env::remove_var("EEZO_EARLY_TICK_THRESHOLD");
     }
