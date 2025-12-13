@@ -39,7 +39,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use bitvec::prelude::*;
 use rayon::prelude::*;
 
 use eezo_ledger::consensus::SingleNode;
@@ -311,6 +310,10 @@ impl WaveFingerprint {
 /// Exceeding this capacity triggers fallback to HashMap.
 const ARENA_BITMAP_CAPACITY: usize = 1024;
 
+/// Number of u64 words needed to store ARENA_BITMAP_CAPACITY bits.
+/// 1024 bits / 64 bits per u64 = 16 words = 128 bytes (fits on stack).
+const ARENA_BITMAP_WORDS: usize = ARENA_BITMAP_CAPACITY / 64;
+
 /// T95.0: Compact bitmap for fast "has arena index been touched?" checks.
 ///
 /// This structure provides O(1) bit operations for conflict detection in the
@@ -319,10 +322,11 @@ const ARENA_BITMAP_CAPACITY: usize = 1024;
 ///
 /// ## Design
 ///
-/// - Uses a fixed-size `BitVec` (1024 bits = 128 bytes) for the common case
+/// - Uses a stack-allocated fixed-size array `[u64; 16]` (1024 bits = 128 bytes)
+/// - Zero heap allocation in the hot path
 /// - Falls back to `HashSet<u32>` when indices exceed bitmap capacity
 /// - Separate tracking for claimed senders (one per wave) and touched accounts
-/// - Cheap reset per wave (clear bitmap + HashSet)
+/// - Cheap reset per wave (memset for arrays + clear HashSet)
 ///
 /// ## Correctness
 ///
@@ -332,18 +336,20 @@ const ARENA_BITMAP_CAPACITY: usize = 1024;
 ///
 /// ## Performance
 ///
-/// - Bitmap check: ~1-2 ns (bit array indexing)
+/// - Bitmap check: ~1-2 ns (bit array indexing, no heap allocation)
 /// - HashMap check: ~30-50 ns (hash + probe)
 /// - Typical speedup: 15-30x for conflict checks when within bitmap range
 #[derive(Clone, Debug)]
 pub struct ArenaConflictBitmap {
     /// Bitmap tracking claimed sender indices (one sender per wave).
     /// Bit i is set if arena index i has been claimed as a sender.
-    claimed_senders_bits: BitVec<u64, Lsb0>,
+    /// Stack-allocated: 16 × 8 bytes = 128 bytes.
+    claimed_senders_bits: [u64; ARENA_BITMAP_WORDS],
     
     /// Bitmap tracking touched account indices (senders + receivers).
     /// Bit i is set if arena index i has been touched.
-    touched_accounts_bits: BitVec<u64, Lsb0>,
+    /// Stack-allocated: 16 × 8 bytes = 128 bytes.
+    touched_accounts_bits: [u64; ARENA_BITMAP_WORDS],
     
     /// Fallback HashSet for sender indices >= ARENA_BITMAP_CAPACITY.
     claimed_senders_overflow: HashSet<u32>,
@@ -363,11 +369,12 @@ impl Default for ArenaConflictBitmap {
 
 impl ArenaConflictBitmap {
     /// Create a new empty conflict bitmap.
+    /// Uses stack-allocated arrays to avoid heap allocation overhead.
     #[inline]
     pub fn new() -> Self {
         Self {
-            claimed_senders_bits: bitvec![u64, Lsb0; 0; ARENA_BITMAP_CAPACITY],
-            touched_accounts_bits: bitvec![u64, Lsb0; 0; ARENA_BITMAP_CAPACITY],
+            claimed_senders_bits: [0u64; ARENA_BITMAP_WORDS],
+            touched_accounts_bits: [0u64; ARENA_BITMAP_WORDS],
             claimed_senders_overflow: HashSet::new(),
             touched_accounts_overflow: HashSet::new(),
             overflow_occurred: false,
@@ -383,8 +390,8 @@ impl ArenaConflictBitmap {
     /// a true count of "blocks with bitmap overflow".
     #[inline]
     pub fn reset(&mut self) {
-        self.claimed_senders_bits.fill(false);
-        self.touched_accounts_bits.fill(false);
+        self.claimed_senders_bits = [0u64; ARENA_BITMAP_WORDS];
+        self.touched_accounts_bits = [0u64; ARENA_BITMAP_WORDS];
         self.claimed_senders_overflow.clear();
         self.touched_accounts_overflow.clear();
     }
@@ -404,7 +411,9 @@ impl ArenaConflictBitmap {
     pub fn is_sender_claimed(&self, idx: u32) -> bool {
         let i = idx as usize;
         if i < ARENA_BITMAP_CAPACITY {
-            self.claimed_senders_bits[i]
+            let word_idx = i / 64;
+            let bit_idx = i % 64;
+            (self.claimed_senders_bits[word_idx] & (1u64 << bit_idx)) != 0
         } else {
             self.claimed_senders_overflow.contains(&idx)
         }
@@ -415,7 +424,9 @@ impl ArenaConflictBitmap {
     pub fn is_account_touched(&self, idx: u32) -> bool {
         let i = idx as usize;
         if i < ARENA_BITMAP_CAPACITY {
-            self.touched_accounts_bits[i]
+            let word_idx = i / 64;
+            let bit_idx = i % 64;
+            (self.touched_accounts_bits[word_idx] & (1u64 << bit_idx)) != 0
         } else {
             self.touched_accounts_overflow.contains(&idx)
         }
@@ -426,7 +437,9 @@ impl ArenaConflictBitmap {
     pub fn claim_sender(&mut self, idx: u32) {
         let i = idx as usize;
         if i < ARENA_BITMAP_CAPACITY {
-            self.claimed_senders_bits.set(i, true);
+            let word_idx = i / 64;
+            let bit_idx = i % 64;
+            self.claimed_senders_bits[word_idx] |= 1u64 << bit_idx;
         } else {
             self.record_overflow();
             self.claimed_senders_overflow.insert(idx);
@@ -438,7 +451,9 @@ impl ArenaConflictBitmap {
     pub fn touch_account(&mut self, idx: u32) {
         let i = idx as usize;
         if i < ARENA_BITMAP_CAPACITY {
-            self.touched_accounts_bits.set(i, true);
+            let word_idx = i / 64;
+            let bit_idx = i % 64;
+            self.touched_accounts_bits[word_idx] |= 1u64 << bit_idx;
         } else {
             self.record_overflow();
             self.touched_accounts_overflow.insert(idx);

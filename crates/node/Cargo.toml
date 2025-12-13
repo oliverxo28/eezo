@@ -65,9 +65,6 @@ dashmap = { version = "6.1", optional = true }
 # T76.5: LRU cache for hybrid de-dup filter
 lru = "0.12"
 
-# T95.0: Compact bitmap for STM conflict pre-screen
-bitvec = "1"
-
 # Metrics / logging
 prometheus = "0.13"
 lazy_static = "1.5"
