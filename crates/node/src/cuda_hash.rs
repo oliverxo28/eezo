@@ -111,11 +111,18 @@ pub fn run_t91_2_cuda_hash_shadow(
 
     match cuda_result {
         Ok(cuda_hashes) => {
+            // T92.0: Time the CPU hashing portion
+            let hash_start = std::time::Instant::now();
+            
             // 7. Compute CPU BLAKE3 hashes as ground truth
             let cpu_hashes: Vec<[u8; 32]> = tx_bytes
                 .iter()
                 .map(|bytes| *blake3::hash(bytes).as_bytes())
                 .collect();
+            
+            // T92.0: Record CPU hash time
+            let hash_elapsed = hash_start.elapsed().as_secs_f64();
+            crate::metrics::hash_cpu_time_inc(hash_elapsed);
 
             // 8. Compare lengths
             if cuda_hashes.len() != cpu_hashes.len() {
