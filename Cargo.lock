@@ -1658,6 +1658,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.21.7",
+ "bitvec",
  "blake3",
  "bytes",
  "chacha20poly1305",
