@@ -2305,18 +2305,18 @@ impl StmExecutor {
             let wave_results: Vec<(usize, ArenaTxContext)> = pending
                 .par_iter()
                 .filter_map(|&(tx_idx, attempt)| {
-                    // T97.1: Use Vec-based lookups instead of HashMap
-                    let analyzed_idx = analyzed_vec.get(tx_idx)?.as_ref()?;
-                    let arena_idx = idx_to_arena_vec.get(tx_idx)?.as_ref()?;
-                    let analyzed = &analyzed_txs[*analyzed_idx];
-                    let ctx = &arena_contexts[*arena_idx];
+                    // T97.1: Use Vec-based lookups with consistent Option handling
+                    let analyzed_idx = analyzed_vec.get(tx_idx).and_then(|&v| v)?;
+                    let arena_idx = idx_to_arena_vec.get(tx_idx).and_then(|&v| v)?;
+                    let analyzed = &analyzed_txs[analyzed_idx];
+                    let ctx = &arena_contexts[arena_idx];
                     let result = Self::execute_tx_with_arena(
                         ctx,
                         analyzed,
                         attempt,
                         &arena_snapshot,
                     );
-                    Some((*arena_idx, result))
+                    Some((arena_idx, result))
                 })
                 .collect();
 
@@ -2572,7 +2572,12 @@ impl StmExecutor {
         // Track committed writes by arena index -> tx_idx
         let mut committed_writes: HashMap<u32, usize> = HashMap::new();
 
-        // Note: pending_indices should already be sorted from the caller
+        // T97.1: Validate that pending_indices is sorted (debug-only assertion)
+        debug_assert!(
+            pending_indices.windows(2).all(|w| w[0] <= w[1]),
+            "pending_indices must be sorted for deterministic conflict detection"
+        );
+        
         let mut wave_size = 0usize;
 
         for &tx_idx in pending_indices {
