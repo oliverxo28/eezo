@@ -1976,6 +1976,121 @@ impl StmExecutor {
         }
     }
 
+    /// T97.1: Optimized fast path execution using Vec-based indices instead of HashMaps.
+    ///
+    /// This is a performance-optimized version of execute_simple_fastpath_wave that:
+    /// - Uses Vec<Option<usize>> for O(1) lookups without hash computation
+    /// - Takes analyzed_txs slice directly instead of HashMap reference
+    /// - Eliminates HashMap lookup overhead in the hot loop
+    ///
+    /// The algorithm is identical to execute_simple_fastpath_wave; only the lookup
+    /// mechanism is changed for better cache locality and reduced overhead.
+    ///
+    /// # Arguments
+    /// * `simple_candidate_indices` - Pre-sorted list of tx indices for simple transfer candidates
+    /// * `analyzed_txs` - Slice of all analyzed transactions
+    /// * `analyzed_vec` - Vec mapping tx_idx -> index in analyzed_txs (None if not analyzed)
+    /// * `arena_contexts` - Arena execution contexts for each tx
+    /// * `arena` - The account arena for this block
+    /// * `idx_to_arena_vec` - Vec mapping tx_idx -> arena_contexts index
+    /// * `conflict_bitmap` - Reusable bitmap for conflict tracking (reset at start)
+    /// * `fastpath_committed` - Set of tx_idx that committed via fast path (updated in place)
+    fn execute_simple_fastpath_wave_v2(
+        simple_candidate_indices: &[usize],
+        analyzed_txs: &[AnalyzedTx],
+        analyzed_vec: &[Option<usize>],
+        arena_contexts: &mut [ArenaTxContext],
+        arena: &mut AccountArena,
+        idx_to_arena_vec: &[Option<usize>],
+        conflict_bitmap: &mut ArenaConflictBitmap,
+        fastpath_committed: &mut HashSet<usize>,
+    ) {
+        let fastpath_start = std::time::Instant::now();
+        
+        // T95.1: Reset the bitmap at wave start (cheap memset, no allocation)
+        conflict_bitmap.reset();
+        
+        // T97.1: Iterate over precomputed candidate indices using Vec-based lookups
+        for &tx_idx in simple_candidate_indices {
+            // T97.1: Use Vec O(1) lookup instead of HashMap
+            let arena_idx = match idx_to_arena_vec.get(tx_idx).and_then(|&v| v) {
+                Some(idx) => idx,
+                None => continue,
+            };
+            let ctx = &mut arena_contexts[arena_idx];
+            
+            // Skip txs that are not pending
+            if ctx.status != TxStatus::NeedsRetry {
+                continue;
+            }
+            
+            // T97.1: Get analyzed tx via Vec lookup (no hash computation)
+            let atx = match analyzed_vec.get(tx_idx).and_then(|&v| v) {
+                Some(analyzed_idx) => &analyzed_txs[analyzed_idx],
+                None => continue,
+            };
+            
+            // Only handle simple transfers via fast path
+            if !atx.kind.is_simple() {
+                continue;
+            }
+            
+            // Check conflict constraints using bitmap O(1) checks
+            if conflict_bitmap.is_sender_claimed(ctx.sender_idx) {
+                continue;
+            }
+            
+            if conflict_bitmap.is_account_touched(ctx.sender_idx) || 
+               conflict_bitmap.is_account_touched(ctx.receiver_idx) {
+                continue;
+            }
+            
+            // Read sender account from arena (O(1) Vec access)
+            let sender_acc = arena.account(ctx.sender_idx);
+            
+            // Validate nonce using cached field from AnalyzedTx
+            if sender_acc.nonce != atx.nonce {
+                continue;
+            }
+            
+            // Validate balance
+            let need = atx.amount.saturating_add(atx.fee);
+            if sender_acc.balance < need {
+                continue;
+            }
+            
+            // Execute the transfer directly on the arena
+            {
+                let sender = arena.account_mut(ctx.sender_idx);
+                sender.balance = sender.balance.saturating_sub(need);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            {
+                let receiver = arena.account_mut(ctx.receiver_idx);
+                receiver.balance = receiver.balance.saturating_add(atx.amount);
+            }
+            arena.record_fee(atx.fee);
+            
+            // Mark as committed
+            ctx.status = TxStatus::Committed;
+            
+            // Record that this tx committed via fast path (for metrics)
+            fastpath_committed.insert(tx_idx);
+            
+            // Claim sender and touch both accounts using bitmap
+            conflict_bitmap.claim_sender(ctx.sender_idx);
+            conflict_bitmap.touch_account(ctx.sender_idx);
+            conflict_bitmap.touch_account(ctx.receiver_idx);
+        }
+        
+        // Emit timing metric
+        #[cfg(feature = "metrics")]
+        {
+            let elapsed = fastpath_start.elapsed().as_secs_f64();
+            crate::metrics::stm_simple_time_add(elapsed);
+        }
+    }
+
     /// T87.4 + T93.3: Execute all transactions using arena-indexed STM kernel.
     ///
     /// This version uses:
@@ -2029,7 +2144,16 @@ impl StmExecutor {
             indices
         };
         
-        // T95.1: Build map from tx_idx to AnalyzedTx for O(1) lookup
+        // T97.1: Build Vec-based index from tx_idx to AnalyzedTx for O(1) lookup
+        // Since tx_idx is 0..n (contiguous), use Vec<Option<usize>> instead of HashMap
+        // This avoids hash computation overhead in the hot loop.
+        let mut analyzed_vec: Vec<Option<usize>> = vec![None; n];
+        for (i, atx) in analyzed_txs.iter().enumerate() {
+            analyzed_vec[atx.tx_idx] = Some(i);
+        }
+        
+        // Also keep the HashMap for compatibility with existing code paths (tests, overlay mode)
+        #[allow(unused)]
         let analyzed_map: HashMap<usize, &AnalyzedTx> = analyzed_txs
             .iter()
             .map(|a| (a.tx_idx, a))
@@ -2051,7 +2175,15 @@ impl StmExecutor {
             .map(|atx| ArenaTxContext::from_analyzed(atx, &mut arena, &base_accounts))
             .collect();
         
-        // Map from tx_idx to arena_contexts index (for failed analysis txs)
+        // T97.1: Build Vec-based index from tx_idx to arena_contexts index for O(1) lookup
+        // Since tx_idx is 0..n (contiguous), use Vec<Option<usize>> instead of HashMap
+        let mut idx_to_arena_vec: Vec<Option<usize>> = vec![None; n];
+        for (arena_idx, ctx) in arena_contexts.iter().enumerate() {
+            idx_to_arena_vec[ctx.tx_idx] = Some(arena_idx);
+        }
+        
+        // Keep HashMap for fallback compatibility (detect_conflicts_arena uses it in tests)
+        #[allow(unused)]
         let idx_to_arena: HashMap<usize, usize> = arena_contexts
             .iter()
             .enumerate()
@@ -2080,18 +2212,25 @@ impl StmExecutor {
         // T95.1: Create conflict bitmap once per block (reused across waves)
         // This avoids 16KB allocation per wave (two 8KB arrays)
         let mut conflict_bitmap = ArenaConflictBitmap::new();
+        
+        // T97.1: Pre-allocate pending Vec to avoid per-wave allocation
+        let mut pending: Vec<(usize, u16)> = Vec::with_capacity(n);
+        
+        // T97.1: Track pending count to avoid repeated scans
+        let mut pending_count = arena_contexts.len();
 
         // Wave-based execution loop
         loop {
             waves_this_block += 1;
             log::debug!("STM(arena): starting wave {}", waves_this_block);
 
-            // Find transactions that need execution in this wave
-            let pending: Vec<(usize, u16)> = arena_contexts
-                .iter()
-                .filter(|c| c.status == TxStatus::NeedsRetry)
-                .map(|c| (c.tx_idx, c.attempt))
-                .collect();
+            // T97.1: Build pending list using pre-allocated Vec
+            pending.clear();
+            for ctx in arena_contexts.iter() {
+                if ctx.status == TxStatus::NeedsRetry {
+                    pending.push((ctx.tx_idx, ctx.attempt));
+                }
+            }
 
             if pending.is_empty() {
                 break;
@@ -2099,29 +2238,30 @@ impl StmExecutor {
 
             // T93.2 + T93.3 + T95.1: Try simple fast path first if enabled
             if self.config.simple_fastpath_enabled {
-                Self::execute_simple_fastpath_wave(
+                // T97.1: Pass Vec-based indices for faster lookup
+                Self::execute_simple_fastpath_wave_v2(
                     &simple_candidate_indices,
-                    &analyzed_map,
+                    &analyzed_txs,
+                    &analyzed_vec,
                     &mut arena_contexts,
                     &mut arena,
-                    &idx_to_arena,
+                    &idx_to_arena_vec,
                     &mut conflict_bitmap,
                     &mut fastpath_committed,
                 );
                 
-                // Collect committed txs from fast path
+                // T97.1: Count committed incrementally without full scan
+                let mut committed_this_wave = 0;
                 for ctx in arena_contexts.iter() {
-                    if ctx.status == TxStatus::Committed {
+                    if ctx.status == TxStatus::Committed && !finally_committed.contains(&ctx.tx_idx) {
                         finally_committed.insert(ctx.tx_idx);
+                        committed_this_wave += 1;
                     }
                 }
+                pending_count = pending_count.saturating_sub(committed_this_wave);
                 
                 // Check if all txs are done after fast path
-                let still_pending = arena_contexts
-                    .iter()
-                    .filter(|c| c.status == TxStatus::NeedsRetry)
-                    .count();
-                if still_pending == 0 {
+                if pending_count == 0 {
                     log::debug!("STM(arena/fastpath): all {} txs committed via fast path", fastpath_committed.len());
                     break;
                 }
@@ -2130,23 +2270,22 @@ impl StmExecutor {
             // Check for max retries before execution
             for &(tx_idx, attempt) in &pending {
                 if attempt >= self.config.max_retries as u16 {
-                    if let Some(&arena_idx) = idx_to_arena.get(&tx_idx) {
+                    // T97.1: Use Vec-based lookup
+                    if let Some(arena_idx) = idx_to_arena_vec[tx_idx] {
                         arena_contexts[arena_idx].status = TxStatus::Aborted;
                         log::warn!("STM(arena): tx {} aborted after {} retries", tx_idx, attempt);
                         aborted_this_block += 1;
+                        pending_count = pending_count.saturating_sub(1);
                     }
                 }
             }
             
-            // Filter out aborted txs
-            let pending: Vec<(usize, u16)> = pending
-                .into_iter()
-                .filter(|&(tx_idx, _)| {
-                    idx_to_arena.get(&tx_idx)
-                        .map(|&idx| arena_contexts[idx].status == TxStatus::NeedsRetry)
-                        .unwrap_or(false)
-                })
-                .collect();
+            // T97.1: Rebuild pending list in-place filtering aborted txs
+            pending.retain(|&(tx_idx, _)| {
+                idx_to_arena_vec[tx_idx]
+                    .map(|idx| arena_contexts[idx].status == TxStatus::NeedsRetry)
+                    .unwrap_or(false)
+            });
             
             if pending.is_empty() {
                 break;
@@ -2162,24 +2301,22 @@ impl StmExecutor {
             // Take a snapshot of the arena for speculative execution
             let arena_snapshot = arena.snapshot();
 
-            // Execute transactions speculatively in parallel
-            // T97.0: Single lookup into analyzed_map, then get arena_idx
+            // T97.1: Execute transactions speculatively using Vec-based lookups
             let wave_results: Vec<(usize, ArenaTxContext)> = pending
                 .par_iter()
                 .filter_map(|&(tx_idx, attempt)| {
-                    // T97.0: Get AnalyzedTx from map first (single HashMap lookup)
-                    analyzed_map.get(&tx_idx).and_then(|analyzed| {
-                        idx_to_arena.get(&tx_idx).map(|&arena_idx| {
-                            let ctx = &arena_contexts[arena_idx];
-                            let result = Self::execute_tx_with_arena(
-                                ctx,
-                                analyzed,
-                                attempt,
-                                &arena_snapshot,
-                            );
-                            (arena_idx, result)
-                        })
-                    })
+                    // T97.1: Use Vec-based lookups with consistent Option handling
+                    let analyzed_idx = analyzed_vec.get(tx_idx).and_then(|&v| v)?;
+                    let arena_idx = idx_to_arena_vec.get(tx_idx).and_then(|&v| v)?;
+                    let analyzed = &analyzed_txs[analyzed_idx];
+                    let ctx = &arena_contexts[arena_idx];
+                    let result = Self::execute_tx_with_arena(
+                        ctx,
+                        analyzed,
+                        attempt,
+                        &arena_snapshot,
+                    );
+                    Some((arena_idx, result))
                 })
                 .collect();
 
@@ -2188,13 +2325,15 @@ impl StmExecutor {
                 arena_contexts[arena_idx] = result;
             }
 
-            // Build sorted pending indices for conflict detection
+            // T97.1: Build pending_indices from pending Vec (already have the indices)
+            // Since pending is processed in insertion order which follows arena_contexts order,
+            // we can sort once here for conflict detection
             let mut pending_indices: Vec<usize> = pending.iter().map(|&(idx, _)| idx).collect();
             pending_indices.sort();
 
-            // T87.4: Detect conflicts using arena-based contexts
+            // T97.1: Detect conflicts using optimized Vec-based lookup
             let wave_build_start = std::time::Instant::now();
-            let conflicts = Self::detect_conflicts_arena(&arena_contexts, &pending_indices, &idx_to_arena);
+            let conflicts = Self::detect_conflicts_arena_v2(&arena_contexts, &pending_indices, &idx_to_arena_vec);
             #[cfg(feature = "metrics")]
             {
                 let wave_build_secs = wave_build_start.elapsed().as_secs_f64();
@@ -2203,9 +2342,9 @@ impl StmExecutor {
             let conflict_set: HashSet<usize> = conflicts.into_iter().collect();
             conflicts_this_block += conflict_set.len() as u64;
 
-            // Process results in tx index order and apply to arena
+            // T97.1: Process results using Vec-based lookup
             for tx_idx in pending_indices {
-                if let Some(&arena_idx) = idx_to_arena.get(&tx_idx) {
+                if let Some(arena_idx) = idx_to_arena_vec[tx_idx] {
                     let ctx = &mut arena_contexts[arena_idx];
                     
                     if ctx.status != TxStatus::Committed {
@@ -2226,16 +2365,13 @@ impl StmExecutor {
                         }
                         
                         finally_committed.insert(tx_idx);
+                        pending_count = pending_count.saturating_sub(1);
                     }
                 }
             }
 
-            // Break if no more pending txs
-            let still_pending = arena_contexts
-                .iter()
-                .filter(|c| c.status == TxStatus::NeedsRetry)
-                .count();
-            if still_pending == 0 {
+            // T97.1: Check pending_count instead of scanning
+            if pending_count == 0 {
                 break;
             }
         }
@@ -2414,6 +2550,72 @@ impl StmExecutor {
         }
 
         // Emit wave size metric
+        #[cfg(feature = "metrics")]
+        {
+            crate::metrics::exec_stm_observe_wave_size(wave_size);
+        }
+
+        conflicts
+    }
+
+    /// T97.1: Optimized conflict detection using Vec-based indices.
+    ///
+    /// Same semantics as detect_conflicts_arena but uses Vec<Option<usize>> 
+    /// for O(1) lookup without hash computation.
+    fn detect_conflicts_arena_v2(
+        contexts: &[ArenaTxContext],
+        pending_indices: &[usize],
+        idx_to_arena_vec: &[Option<usize>],
+    ) -> Vec<usize> {
+        let mut conflicts = Vec::new();
+        
+        // Track committed writes by arena index -> tx_idx
+        let mut committed_writes: HashMap<u32, usize> = HashMap::new();
+
+        // T97.1: Validate that pending_indices is sorted (debug-only assertion)
+        debug_assert!(
+            pending_indices.windows(2).all(|w| w[0] <= w[1]),
+            "pending_indices must be sorted for deterministic conflict detection"
+        );
+        
+        let mut wave_size = 0usize;
+
+        for &tx_idx in pending_indices {
+            let arena_idx = match idx_to_arena_vec.get(tx_idx).and_then(|&v| v) {
+                Some(idx) => idx,
+                None => continue,
+            };
+            let ctx = &contexts[arena_idx];
+            
+            if ctx.status != TxStatus::Committed {
+                continue;
+            }
+
+            let mut has_conflict = false;
+
+            // Check read-after-write conflicts
+            if let Some(&writer_idx) = committed_writes.get(&ctx.sender_idx) {
+                if writer_idx < tx_idx {
+                    has_conflict = true;
+                }
+            }
+            if !has_conflict {
+                if let Some(&writer_idx) = committed_writes.get(&ctx.receiver_idx) {
+                    if writer_idx < tx_idx {
+                        has_conflict = true;
+                    }
+                }
+            }
+
+            if has_conflict {
+                conflicts.push(tx_idx);
+            } else {
+                committed_writes.insert(ctx.sender_idx, tx_idx);
+                committed_writes.insert(ctx.receiver_idx, tx_idx);
+                wave_size += 1;
+            }
+        }
+
         #[cfg(feature = "metrics")]
         {
             crate::metrics::exec_stm_observe_wave_size(wave_size);
