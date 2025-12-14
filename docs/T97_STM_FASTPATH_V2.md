@@ -131,3 +131,74 @@ Expected improvements:
 1. All existing STM tests pass
 2. Fastpath on/off yields identical final ledger state
 3. Determinism preserved across runs
+
+## High-TPS Devnet Preset & Quick TPS Check
+
+### High-TPS Devnet Preset (`high_tps_devnet.env`)
+
+A sourceable environment file that enables all optimizations for maximum TPS:
+
+```bash
+# Key settings in high_tps_devnet.env:
+EEZO_CONSENSUS_MODE=dag-primary
+EEZO_DAG_ORDERING_ENABLED=1
+EEZO_STM_KERNEL_MODE=arena
+EEZO_STM_SIMPLE_FASTPATH_ENABLED=1
+EEZO_STM_WAVE_AGGRESSIVE=1
+EEZO_CUDA_HASH_ENABLED=1
+EEZO_BLOCK_MAX_TX=500
+EEZO_BLOCK_TARGET_TIME_MS=1000
+EEZO_EXEC_LANES=32
+EEZO_EXEC_WAVE_CAP=256
+# ... plus all T82-T96 performance optimizations
+```
+
+Usage:
+```bash
+source high_tps_devnet.env
+./scripts/devnet_dag_primary.sh
+```
+
+### Quick TPS Check (`scripts/quick_tps_check.sh`)
+
+A one-shot script that verifies TPS performance:
+
+```bash
+./scripts/quick_tps_check.sh [TX_COUNT] [TPS_WINDOW_SECONDS]
+```
+
+What it does:
+1. Kills any existing node
+2. Wipes temporary datadir
+3. Sources `high_tps_devnet.env`
+4. Builds and starts a fresh node
+5. Waits for readiness
+6. Runs fund + spam flow (default 2000 tx)
+7. Measures TPS over a 10-second window
+8. Prints metrics snapshot:
+   - STM total time, hash total time, total txs
+   - DAG ordering metrics (enabled flag, ordered tx count)
+   - STM simple fastpath metrics (candidates, fastpath, fallback)
+   - T97.0 Arc-free metrics
+9. Leaves node running for profiler attachment
+
+Example output:
+```
+TPS Measurements:
+  Measured TPS (10s window): 342.50
+  Overall TPS (wall time):   285.71
+  ...
+
+DAG Ordering Metrics:
+  eezo_dag_ordering_enabled:      1
+  eezo_dag_ordered_txs_total:     2000
+
+STM Simple Fastpath Metrics:
+  eezo_stm_simple_fastpath_total: 1850
+  ...
+
+T97.0 Arc-Free Metrics:
+  eezo_stm_tx_arc_clones_total:   0
+  ...
+```
+
