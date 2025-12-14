@@ -131,3 +131,103 @@ Expected improvements:
 1. All existing STM tests pass
 2. Fastpath on/off yields identical final ledger state
 3. Determinism preserved across runs
+
+---
+
+# T97.1 — Vec-Based Index Optimization (Postmortem)
+
+## Problem Identified
+
+After T97.0, while `eezo_stm_tx_arc_clones_total = 0` confirmed Arc cloning was eliminated,
+end-to-end TPS did not improve as expected:
+
+- Fat-block harness: ~190 TPS, STM ~0.88 ms/tx (good)
+- Quick TPS devnet: ~87-139 TPS, STM ~1.25-1.35 ms/tx (worse)
+
+The discrepancy was caused by:
+
+1. **HashMap overhead in hot loops**: `analyzed_map: HashMap<usize, &AnalyzedTx>` and 
+   `idx_to_arena: HashMap<usize, usize>` were being looked up for every tx in every wave.
+   Hash computation adds 30-50 ns per lookup.
+
+2. **Per-wave allocations**: Each wave allocated a new `Vec<(usize, u16)>` for pending txs
+   instead of reusing pre-allocated storage.
+
+3. **Redundant iterations**: After fastpath execution, a full scan of `arena_contexts`
+   was needed to collect committed txs, plus another scan to count pending.
+
+## Root Cause Analysis
+
+In `execute_stm_with_arena()`, for a block with N txs and W waves:
+
+- **Before T97.1**: ~2N HashMap lookups per wave = 2NW total lookups
+- **Before T97.1**: W Vec allocations for pending list
+- **Before T97.1**: 2NW iterations to scan contexts after each wave
+
+For quick_tps with 2000 txs and ~10 waves, this was:
+- 40,000+ HashMap lookups (40,000 × 40ns = ~1.6ms)
+- 10 Vec allocations
+- ~40,000 redundant iterations
+
+## Solution (T97.1)
+
+1. **Vec-based index maps**: Replace `HashMap<usize, &AnalyzedTx>` and `HashMap<usize, usize>`
+   with `Vec<Option<usize>>` for O(1) array indexing without hash computation.
+
+2. **Pre-allocated pending Vec**: Allocate `pending: Vec<(usize, u16)>` once per block with
+   capacity N, then `clear()` and reuse each wave.
+
+3. **Incremental pending tracking**: Track `pending_count` as a counter, decrement on commit,
+   avoiding full scans.
+
+4. **execute_simple_fastpath_wave_v2()**: Optimized fastpath using Vec-based lookups.
+
+5. **detect_conflicts_arena_v2()**: Optimized conflict detection using Vec-based lookups.
+
+## Key Changes
+
+```rust
+// Before: HashMap lookup (hash + probe)
+let atx = analyzed_map.get(&tx_idx)?;
+
+// After: Vec index (direct array access)
+let atx = analyzed_vec[tx_idx].map(|i| &analyzed_txs[i]);
+```
+
+## Expected Improvements
+
+| Metric | Before T97.1 | Target T97.1 |
+|--------|--------------|--------------|
+| Quick TPS (single) | ~87 TPS | ≥160 TPS |
+| Quick TPS (multi) | ~139 TPS | ≥200 TPS |
+| STM per tx | 1.25-1.35 ms | ≤1.0 ms |
+
+## Metrics to Monitor
+
+When debugging TPS issues, check these metrics:
+
+```bash
+# Core execution time
+curl -s http://127.0.0.1:9898/metrics | grep -E "eezo_exec_stm_time_seconds|eezo_stm_simple_time"
+
+# Fastpath effectiveness
+curl -s http://127.0.0.1:9898/metrics | grep -E "eezo_stm_simple_(candidate|fastpath|fallback)_total"
+
+# Wave overhead
+curl -s http://127.0.0.1:9898/metrics | grep -E "eezo_exec_stm_waves"
+
+# Arc clones (should be 0 post-T97.0)
+curl -s http://127.0.0.1:9898/metrics | grep "eezo_stm_tx_arc_clones_total"
+```
+
+A healthy system shows:
+- `fastpath_total / candidate_total > 40%` (good conflict avoidance)
+- `waves_total / blocks_total < 3` (few retries needed)
+- `stm_tx_arc_clones_total = 0` (no Arc cloning)
+
+## Testing
+
+1. All 66 STM unit tests pass
+2. All 7 executor equivalence tests pass
+3. Fastpath on/off produces identical final ledger state
+4. Determinism preserved across runs
