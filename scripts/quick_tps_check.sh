@@ -48,7 +48,13 @@ done
 
 if [[ ${#MISSING_TOOLS[@]} -gt 0 ]]; then
     echo "[quick_tps] ERROR: Missing required tools: ${MISSING_TOOLS[*]}" >&2
-    echo "  Ubuntu/Debian: sudo apt-get install bc jq curl gawk" >&2
+    echo "  Ubuntu/Debian: sudo apt-get install bc jq curl" >&2
+    exit 1
+fi
+
+# Check for required scripts
+if [[ ! -x "$SCRIPT_DIR/t93_fund_and_spam.sh" ]]; then
+    echo "[quick_tps] ERROR: t93_fund_and_spam.sh not found in $SCRIPT_DIR" >&2
     exit 1
 fi
 
@@ -100,7 +106,9 @@ get_metric() {
     local name="$1"
     local url="$2"
     local val
-    val=$(curl -sf "$url" 2>/dev/null | awk -v n="$name" '$1 == n { print $2; exit }' || echo "")
+    # Use grep to find the line first, then extract value with awk
+    # This handles both space and tab separators in Prometheus output
+    val=$(curl -sf "$url" 2>/dev/null | grep "^${name} " | awk '{print $2}' || echo "")
     if [[ -z "$val" ]]; then
         echo "0"
     else
@@ -132,9 +140,11 @@ to_int() {
 wait_for_ready() {
     local url="$1"
     local max_wait="${2:-60}"
+    local http_timeout=15
     local waited=0
     
-    while [[ $waited -lt 15 ]]; do
+    # First wait for HTTP server to be up
+    while [[ $waited -lt $http_timeout ]]; do
         if curl -sf "${url}/health" >/dev/null 2>&1; then
             break
         fi
@@ -142,8 +152,8 @@ wait_for_ready() {
         ((waited++))
     done
     
-    if [[ $waited -ge 15 ]]; then
-        echo "[quick_tps] ERROR: Node HTTP server did not start within 15s" >&2
+    if [[ $waited -ge $http_timeout ]]; then
+        echo "[quick_tps] ERROR: Node HTTP server did not start within ${http_timeout}s" >&2
         return 1
     fi
     
